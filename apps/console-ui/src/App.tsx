@@ -4,6 +4,8 @@ import { EditorState } from "@codemirror/state";
 import { Decoration, EditorView, keymap } from "@codemirror/view";
 
 import { buildPrototypeDocument, type PrototypeLine } from "./prototypeDocument";
+import { CommandPalette } from "./CommandPalette";
+import { useComposerWithPalette } from "./useComposerWithPalette";
 
 function buildLineDecorations(lines: ReadonlyArray<PrototypeLine>) {
   const ranges = lines.map((line) => Decoration.line({ class: `cm-line-${line.kind}` }).range(line.from));
@@ -119,6 +121,8 @@ function TranscriptSurface() {
 }
 
 export function App() {
+  const composer = useComposerWithPalette();
+
   return (
     <>
       <div className="bg-image" />
@@ -127,16 +131,28 @@ export function App() {
         <main className="transcript-shell">
           <TranscriptSurface />
         </main>
-        <section className="composer-shell">
-          <span className="composer-prompt" aria-hidden="true">›</span>
-          <textarea
-            aria-label="Prompt composer"
-            className="composer-input"
-            placeholder="Find and fix a bug in @filename"
-            rows={2}
-            spellCheck={false}
-          />
-        </section>
+        <div className="composer-area">
+          {composer.paletteOpen && (
+            <CommandPalette
+              commands={composer.filteredCommands}
+              selectedIndex={composer.selectedIndex}
+            />
+          )}
+          <section className="composer-shell">
+            <span className="composer-prompt" aria-hidden="true">›</span>
+            <textarea
+              ref={composer.textareaRef}
+              aria-label="Prompt composer"
+              className="composer-input"
+              placeholder="Find and fix a bug in @filename"
+              rows={2}
+              spellCheck={false}
+              value={composer.value}
+              onChange={composer.onChange}
+              onKeyDown={composer.onKeyDown}
+            />
+          </section>
+        </div>
         <footer className="status-line">gpt-5.3-codex high · 17% left · C:\Projects\GLP4</footer>
       </div>
     </>
