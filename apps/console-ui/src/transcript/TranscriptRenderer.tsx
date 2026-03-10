@@ -54,7 +54,7 @@ function buildEditorTheme() {
   return EditorView.theme(
     {
       "&": {
-        height: "100%",
+        height: "auto",
         color: "#c5ccd3",
         backgroundColor: "transparent",
         fontFamily:
@@ -62,7 +62,7 @@ function buildEditorTheme() {
         fontSize: "15px",
       },
       ".cm-scroller": {
-        overflow: "auto",
+        overflow: "visible",
         padding: "18px 0 0",
         lineHeight: "1.55",
       },
