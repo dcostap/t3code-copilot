@@ -5,13 +5,14 @@ export interface SlashCommand {
 }
 
 export const slashCommands: ReadonlyArray<SlashCommand> = [
-  { id: "help", label: "/help", description: "Show available commands" },
-  { id: "clear", label: "/clear", description: "Clear the transcript" },
-  { id: "model", label: "/model", description: "Switch model" },
-  { id: "compact", label: "/compact", description: "Toggle compact mode" },
-  { id: "context", label: "/context", description: "Add context files" },
-  { id: "settings", label: "/settings", description: "Open settings" },
-  { id: "history", label: "/history", description: "Browse session history" },
+  { id: "model", label: "/model", description: "choose what model and reasoning effort to use" },
+  { id: "fast", label: "/fast", description: "toggle fast mode to enable fastest inference at 2X plan usage" },
+  { id: "permissions", label: "/permissions", description: "choose what the agent is allowed to do" },
+  { id: "context", label: "/context", description: "add files or directories as context" },
+  { id: "compact", label: "/compact", description: "toggle compact mode for the transcript" },
+  { id: "review", label: "/review", description: "review my current changes and find issues" },
+  { id: "clear", label: "/clear", description: "clear the transcript" },
+  { id: "help", label: "/help", description: "show available commands" },
 ];
 
 /** Simple substring match on command id. */
