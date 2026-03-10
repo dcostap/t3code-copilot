@@ -1,3 +1,3 @@
 export { type TranscriptBlock } from "./TranscriptBlock";
 export { TranscriptRenderer } from "./TranscriptRenderer";
-export { buildDemoTranscript } from "./demoTranscript";
+export { threadToTranscriptBlocks } from "./orchestrationTranscript";

@@ -80,6 +80,19 @@ export interface ApprovalRequestBlock {
   readonly resolved?: "accepted" | "declined";
 }
 
+export interface UserInputRequestBlock {
+  readonly type: "user-input-request";
+  readonly requestId: string;
+  readonly questions: ReadonlyArray<{
+    readonly header: string;
+    readonly question: string;
+    readonly options: ReadonlyArray<{
+      readonly label: string;
+      readonly description: string;
+    }>;
+  }>;
+}
+
 export interface PlanBlock {
   readonly type: "plan";
   readonly markdown: string;
@@ -102,6 +115,7 @@ export type TranscriptBlock =
   | CommandExecBlock
   | FileDiffBlock
   | ApprovalRequestBlock
+  | UserInputRequestBlock
   | PlanBlock
   | DividerBlock
   | StatusBlock;
@@ -179,6 +193,21 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
       ];
       if (block.detail) {
         lines.push({ text: `    ${block.detail}`, kind: "approvalPrompt" });
+      }
+      return lines;
+    }
+
+    case "user-input-request": {
+      const lines: AnnotatedLine[] = [
+        { text: "[?] User input requested", kind: "approvalPrompt" },
+      ];
+      for (const question of block.questions) {
+        lines.push({ text: `    ${question.header}: ${question.question}`, kind: "approvalPrompt" });
+        for (const option of question.options) {
+          lines.push(
+            { text: `      - ${option.label}: ${option.description}`, kind: "approvalPrompt" },
+          );
+        }
       }
       return lines;
     }

@@ -45,38 +45,49 @@ body {
 }
 
 .console-shell {
-  position: relative;
+  position: fixed;
+  inset: 0;
   z-index: 2;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto auto;
-  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   padding: 8px 0 0;
 }
 
-.transcript-shell {
+.conversation-scroll {
+  flex: 1 1 0;
   min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 6px 0 0;
+}
+
+.transcript-shell {
   padding: 0 6px;
 }
 
 .transcript-surface {
-  height: 100%;
+  min-height: 100%;
 }
 
 /* ── Composer area (palette + input) ──────────────────── */
 
 .composer-area {
   position: relative;
+  margin-top: 8px;
+  background:
+    linear-gradient(to bottom, rgba(17, 20, 25, 0.92), rgba(17, 20, 25, 0.98));
+  border-top: 1px solid rgba(95, 103, 111, 0.28);
+  box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.26);
 }
 
 /* ── Command Palette ──────────────────────────────────── */
 
 .palette {
-  position: absolute;
-  bottom: 100%;
-  left: 12px;
-  right: 12px;
+  margin: 0 12px;
   padding: 6px 0;
   background: #12151a;
+  border: 1px solid rgba(95, 103, 111, 0.22);
 }
 
 .palette-row {
@@ -112,7 +123,7 @@ body {
   display: flex;
   align-items: flex-start;
   gap: 0;
-  padding: 10px 12px 0;
+  padding: 10px 12px 12px;
 }
 
 .composer-prompt {
@@ -126,11 +137,13 @@ body {
 
 .composer-input {
   flex: 1;
-  min-height: 54px;
+  min-height: 24px;
+  max-height: 50vh;
   padding: 4px 10px 0 2px;
   border: 0;
   outline: none;
   resize: none;
+  overflow-y: hidden;
   background: transparent;
   color: #d6dbe0;
   font: inherit;
@@ -145,6 +158,7 @@ body {
 
 .status-line {
   padding: 6px 12px 10px;
+  background: rgba(17, 20, 25, 0.98);
   color: #555b62;
   font-size: 13px;
   line-height: 1.2;
