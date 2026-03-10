@@ -1,0 +1,107 @@
+:root {
+  color-scheme: dark;
+  font-family: "Cascadia Code", "Cascadia Mono", "Iosevka Term", "JetBrains Mono", Consolas, monospace;
+  font-size: 15px;
+  background-color: #0b0d10;
+  color: #cfd4d9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100%;
+  background: none;
+}
+
+/* Background image layer — matches Windows Terminal backgroundImageOpacity: 0.09 */
+.bg-image {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background: url("/bg.png") center / cover no-repeat;
+  opacity: 0.19;
+  filter: blur(1px);
+  pointer-events: none;
+}
+
+/* Subtle colour gradient overlay */
+.bg-gradient {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  background:
+    radial-gradient(circle at top left, rgba(108, 48, 31, 0.10), transparent 28%),
+    radial-gradient(circle at 65% 22%, rgba(23, 77, 57, 0.08), transparent 26%);
+  pointer-events: none;
+}
+
+.console-shell {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  height: 100%;
+  padding: 8px 0 0;
+}
+
+.transcript-shell {
+  min-height: 0;
+  padding: 0 6px;
+}
+
+.transcript-surface {
+  height: 100%;
+}
+
+/* ── Composer ──────────────────────────────────────────── */
+
+.composer-shell {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  padding: 10px 12px 0;
+}
+
+.composer-prompt {
+  flex-shrink: 0;
+  padding: 4px 6px 0 12px;
+  color: #757b82;
+  font-size: 15px;
+  line-height: 1.45;
+  user-select: none;
+}
+
+.composer-input {
+  flex: 1;
+  min-height: 54px;
+  padding: 4px 10px 0 2px;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: #d6dbe0;
+  font: inherit;
+  line-height: 1.45;
+}
+
+.composer-input::placeholder {
+  color: #555b62;
+}
+
+/* ── Status bar ───────────────────────────────────────── */
+
+.status-line {
+  padding: 6px 12px 10px;
+  color: #555b62;
+  font-size: 13px;
+  line-height: 1.2;
+}
