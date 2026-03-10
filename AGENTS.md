@@ -1,53 +1,80 @@
 # AGENTS.md
 
-## Task Completion Requirements
+## Purpose
 
-- Both `bun lint` and `bun typecheck` must pass before considering tasks completed.
-- NEVER run `bun test`. Always use `bun run test` (runs Vitest).
+This fork keeps the existing desktop stack and multi-provider backend, and adds a new frontend direction alongside the current one.
 
-## Project Snapshot
+The goal is to build a cleaner, more intentional coding-agent desktop app:
 
-T3 Code is a minimal web GUI for using code agents like Codex and Claude Code (coming soon).
+- dark, restrained, monospace-first
+- one main transcript column
+- bottom composer dock
+- slash commands and command palette
+- structured blocks for tool calls, patches, plans, and reasoning
+- almost no chrome
+- keyboard-first, mouse-capable
+- fast enough to feel like a CLI
 
-This repository is a VERY EARLY WIP. Proposing sweeping changes that improve long-term maintainability is encouraged.
+This is not meant to evolve into a generic chat dashboard. The target is a focused agent console with strong transcript UX.
+
+## Product Direction
+
+- Keep the backend stack, provider integrations, event model, and desktop packaging flow.
+- Keep the existing frontend in the repo while building a new frontend alongside it.
+- Make the new frontend the main product surface over time, without requiring immediate deletion of the current one.
+- Reuse pieces of the existing frontend only when they are clearly useful. Do not inherit old UI patterns by default.
+- Favor simple, text-first interactions over dense control surfaces.
+- The transcript is the product. Input, streaming, diffs, approvals, plans, and tool activity should all support transcript quality first.
 
 ## Core Priorities
 
-1. Performance first.
-2. Reliability first.
-3. Keep behavior predictable under load and during failures (session restarts, reconnects, partial streams).
+1. Product clarity over feature sprawl.
+2. Responsiveness over ornamental UI.
+3. Predictable streaming and transcript behavior over clever rendering.
+4. Strong local-first agent workflows over generic SaaS assumptions.
+5. Long-term maintainability over quick UI hacks.
 
-If a tradeoff is required, choose correctness and robustness over short-term convenience.
+If a tradeoff is required, choose coherence, reliability, and transcript quality.
 
-## Maintainability
+## Engineering Expectations
 
-Long term maintainability is a core priority. If you add new functionality, first check if there are shared logic that can be extracted to a separate module. Duplicate logic across mulitple files is a code smell and should be avoided. Don't be afraid to change existing code. Don't take shortcuts by just adding local logic to solve a problem.
+- Do not treat the existing web UI as the design source of truth.
+- Do not assume the current frontend must be rewritten in place. Parallel frontend development is a valid and preferred path.
+- Build new UI flows intentionally from first principles.
+- Preserve the provider/runtime boundary. Provider-specific quirks belong in the backend adapter layer, not in the frontend.
+- Keep shared contracts canonical. If the frontend needs new behavior, prefer evolving contracts and runtime events cleanly rather than inventing ad hoc client state.
+- Avoid duplicating logic across frontend surfaces. Extract shared primitives when behavior is reused.
+- Keep the UI visually restrained. No generic enterprise dashboard patterns.
 
 ## Package Roles
 
-- `apps/server`: Node.js WebSocket server. Wraps Codex app-server (JSON-RPC over stdio), serves the React web app, and manages provider sessions.
-- `apps/web`: React/Vite UI. Owns session UX, conversation/event rendering, and client-side state. Connects to the server via WebSocket.
-- `packages/contracts`: Shared effect/Schema schemas and TypeScript contracts for provider events, WebSocket protocol, and model/session types. Keep this package schema-only — no runtime logic.
-- `packages/shared`: Shared runtime utilities consumed by both server and web. Uses explicit subpath exports (e.g. `@t3tools/shared/git`) — no barrel index.
+- `apps/server`: canonical provider runtime and WebSocket backend. This is the core integration layer for Codex, Copilot, and future providers.
+- `apps/desktop`: desktop shell and native integration surface.
+- `apps/web`: current frontend surface. Keep it available while building the new product UI in parallel.
+- `packages/contracts`: canonical schemas and protocol contracts shared by backend and frontend.
+- `packages/shared`: shared runtime utilities used across packages.
 
-## Codex App Server (Important)
+## Backend Boundary
 
-T3 Code is currently Codex-first. The server starts `codex app-server` (JSON-RPC over stdio) per provider session, then streams structured events to the browser through WebSocket push messages.
+The backend is a major reason this fork exists. Protect these qualities:
 
-How we use it in this codebase:
+- provider abstraction
+- canonical runtime events
+- resumable sessions
+- approval and user-input flows
+- provider-specific capability handling
 
-- Session startup/resume and turn lifecycle are brokered in `apps/server/src/codexAppServerManager.ts`.
-- Provider dispatch and thread event logging are coordinated in `apps/server/src/providerManager.ts`.
-- WebSocket server routes NativeApi methods in `apps/server/src/wsServer.ts`.
-- Web app consumes orchestration domain events via WebSocket push on channel `orchestration.domainEvent` (provider runtime activity is projected into orchestration events server-side).
+Frontend work should adapt to this backend cleanly, not bypass it.
 
-Docs:
+## Completion Requirements
 
-- Codex App Server docs: https://developers.openai.com/codex/sdk/#app-server
+- `bun lint` must pass before considering work complete.
+- `bun typecheck` must pass before considering work complete.
+- Never use `bun test`; use `bun run test`.
 
-## Reference Repos
+## Practical Notes
 
-- Open-source Codex repo: https://github.com/openai/codex
-- Codex-Monitor (Tauri, feature-complete, strong reference implementation): https://github.com/Dimillian/CodexMonitor
-
-Use these as implementation references when designing protocol handling, UX flows, and operational safeguards.
+- Prefer evolving this fork over building parallel prototypes in the old TUI repo.
+- Prefer adding the new frontend beside the existing one rather than forcing a risky in-place rewrite.
+- When making UX decisions, bias toward the desired product feel, not toward preserving legacy frontend behavior.
+- When in doubt, make the app feel more like a sharp local instrument and less like a web app in a window.
