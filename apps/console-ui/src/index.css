@@ -70,64 +70,39 @@ body {
 
 /* ── Command Palette ──────────────────────────────────── */
 
-.palette-container {
+.palette {
   position: absolute;
   bottom: 100%;
   left: 12px;
   right: 12px;
-  margin-bottom: 4px;
-  background: rgba(18, 21, 26, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 6px;
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  overflow: hidden;
+  padding: 6px 0;
 }
 
-.palette-list {
-  list-style: none;
-  margin: 0;
-  padding: 4px 0;
-}
-
-.palette-item {
+.palette-row {
   display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 6px 14px;
-  cursor: default;
-  transition: background-color 0.08s;
+  gap: 24px;
+  padding: 2px 14px;
+  line-height: 1.55;
 }
 
-.palette-item--selected {
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.palette-label {
-  color: #7db8f0;
-  font-weight: 500;
+.palette-cmd {
   flex-shrink: 0;
+  min-width: 180px;
+  color: #5aa8f3;
 }
 
 .palette-desc {
-  color: #6b7280;
-  font-size: 13px;
-}
-
-.palette-hint {
-  padding: 5px 14px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
-  color: #4b5058;
-  font-size: 11px;
-}
-
-.palette-hint kbd {
-  padding: 1px 4px;
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.05);
   color: #5f676f;
-  font-family: inherit;
-  font-size: 11px;
+  font-size: 14px;
+}
+
+.palette-row--active .palette-cmd {
+  color: #8cc4f7;
+  font-weight: 600;
+}
+
+.palette-row--active .palette-desc {
+  color: #8b929a;
 }
 
 /* ── Composer ──────────────────────────────────────────── */
