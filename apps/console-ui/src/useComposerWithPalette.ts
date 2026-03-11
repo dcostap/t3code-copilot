@@ -1,10 +1,10 @@
 import { useCallback, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
-import { filterCommands, type SlashCommand } from "./slashCommands";
+import { filterCommands, type PaletteCommand } from "./slashCommands";
 
 export interface ComposerPaletteState {
   readonly value: string;
   readonly paletteOpen: boolean;
-  readonly filteredCommands: ReadonlyArray<SlashCommand>;
+  readonly filteredCommands: ReadonlyArray<PaletteCommand>;
   readonly selectedIndex: number;
   readonly textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   onChange(e: ChangeEvent<HTMLTextAreaElement>): void;
@@ -56,7 +56,7 @@ export function useComposerWithPalette(options: UseComposerWithPaletteOptions = 
   }, [options, value]);
 
   const acceptCommand = useCallback(
-    (cmd: SlashCommand) => {
+    (cmd: PaletteCommand) => {
       setValue(cmd.label + " ");
       setSelectedIndex(0);
       requestAnimationFrame(() => {
