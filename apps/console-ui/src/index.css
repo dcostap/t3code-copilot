@@ -1,6 +1,6 @@
 :root {
   color-scheme: dark;
-  font-family: "Cascadia Code", "Cascadia Mono", "Iosevka Term", "JetBrains Mono", Consolas, monospace;
+  font-family: "Cascadia Mono", "Cascadia Code", "Iosevka Term", "JetBrains Mono", Consolas, monospace;
   font-size: 15px;
   background-color: #111419;
   color: #cfd4d9;
@@ -77,12 +77,52 @@ body {
 
 /* ── Command Palette ──────────────────────────────────── */
 
-.transcript-palette {
-  position: sticky;
-  bottom: 14px;
-  z-index: 3;
-  margin: -8px 0 0;
-  padding: 0 22px 12px;
+.palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 10, 13, 0.42);
+  backdrop-filter: blur(1px);
+}
+
+.palette-window {
+  position: relative;
+  width: min(720px, 100%);
+  overflow: visible;
+  background: rgba(18, 21, 26, 0.96);
+  border: 1px solid rgba(95, 103, 111, 0.3);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
+}
+
+.palette-search {
+  width: 100%;
+  padding: 16px 18px 15px;
+  border: 0;
+  border-bottom: 1px solid rgba(95, 103, 111, 0.24);
+  outline: none;
+  background: transparent;
+  color: #d6dbe0;
+  font: inherit;
+}
+
+.palette-search::placeholder {
+  color: #5f676f;
+}
+
+.palette-results {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: -1px;
+  right: -1px;
+  max-height: min(420px, 55vh);
+  overflow-y: auto;
+  background: rgba(18, 21, 26, 0.96);
+  border: 1px solid rgba(95, 103, 111, 0.3);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
 }
 
 .palette {
@@ -95,20 +135,37 @@ body {
 
 .palette-row {
   display: flex;
-  gap: 24px;
-  padding: 2px 14px;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 14px;
+  border: 0;
+  background: transparent;
+  text-align: left;
   line-height: 1.55;
+  font: inherit;
+  cursor: pointer;
+}
+
+.palette-marker {
+  flex-shrink: 0;
+  width: 1ch;
+  color: #757b82;
 }
 
 .palette-cmd {
   flex-shrink: 0;
-  min-width: 180px;
+  min-width: 170px;
   color: #5aa8f3;
 }
 
 .palette-desc {
+  flex: 1;
   color: #5f676f;
   font-size: 14px;
+}
+
+.palette-row--active .palette-marker {
+  color: #8cc4f7;
 }
 
 .palette-row--active .palette-cmd {
@@ -118,6 +175,11 @@ body {
 
 .palette-row--active .palette-desc {
   color: #8b929a;
+}
+
+.palette-empty {
+  padding: 16px 18px 18px;
+  color: #5f676f;
 }
 
 /* ── Status bar ───────────────────────────────────────── */

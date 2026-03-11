@@ -10,8 +10,6 @@ import {
 } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, keymap } from "@codemirror/view";
 
-import { CommandPalette } from "../CommandPalette";
-import { filterCommands, type SlashCommand } from "../slashCommands";
 import { blockToLines, type AnnotatedLine, type LineKind, type TranscriptBlock } from "./TranscriptBlock";
 
 interface PositionedLine {
@@ -139,13 +137,13 @@ function buildEditorTheme() {
         color: "#c5ccd3",
         backgroundColor: "transparent",
         fontFamily:
-          '"Cascadia Code", "Cascadia Mono", "Iosevka Term", "JetBrains Mono", Consolas, monospace',
+          '"Cascadia Mono", "Cascadia Code", "Iosevka Term", "JetBrains Mono", Consolas, monospace',
         fontSize: "15px",
       },
       ".cm-scroller": {
         overflow: "visible",
         padding: "18px 0 18px",
-        lineHeight: "1.55",
+        lineHeight: "1.3",
       },
       ".cm-content": {
         padding: "0 22px 18px",
@@ -255,31 +253,11 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const draftRef = useRef("");
     const onSubmitRef = useRef(onSubmit);
     const [draft, setDraft] = useState("");
-    const [selectedIndex, setSelectedIndex] = useState(0);
-
-    const filteredCommands = useMemo(
-      () => (draft.startsWith("/") ? filterCommands(draft.slice(1)) : []),
-      [draft],
-    );
-    const paletteOpen = draft.startsWith("/") && filteredCommands.length > 0;
-
-    const filteredCommandsRef = useRef<ReadonlyArray<SlashCommand>>([]);
-    const selectedIndexRef = useRef(0);
 
     useEffect(() => {
       draftRef.current = draft;
       onSubmitRef.current = onSubmit;
-      filteredCommandsRef.current = filteredCommands;
-      selectedIndexRef.current = selectedIndex;
-    }, [draft, filteredCommands, onSubmit, selectedIndex]);
-
-    useEffect(() => {
-      if (!paletteOpen) {
-        setSelectedIndex(0);
-      } else if (selectedIndex >= filteredCommands.length) {
-        setSelectedIndex(0);
-      }
-    }, [filteredCommands.length, paletteOpen, selectedIndex]);
+    }, [draft, onSubmit]);
 
     const docModel = useMemo(() => buildTranscriptDocument(blocks, draft), [blocks, draft]);
 
@@ -329,27 +307,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         try {
           await onSubmitRef.current?.(value);
           replaceDraft("");
-          setSelectedIndex(0);
         } finally {
           submittingRef.current = false;
         }
 
-        return true;
-      };
-
-      const acceptSelectedCommand = () => {
-        const commands = filteredCommandsRef.current;
-        if (commands.length === 0) {
-          return false;
-        }
-
-        const command = commands[selectedIndexRef.current];
-        if (!command) {
-          return false;
-        }
-
-        replaceDraft(`${command.label} `);
-        setSelectedIndex(0);
         return true;
       };
 
@@ -375,45 +336,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           }),
           keymap.of([
             {
-              key: "ArrowDown",
-              run() {
-                const commands = filteredCommandsRef.current;
-                if (draftRef.current.startsWith("/") && commands.length > 0) {
-                  setSelectedIndex((index) => (index + 1) % commands.length);
-                  return true;
-                }
-                return false;
-              },
-            },
-            {
-              key: "ArrowUp",
-              run() {
-                const commands = filteredCommandsRef.current;
-                if (draftRef.current.startsWith("/") && commands.length > 0) {
-                  setSelectedIndex((index) => (index - 1 + commands.length) % commands.length);
-                  return true;
-                }
-                return false;
-              },
-            },
-            {
               key: "Enter",
               run() {
-                if (draftRef.current.startsWith("/") && filteredCommandsRef.current.length > 0) {
-                  return acceptSelectedCommand();
-                }
-
                 void submitDraft();
                 return true;
-              },
-            },
-            {
-              key: "Tab",
-              run() {
-                if (draftRef.current.startsWith("/") && filteredCommandsRef.current.length > 0) {
-                  return acceptSelectedCommand();
-                }
-                return false;
               },
             },
           ]),
@@ -433,7 +359,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             if (nextDraft !== draftRef.current) {
               draftRef.current = nextDraft;
               setDraft(nextDraft);
-              setSelectedIndex(0);
             }
 
             if ((update.selectionSet || update.docChanged) && selectionInsidePrompt(update.view)) {
@@ -549,11 +474,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     return (
       <div className="transcript-surface">
         <div className="transcript-editor" ref={editorRef} />
-        {paletteOpen && (
-          <div className="transcript-palette">
-            <CommandPalette commands={filteredCommands} selectedIndex={selectedIndex} />
-          </div>
-        )}
       </div>
     );
   },
