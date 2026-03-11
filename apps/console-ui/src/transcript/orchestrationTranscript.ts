@@ -8,6 +8,8 @@ import type { TranscriptBlock } from "./TranscriptBlock";
 interface TimelineEntry {
   readonly id: string;
   readonly createdAt: string;
+  readonly source: "message" | "plan" | "activity";
+  readonly sequence?: number;
   readonly blocks: ReadonlyArray<TranscriptBlock>;
 }
 
@@ -330,6 +332,11 @@ function activityToBlocks(activity: OrchestrationThreadActivity): TranscriptBloc
 }
 
 function compareByCreatedAt(left: TimelineEntry, right: TimelineEntry) {
+  if (left.source === "activity" && right.source === "activity") {
+    if (left.sequence !== undefined && right.sequence !== undefined && left.sequence !== right.sequence) {
+      return left.sequence - right.sequence;
+    }
+  }
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
@@ -373,6 +380,7 @@ export function threadToTranscriptBlocks(thread: OrchestrationThread): Transcrip
     entries.push({
       id: `message:${message.id}`,
       createdAt: message.createdAt,
+      source: "message",
       blocks,
     });
   }
@@ -381,6 +389,7 @@ export function threadToTranscriptBlocks(thread: OrchestrationThread): Transcrip
     entries.push({
       id: `plan:${proposedPlan.id}`,
       createdAt: proposedPlan.createdAt,
+      source: "plan",
       blocks: [{ type: "plan", markdown: proposedPlan.planMarkdown }],
     });
   }
@@ -389,6 +398,8 @@ export function threadToTranscriptBlocks(thread: OrchestrationThread): Transcrip
     entries.push({
       id: `activity:${activity.id}`,
       createdAt: activity.createdAt,
+      source: "activity",
+      ...(activity.sequence !== undefined ? { sequence: activity.sequence } : {}),
       blocks: activityToBlocks(activity),
     });
   }
