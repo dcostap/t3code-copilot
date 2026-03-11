@@ -97,4 +97,68 @@ describe("threadToTranscriptBlocks", () => {
       },
     ]);
   });
+
+  it("groups contiguous work activity into one work-group block", () => {
+    const snapshot = buildDemoSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-work-1"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "Search workspace started",
+          payload: {
+            itemType: "web_search",
+            title: "Search workspace",
+            status: "inProgress",
+            data: { query: "transcript renderer" },
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:00.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-work-2"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "Search workspace complete",
+          payload: {
+            itemType: "web_search",
+            title: "Search workspace",
+            status: "completed",
+            detail: "Matched App.tsx and TranscriptRenderer.tsx.",
+            data: { query: "transcript renderer" },
+          },
+          turnId: null,
+          sequence: 2,
+          createdAt: "2026-03-11T09:00:02.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "work-group",
+        title: "Search workspace",
+        status: "done",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        endedAt: "2026-03-11T09:00:02.000Z",
+        items: [
+          {
+            kind: "tool",
+            label: "Search workspace",
+            status: "done",
+            detail: "Matched App.tsx and TranscriptRenderer.tsx.",
+          },
+        ],
+      },
+    ]);
+  });
 });

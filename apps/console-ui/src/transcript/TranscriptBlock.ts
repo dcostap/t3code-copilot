@@ -13,6 +13,9 @@ export type LineKind =
   | "meta"
   | "list"
   | "attachmentPanel"
+  | "workGroupSeparator"
+  | "workGroupHeader"
+  | "workGroupFooter"
   | "promptInput"
   | "promptSeparator"
   | "toolCall"
@@ -76,6 +79,26 @@ export interface CommandExecBlock {
   readonly output?: string;
 }
 
+export interface WorkGroupItem {
+  readonly kind: "tool" | "command";
+  readonly label: string;
+  readonly status: "running" | "done" | "error" | "declined";
+  readonly detail?: string;
+  readonly command?: string;
+  readonly exitCode?: number;
+  readonly output?: string;
+  readonly changedFiles?: ReadonlyArray<string>;
+}
+
+export interface WorkGroupBlock {
+  readonly type: "work-group";
+  readonly title?: string;
+  readonly status: "running" | "done" | "error" | "declined";
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly items: ReadonlyArray<WorkGroupItem>;
+}
+
 export interface FileDiffBlock {
   readonly type: "file-diff";
   readonly path: string;
@@ -125,6 +148,7 @@ export type TranscriptBlock =
   | ToolCallBlock
   | ToolResultBlock
   | CommandExecBlock
+  | WorkGroupBlock
   | FileDiffBlock
   | ApprovalRequestBlock
   | UserInputRequestBlock
@@ -136,6 +160,89 @@ export type TranscriptBlock =
 
 function wrapLines(text: string, kind: LineKind): AnnotatedLine[] {
   return text.split("\n").map((line) => ({ text: line, kind }));
+}
+
+function prefixWrappedLines(
+  text: string,
+  kind: LineKind,
+  prefix: string,
+): AnnotatedLine[] {
+  return text.split("\n").map((line) => ({ text: `${prefix}${line}`, kind }));
+}
+
+function formatElapsedDuration(ms: number) {
+  const safeMs = Number.isFinite(ms) ? Math.max(0, ms) : 0;
+  if (safeMs < 60_000) {
+    return `${(safeMs / 1_000).toFixed(safeMs >= 10_000 ? 0 : 1)}s`;
+  }
+
+  const totalSeconds = Math.round(safeMs / 1_000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+}
+
+function formatWorkGroupFooter(block: WorkGroupBlock) {
+  const startedAtMs = Date.parse(block.startedAt);
+  const endedAtMs = Date.parse(block.endedAt);
+  const elapsedLabel = formatElapsedDuration(endedAtMs - startedAtMs);
+
+  switch (block.status) {
+    case "running":
+      return `running for ${elapsedLabel}`;
+    case "error":
+      return `failed after ${elapsedLabel}`;
+    case "declined":
+      return `declined after ${elapsedLabel}`;
+    default:
+      return `completed in ${elapsedLabel}`;
+  }
+}
+
+function workItemToLines(
+  item: WorkGroupItem,
+  collapseLabel: boolean,
+): AnnotatedLine[] {
+  const statusIcon =
+    item.status === "running" ? "⟳" : item.status === "done" ? "✓" : "✗";
+  const lines: AnnotatedLine[] = [];
+
+  if (!collapseLabel) {
+    lines.push({ text: `  • ${statusIcon} ${item.label}`, kind: "toolCall" });
+  }
+
+  if (item.command) {
+    const exitLabel = item.exitCode !== undefined ? ` [exit ${item.exitCode}]` : "";
+    lines.push({
+      text: `    $ ${item.command}${exitLabel}`,
+      kind: "commandExec",
+    });
+  }
+
+  if (item.detail) {
+    lines.push({ text: `    ${item.detail}`, kind: "toolResult" });
+  }
+
+  if (item.output) {
+    lines.push(...prefixWrappedLines(item.output, "commandOutput", "    "));
+  }
+
+  if (item.changedFiles && item.changedFiles.length > 0) {
+    const [firstPath, ...restPaths] = item.changedFiles;
+    lines.push({
+      text: `    changed: ${firstPath}`,
+      kind: "toolResult",
+    });
+    for (const path of restPaths) {
+      lines.push({ text: `      ${path}`, kind: "toolResult" });
+    }
+  }
+
+  if (lines.length === 0) {
+    lines.push({ text: `  • ${statusIcon} ${item.label}`, kind: "toolCall" });
+  }
+
+  return lines;
 }
 
 const DIVIDER_TEXT = "────────────────────────────────────────────────────────────────────────────────";
@@ -180,6 +287,19 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
         lines.push(...wrapLines(block.output, "commandOutput"));
       }
       return lines;
+    }
+
+    case "work-group": {
+      const headerText = block.title ?? "Working";
+      const collapseSingleItemLabel =
+        block.items.length === 1 && block.title !== undefined && block.items[0]?.label === block.title;
+      return [
+        { text: "", kind: "workGroupSeparator" },
+        { text: headerText, kind: "workGroupHeader" },
+        ...block.items.flatMap((item) => workItemToLines(item, collapseSingleItemLabel)),
+        { text: formatWorkGroupFooter(block), kind: "workGroupFooter" },
+        { text: "", kind: "workGroupSeparator" },
+      ];
     }
 
     case "file-diff": {

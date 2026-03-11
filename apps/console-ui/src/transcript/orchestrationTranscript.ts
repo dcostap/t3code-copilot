@@ -3,7 +3,7 @@ import type {
   OrchestrationThreadActivity,
 } from "@t3tools/contracts";
 
-import type { TranscriptBlock } from "./TranscriptBlock";
+import type { TranscriptBlock, WorkGroupItem } from "./TranscriptBlock";
 
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
@@ -17,7 +17,8 @@ interface TimelineEntry {
   readonly createdAt: string;
   readonly source: "message" | "plan" | "activity";
   readonly sequence?: number;
-  readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly blocks?: ReadonlyArray<TranscriptBlock>;
+  readonly activity?: OrchestrationThreadActivity;
 }
 
 interface UserInputQuestionBlock {
@@ -27,6 +28,10 @@ interface UserInputQuestionBlock {
     label: string;
     description: string;
   }>;
+}
+
+interface PendingWorkItem extends WorkGroupItem {
+  readonly mergeKey: string;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -54,6 +59,39 @@ function toolStatusToBlockStatus(status: unknown): "running" | "done" | "error" 
     default:
       return "done";
   }
+}
+
+function activityKindToBlockStatus(kind: string): "running" | "done" | "error" | "declined" {
+  if (kind.endsWith(".started")) {
+    return "running";
+  }
+  if (kind.endsWith(".failed")) {
+    return "error";
+  }
+  if (kind.endsWith(".declined")) {
+    return "declined";
+  }
+  return "done";
+}
+
+function resolveActivityStatus(
+  explicitStatus: unknown,
+  activityKind: string,
+): "running" | "done" | "error" | "declined" {
+  if (
+    explicitStatus === "running"
+    || explicitStatus === "done"
+    || explicitStatus === "error"
+    || explicitStatus === "declined"
+  ) {
+    return explicitStatus;
+  }
+
+  if (explicitStatus !== undefined && explicitStatus !== null) {
+    return toolStatusToBlockStatus(explicitStatus);
+  }
+
+  return activityKindToBlockStatus(activityKind);
 }
 
 function decisionToApprovalState(value: unknown): "accepted" | "declined" | undefined {
@@ -176,6 +214,10 @@ function extractChangedFiles(payload: Record<string, unknown> | null): string[] 
   return results;
 }
 
+function uniqueStrings(values: ReadonlyArray<string>) {
+  return [...new Set(values)];
+}
+
 function planUpdateMarkdown(payload: Record<string, unknown> | null): string | null {
   const rawSteps = Array.isArray(payload?.plan) ? payload.plan : [];
   const steps = rawSteps
@@ -236,6 +278,138 @@ function userInputBlock(payload: Record<string, unknown> | null): TranscriptBloc
   };
 }
 
+function isWorkActivityType(itemType: string | null) {
+  return itemType === "command_execution"
+    || itemType === "file_change"
+    || itemType === "mcp_tool_call"
+    || itemType === "dynamic_tool_call"
+    || itemType === "collab_agent_tool_call"
+    || itemType === "web_search"
+    || itemType === "image_view";
+}
+
+function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkItem | null {
+  const payload = asRecord(activity.payload);
+  const itemType = asString(payload?.itemType);
+  const command = extractCommand(payload);
+  const exitCode = extractExitCode(payload);
+  const detail = asString(payload?.detail);
+  const rawOutput = extractOutput(payload);
+  const output = rawOutput === detail ? null : rawOutput;
+  const changedFiles = extractChangedFiles(payload);
+  const status = resolveActivityStatus(payload?.status, activity.kind);
+  const label = asString(payload?.title) ?? activity.summary;
+
+  if (itemType === "command_execution" || command) {
+    return {
+      kind: "command",
+      label,
+      status,
+      mergeKey: `command:${command ?? label}`,
+      ...(detail ? { detail } : {}),
+      ...(command ? { command } : {}),
+      ...(typeof exitCode === "number" ? { exitCode } : {}),
+      ...(output ? { output } : {}),
+      ...(changedFiles.length > 0 ? { changedFiles } : {}),
+    };
+  }
+
+  if (activity.tone !== "tool" && !isWorkActivityType(itemType)) {
+    return null;
+  }
+
+  return {
+    kind: "tool",
+    label,
+    status,
+    mergeKey: `${itemType ?? "tool"}:${label}`,
+    ...(detail ? { detail } : {}),
+    ...(output ? { output } : {}),
+    ...(changedFiles.length > 0 ? { changedFiles } : {}),
+  };
+}
+
+function canMergeWorkItems(previous: PendingWorkItem, next: PendingWorkItem) {
+  return previous.kind === next.kind
+    && previous.mergeKey === next.mergeKey
+    && previous.status === "running"
+    && next.status !== "running";
+}
+
+function mergeWorkItems(previous: PendingWorkItem, next: PendingWorkItem): PendingWorkItem {
+  const changedFiles = previous.changedFiles || next.changedFiles
+    ? uniqueStrings([...(previous.changedFiles ?? []), ...(next.changedFiles ?? [])])
+    : null;
+
+  return {
+    ...previous,
+    ...next,
+    ...(changedFiles ? { changedFiles } : {}),
+  };
+}
+
+function workGroupTitle(items: ReadonlyArray<WorkGroupItem>) {
+  if (items.length === 0) {
+    return undefined;
+  }
+  const firstLabel = items[0]?.label;
+  if (!firstLabel) {
+    return undefined;
+  }
+  if (items.length === 1 || items.every((item) => item.label === firstLabel)) {
+    return firstLabel;
+  }
+  return undefined;
+}
+
+function workGroupStatus(items: ReadonlyArray<WorkGroupItem>): "running" | "done" | "error" | "declined" {
+  if (items.some((item) => item.status === "error")) {
+    return "error";
+  }
+  if (items.some((item) => item.status === "declined")) {
+    return "declined";
+  }
+  if (items.some((item) => item.status === "running")) {
+    return "running";
+  }
+  return "done";
+}
+
+function workItemsToBlock(
+  items: ReadonlyArray<{ activity: OrchestrationThreadActivity; item: PendingWorkItem }>,
+): TranscriptBlock | null {
+  if (items.length === 0) {
+    return null;
+  }
+
+  const mergedItems: PendingWorkItem[] = [];
+  for (const entry of items) {
+    const previous = mergedItems.at(-1);
+    if (previous && canMergeWorkItems(previous, entry.item)) {
+      mergedItems[mergedItems.length - 1] = mergeWorkItems(previous, entry.item);
+      continue;
+    }
+    mergedItems.push(entry.item);
+  }
+
+  const startedAt = items[0]?.activity.createdAt;
+  const endedAt = items.at(-1)?.activity.createdAt;
+  if (!startedAt || !endedAt) {
+    return null;
+  }
+
+  const title = workGroupTitle(mergedItems);
+
+  return {
+    type: "work-group",
+    ...(title ? { title } : {}),
+    status: workGroupStatus(mergedItems),
+    startedAt,
+    endedAt,
+    items: mergedItems.map(({ mergeKey: _mergeKey, ...item }) => item),
+  };
+}
+
 function activityToBlocks(activity: OrchestrationThreadActivity): TranscriptBlock[] {
   const payload = asRecord(activity.payload);
 
@@ -283,28 +457,13 @@ function activityToBlocks(activity: OrchestrationThreadActivity): TranscriptBloc
     }
   }
 
-  const itemType = asString(payload?.itemType);
-  const command = extractCommand(payload);
-  const output = extractOutput(payload);
-  const exitCode = extractExitCode(payload);
-
-  if (itemType === "command_execution" && command) {
-    return [
-      {
-        type: "command-exec",
-        command,
-        ...(typeof exitCode === "number" ? { exitCode } : {}),
-        ...(output ? { output } : {}),
-      },
-    ];
-  }
-
   if (activity.tone === "tool") {
+    const output = extractOutput(payload);
     const blocks: TranscriptBlock[] = [
       {
         type: "tool-call",
         label: asString(payload?.title) ?? activity.summary,
-        status: toolStatusToBlockStatus(payload?.status),
+        status: resolveActivityStatus(payload?.status, activity.kind),
         ...(asString(payload?.detail) ? { detail: asString(payload?.detail)! } : {}),
       },
     ];
@@ -424,9 +583,56 @@ export function threadToTranscriptBlocks(
       createdAt: activity.createdAt,
       source: "activity",
       ...(activity.sequence !== undefined ? { sequence: activity.sequence } : {}),
-      blocks: activityToBlocks(activity),
+      activity,
     });
   }
 
-  return entries.toSorted(compareByCreatedAt).flatMap((entry) => entry.blocks);
+  const blocks: TranscriptBlock[] = [];
+  let pendingWorkItems: Array<{ activity: OrchestrationThreadActivity; item: PendingWorkItem }> = [];
+  let pendingWorkTurnId: OrchestrationThreadActivity["turnId"] = null;
+
+  const flushWorkItems = () => {
+    const block = workItemsToBlock(pendingWorkItems);
+    if (block) {
+      blocks.push(block);
+    }
+    pendingWorkItems = [];
+    pendingWorkTurnId = null;
+  };
+
+  for (const entry of entries.toSorted(compareByCreatedAt)) {
+    if (entry.source === "activity" && entry.activity) {
+      const workItem = activityToWorkItem(entry.activity);
+      if (workItem) {
+        if (
+          pendingWorkItems.length > 0
+          && pendingWorkTurnId !== entry.activity.turnId
+        ) {
+          flushWorkItems();
+        }
+        pendingWorkItems.push({ activity: entry.activity, item: workItem });
+        pendingWorkTurnId = entry.activity.turnId;
+        continue;
+      }
+    }
+
+    if (pendingWorkItems.length > 0) {
+      flushWorkItems();
+    }
+
+    if (entry.source === "activity" && entry.activity) {
+      blocks.push(...activityToBlocks(entry.activity));
+      continue;
+    }
+
+    if (entry.blocks) {
+      blocks.push(...entry.blocks);
+    }
+  }
+
+  if (pendingWorkItems.length > 0) {
+    flushWorkItems();
+  }
+
+  return blocks;
 }

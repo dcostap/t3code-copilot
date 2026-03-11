@@ -342,6 +342,30 @@ function buildEditorTheme() {
       ".cm-line-meta": { color: "#5f676f" },
       ".cm-line-body": { color: "#cfd4d9" },
       ".cm-line-list": { color: "#c7ccd1" },
+      ".cm-line-workGroupSeparator": {
+        position: "relative",
+        minHeight: "10px",
+      },
+      ".cm-line-workGroupSeparator::before": {
+        content: '""',
+        position: "absolute",
+        left: "0",
+        right: "0",
+        top: "50%",
+        borderTop: "1px solid rgba(95, 103, 111, 0.32)",
+        transform: "translateY(-50%)",
+      },
+      ".cm-line-workGroupHeader": {
+        color: "#9fa7af",
+        letterSpacing: "0.08em",
+        fontSize: "12px",
+        paddingTop: "2px",
+      },
+      ".cm-line-workGroupFooter": {
+        color: "#5f676f",
+        fontSize: "12px",
+        paddingTop: "2px",
+      },
       ".cm-line-promptInput": { color: "#d6dbe0" },
       ".cm-line-attachmentPanel": {
         paddingLeft: "2ch",
