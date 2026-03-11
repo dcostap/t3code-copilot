@@ -203,7 +203,10 @@ export function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "a") {
+      const isPaletteShortcut =
+        event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "a";
+
+      if (isPaletteShortcut) {
         event.preventDefault();
         setPaletteOpen((open) => {
           const nextOpen = !open;
@@ -213,9 +216,26 @@ export function App() {
           }
           return nextOpen;
         });
-      } else if (event.key === "Escape" && paletteOpen) {
+        return;
+      }
+
+      if (paletteOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closePalette();
+        }
+        return;
+      }
+
+      if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === "1") {
         event.preventDefault();
-        closePalette();
+        transcriptRef.current?.focusPrompt();
+      } else if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === "4") {
+        event.preventDefault();
+        transcriptRef.current?.focusHistory();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        transcriptRef.current?.focusPrompt();
       }
     };
 
