@@ -2,26 +2,23 @@ export interface PaletteCommand {
   readonly id: string;
   readonly label: string;
   readonly description: string;
+  readonly keywords?: ReadonlyArray<string>;
 }
 
-export const paletteCommands: ReadonlyArray<PaletteCommand> = [
-  { id: "model", label: "Model", description: "choose what model and reasoning effort to use" },
-  { id: "fast", label: "Fast Mode", description: "toggle fast mode to enable fastest inference at 2X plan usage" },
-  { id: "permissions", label: "Permissions", description: "choose what the agent is allowed to do" },
-  { id: "context", label: "Add Context", description: "add files or directories as context" },
-  { id: "compact", label: "Compact Transcript", description: "toggle compact mode for the transcript" },
-  { id: "review", label: "Review Changes", description: "review current changes and find issues" },
-  { id: "clear", label: "Clear Transcript", description: "clear the transcript" },
-  { id: "help", label: "Help", description: "show available commands" },
-];
+/** Simple substring match across id, label, description, and optional keywords. */
+export function filterCommands(
+  commands: ReadonlyArray<PaletteCommand>,
+  query: string,
+): ReadonlyArray<PaletteCommand> {
+  const q = query.toLowerCase().trim();
+  if (q.length === 0) {
+    return commands;
+  }
 
-/** Simple substring match across id, label, and description. */
-export function filterCommands(query: string): ReadonlyArray<PaletteCommand> {
-  const q = query.toLowerCase();
-  if (q.length === 0) return paletteCommands;
-  return paletteCommands.filter((cmd) =>
-    cmd.id.includes(q)
-    || cmd.label.toLowerCase().includes(q)
-    || cmd.description.toLowerCase().includes(q),
-  );
+  return commands.filter((cmd) => {
+    if (cmd.id.toLowerCase().includes(q)) return true;
+    if (cmd.label.toLowerCase().includes(q)) return true;
+    if (cmd.description.toLowerCase().includes(q)) return true;
+    return (cmd.keywords ?? []).some((keyword) => keyword.toLowerCase().includes(q));
+  });
 }

@@ -5,6 +5,10 @@ import { TranscriptRenderer, type TranscriptRendererHandle, threadToTranscriptBl
 import { useConsoleData } from "./consoleData/useConsoleData";
 import { filterCommands, type PaletteCommand } from "./slashCommands";
 
+interface AppPaletteCommand extends PaletteCommand {
+  run(): Promise<void> | void;
+}
+
 export function App() {
   const consoleData = useConsoleData();
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -32,9 +36,127 @@ export function App() {
     }
     return [{ type: "status" as const, text: "Waiting for orchestration snapshot..." }];
   }, [consoleData.error, consoleData.thread]);
+  const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
+    const commands: AppPaletteCommand[] = [];
+    const activeThread = consoleData.thread;
+
+    for (const thread of consoleData.threads) {
+      commands.push({
+        id: `thread:${thread.id}`,
+        label: thread.id === activeThread?.id ? `Current Thread: ${thread.title}` : `Switch Thread: ${thread.title}`,
+        description: `${thread.model} · ${thread.runtimeMode} · ${thread.interactionMode}`,
+        keywords: ["thread", thread.model, thread.runtimeMode, thread.interactionMode],
+        run: () => {
+          consoleData.setActiveThreadId(thread.id);
+        },
+      });
+    }
+
+    if (activeThread) {
+      commands.push(
+        {
+          id: `runtime:${activeThread.id}:full-access`,
+          label: "Set Runtime: Full Access",
+          description: "Dispatch thread.runtime-mode.set for full access execution.",
+          keywords: ["runtime", "permissions", "full access"],
+          run: () => consoleData.setRuntimeMode("full-access"),
+        },
+        {
+          id: `runtime:${activeThread.id}:approval-required`,
+          label: "Set Runtime: Approval Required",
+          description: "Dispatch thread.runtime-mode.set for approval-required execution.",
+          keywords: ["runtime", "permissions", "approval"],
+          run: () => consoleData.setRuntimeMode("approval-required"),
+        },
+        {
+          id: `interaction:${activeThread.id}:default`,
+          label: "Set Interaction: Default",
+          description: "Dispatch thread.interaction-mode.set to default mode.",
+          keywords: ["interaction", "default"],
+          run: () => consoleData.setInteractionMode("default"),
+        },
+        {
+          id: `interaction:${activeThread.id}:plan`,
+          label: "Set Interaction: Plan",
+          description: "Dispatch thread.interaction-mode.set to plan mode.",
+          keywords: ["interaction", "plan"],
+          run: () => consoleData.setInteractionMode("plan"),
+        },
+        {
+          id: `session:${activeThread.id}:stop`,
+          label: "Stop Session",
+          description: "Dispatch thread.session.stop for the active thread.",
+          keywords: ["session", "stop", "disconnect"],
+          run: () => consoleData.stopSession(),
+        },
+      );
+
+      if (activeThread.latestTurn?.state === "running" || activeThread.session?.status === "running") {
+        commands.push({
+          id: `turn:${activeThread.id}:interrupt`,
+          label: "Interrupt Turn",
+          description: "Dispatch thread.turn.interrupt for the active thread.",
+          keywords: ["interrupt", "cancel", "stop turn"],
+          run: () => consoleData.interruptTurn(),
+        });
+      }
+    }
+
+    for (const approval of consoleData.pendingApprovals) {
+      commands.push(
+        {
+          id: `approval:${approval.requestId}:accept`,
+          label: `Approve ${approval.requestKind}`,
+          description: approval.detail ?? "Dispatch thread.approval.respond with accept.",
+          keywords: ["approval", "accept", approval.requestKind],
+          run: () => consoleData.respondToApproval(approval.requestId, "accept"),
+        },
+        {
+          id: `approval:${approval.requestId}:decline`,
+          label: `Decline ${approval.requestKind}`,
+          description: approval.detail ?? "Dispatch thread.approval.respond with decline.",
+          keywords: ["approval", "decline", approval.requestKind],
+          run: () => consoleData.respondToApproval(approval.requestId, "decline"),
+        },
+      );
+    }
+
+    for (const pendingUserInput of consoleData.pendingUserInputs) {
+      if (pendingUserInput.questions.length === 1) {
+        const question = pendingUserInput.questions[0];
+        if (!question) continue;
+        for (const option of question.options) {
+          commands.push({
+            id: `user-input:${pendingUserInput.requestId}:${question.id}:${option.label}`,
+            label: `${question.header}: ${option.label}`,
+            description: option.description,
+            keywords: ["user input", question.header, question.question, option.label],
+            run: () =>
+              consoleData.respondToUserInput(pendingUserInput.requestId, {
+                [question.id]: option.label,
+              }),
+          });
+        }
+      } else {
+        commands.push({
+          id: `user-input:${pendingUserInput.requestId}:prompt`,
+          label: "Answer Pending User Input In Prompt",
+          description: "Type one answer per line in the prompt editor, in question order, then press Enter.",
+          keywords: ["user input", "prompt", "answer"],
+          run: () => {
+            requestAnimationFrame(() => {
+              transcriptRef.current?.focus();
+            });
+          },
+        });
+      }
+    }
+
+    return commands;
+  }, [consoleData]);
   const filteredCommands = useMemo(
-    () => filterCommands(paletteQuery),
-    [paletteQuery],
+    () => filterCommands(paletteCommands, paletteQuery),
+    [paletteCommands, paletteQuery],
   );
 
   useEffect(() => {
@@ -67,9 +189,16 @@ export function App() {
     });
   }, []);
 
-  const runPaletteCommand = useCallback((command: PaletteCommand) => {
-    setSubmitError(`Command "${command.label}" is not wired yet.`);
-    closePalette();
+  const runPaletteCommand = useCallback(async (command: PaletteCommand) => {
+    const executable = command as AppPaletteCommand;
+    try {
+      await executable.run();
+      setSubmitError(null);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : `Command "${command.label}" failed.`);
+    } finally {
+      closePalette();
+    }
   }, [closePalette]);
 
   useEffect(() => {

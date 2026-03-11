@@ -20,7 +20,18 @@ interface PositionedLine {
 interface TranscriptDocumentModel {
   readonly text: string;
   readonly lines: ReadonlyArray<PositionedLine>;
+  readonly separatorStart: number;
   readonly promptStart: number;
+}
+
+interface StoredSelection {
+  readonly anchor: number;
+  readonly head: number;
+}
+
+interface StoredPromptSelection {
+  readonly anchorOffset: number;
+  readonly headOffset: number;
 }
 
 interface TranscriptRendererProps {
@@ -33,8 +44,6 @@ export interface TranscriptRendererHandle {
 }
 
 const CURSOR_VIEWPORT_PADDING_LINES = 7;
-const PROMPT_SEPARATOR_TEXT =
-  "────────────────────────────────────────────────────────────────────────────────";
 
 const syncAnnotation = Annotation.define<boolean>();
 const setPromptStartEffect = StateEffect.define<number>();
@@ -69,13 +78,14 @@ function buildTranscriptDocument(
   const draftLines = draft.length > 0 ? draft.split("\n") : [""];
   const allLines: AnnotatedLine[] = [
     ...historyLines,
-    { text: PROMPT_SEPARATOR_TEXT, kind: "promptSeparator" },
+    { text: "", kind: "promptSeparator" },
     { text: draftLines[0] ?? "", kind: "promptInput" },
     ...draftLines.slice(1).map((line) => ({ text: line, kind: "promptInput" as const })),
   ];
 
   let text = "";
   let offset = 0;
+  let separatorStart = -1;
   let promptStart = -1;
   const positioned: PositionedLine[] = [];
 
@@ -83,6 +93,10 @@ function buildTranscriptDocument(
     const from = offset;
     positioned.push({ from, kind: line.kind });
     text += line.text;
+
+    if (line.kind === "promptSeparator" && separatorStart === -1) {
+      separatorStart = from;
+    }
 
     if (line.kind === "promptInput" && promptStart === -1) {
       promptStart = from;
@@ -95,7 +109,12 @@ function buildTranscriptDocument(
     }
   });
 
-  return { text, lines: positioned, promptStart: promptStart === -1 ? text.length : promptStart };
+  return {
+    text,
+    lines: positioned,
+    separatorStart: separatorStart === -1 ? promptStart === -1 ? text.length : promptStart : separatorStart,
+    promptStart: promptStart === -1 ? text.length : promptStart,
+  };
 }
 
 class PromptMarkerWidget extends WidgetType {
@@ -174,7 +193,19 @@ function buildEditorTheme() {
       ".cm-line-body": { color: "#cfd4d9" },
       ".cm-line-list": { color: "#c7ccd1" },
       ".cm-line-promptInput": { color: "#d6dbe0" },
-      ".cm-line-promptSeparator": { color: "rgba(95, 103, 111, 0.42)" },
+      ".cm-line-promptSeparator": {
+        position: "relative",
+        minHeight: "12px",
+      },
+      ".cm-line-promptSeparator::before": {
+        content: '""',
+        position: "absolute",
+        left: "0",
+        right: "0",
+        top: "50%",
+        borderTop: "1px solid rgba(95, 103, 111, 0.42)",
+        transform: "translateY(-50%)",
+      },
       ".cm-line-userMessage": { color: "#e0e4e8" },
       ".cm-line-toolCall": { color: "#5aa8f3" },
       ".cm-line-toolResult": { color: "#7a828b" },
@@ -243,6 +274,114 @@ function selectionInsidePrompt(view: EditorView) {
   return selection.from >= promptStart && selection.to >= promptStart;
 }
 
+function getHistorySelectionLimit(state: EditorState) {
+  const promptStart = state.field(promptStartField);
+  const promptLine = state.doc.lineAt(promptStart);
+  if (promptLine.number <= 1) {
+    return 0;
+  }
+
+  const separatorLine = state.doc.line(promptLine.number - 1);
+  return Math.max(0, separatorLine.from - 1);
+}
+
+function clampStoredSelectionToPrompt(
+  state: EditorState,
+  selection: StoredSelection,
+): StoredSelection {
+  const promptStart = state.field(promptStartField);
+  return {
+    anchor: Math.max(promptStart, Math.min(selection.anchor, state.doc.length)),
+    head: Math.max(promptStart, Math.min(selection.head, state.doc.length)),
+  };
+}
+
+function clampSelectionToPromptBounds(
+  promptStart: number,
+  docLength: number,
+  selection: StoredSelection,
+): StoredSelection {
+  return {
+    anchor: Math.max(promptStart, Math.min(selection.anchor, docLength)),
+    head: Math.max(promptStart, Math.min(selection.head, docLength)),
+  };
+}
+
+function clampStoredSelectionToHistory(
+  state: EditorState,
+  selection: StoredSelection,
+): StoredSelection {
+  const historyLimit = getHistorySelectionLimit(state);
+  return {
+    anchor: Math.min(selection.anchor, historyLimit),
+    head: Math.min(selection.head, historyLimit),
+  };
+}
+
+function storePromptSelection(
+  state: EditorState,
+  selection: StoredSelection,
+): StoredPromptSelection {
+  const promptStart = state.field(promptStartField);
+  const clamped = clampStoredSelectionToPrompt(state, selection);
+  return {
+    anchorOffset: clamped.anchor - promptStart,
+    headOffset: clamped.head - promptStart,
+  };
+}
+
+function resolvePromptSelection(
+  state: EditorState,
+  stored: StoredPromptSelection | null,
+): StoredSelection {
+  const promptStart = state.field(promptStartField);
+  const maxOffset = Math.max(0, state.doc.length - promptStart);
+  const anchorOffset = Math.min(stored?.anchorOffset ?? maxOffset, maxOffset);
+  const headOffset = Math.min(stored?.headOffset ?? maxOffset, maxOffset);
+  return {
+    anchor: promptStart + anchorOffset,
+    head: promptStart + headOffset,
+  };
+}
+
+function resolvePromptSelectionForDocModel(
+  docModel: TranscriptDocumentModel,
+  stored: StoredPromptSelection | null,
+): StoredSelection {
+  const maxOffset = Math.max(0, docModel.text.length - docModel.promptStart);
+  const anchorOffset = Math.min(stored?.anchorOffset ?? maxOffset, maxOffset);
+  const headOffset = Math.min(stored?.headOffset ?? maxOffset, maxOffset);
+  return {
+    anchor: docModel.promptStart + anchorOffset,
+    head: docModel.promptStart + headOffset,
+  };
+}
+
+function resolveHistorySelection(
+  state: EditorState,
+  stored: StoredSelection | null,
+): StoredSelection {
+  const historyLimit = getHistorySelectionLimit(state);
+  if (!stored) {
+    return { anchor: historyLimit, head: historyLimit };
+  }
+  return clampStoredSelectionToHistory(state, stored);
+}
+
+function resolveHistorySelectionForDocModel(
+  docModel: TranscriptDocumentModel,
+  stored: StoredSelection | null,
+): StoredSelection {
+  const historyLimit = Math.max(0, docModel.separatorStart - 1);
+  if (!stored) {
+    return { anchor: historyLimit, head: historyLimit };
+  }
+  return {
+    anchor: Math.min(stored.anchor, historyLimit),
+    head: Math.min(stored.head, historyLimit),
+  };
+}
+
 export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, TranscriptRendererProps>(
   function TranscriptRenderer({ blocks, onSubmit }, ref) {
     const editorRef = useRef<HTMLDivElement | null>(null);
@@ -250,6 +389,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const hasAutofocusedRef = useRef(false);
     const syncingViewRef = useRef(false);
     const submittingRef = useRef(false);
+    const activeRegionRef = useRef<"prompt" | "history">("prompt");
+    const promptSelectionRef = useRef<StoredPromptSelection | null>(null);
+    const historySelectionRef = useRef<StoredSelection | null>(null);
     const draftRef = useRef("");
     const onSubmitRef = useRef(onSubmit);
     const [draft, setDraft] = useState("");
@@ -260,6 +402,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     }, [draft, onSubmit]);
 
     const docModel = useMemo(() => buildTranscriptDocument(blocks, draft), [blocks, draft]);
+    const initialDocModelRef = useRef(docModel);
 
     useImperativeHandle(ref, () => ({
       focus() {
@@ -268,7 +411,15 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           return;
         }
 
-        focusPrompt(view);
+        activeRegionRef.current = "prompt";
+        const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
+        promptSelectionRef.current = storePromptSelection(view.state, promptSelection);
+        view.dispatch({
+          selection: EditorSelection.range(promptSelection.anchor, promptSelection.head),
+          annotations: syncAnnotation.of(true),
+        });
+        view.focus();
+        view.contentDOM.focus({ preventScroll: true });
         requestAnimationFrame(() => {
           keepCursorWithinViewportPadding(view);
         });
@@ -279,6 +430,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       if (!editorRef.current) {
         return undefined;
       }
+
+      const initialDocModel = initialDocModelRef.current;
 
       const replaceDraft = (nextDraft: string) => {
         const view = viewRef.current;
@@ -314,30 +467,110 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         return true;
       };
 
+      const toggleActiveRegion = () => {
+        const view = viewRef.current;
+        if (!view) {
+          return true;
+        }
+
+        const currentSelection: StoredSelection = {
+          anchor: view.state.selection.main.anchor,
+          head: view.state.selection.main.head,
+        };
+
+        if (activeRegionRef.current === "prompt") {
+          promptSelectionRef.current = storePromptSelection(view.state, currentSelection);
+          activeRegionRef.current = "history";
+          const historySelection = resolveHistorySelection(view.state, historySelectionRef.current);
+          historySelectionRef.current = historySelection;
+          view.dispatch({
+            selection: EditorSelection.range(historySelection.anchor, historySelection.head),
+            annotations: syncAnnotation.of(true),
+          });
+        } else {
+          historySelectionRef.current = clampStoredSelectionToHistory(view.state, currentSelection);
+          activeRegionRef.current = "prompt";
+          const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
+          promptSelectionRef.current = storePromptSelection(view.state, promptSelection);
+          view.dispatch({
+            selection: EditorSelection.range(promptSelection.anchor, promptSelection.head),
+            annotations: syncAnnotation.of(true),
+          });
+        }
+
+        view.focus();
+        view.contentDOM.focus({ preventScroll: true });
+        requestAnimationFrame(() => {
+          keepCursorWithinViewportPadding(view);
+        });
+        return true;
+      };
+
       const initialState = EditorState.create({
-        doc: docModel.text,
-        selection: EditorSelection.cursor(docModel.text.length),
+        doc: initialDocModel.text,
+        selection: EditorSelection.cursor(initialDocModel.text.length),
         extensions: [
           promptStartField,
           EditorState.transactionFilter.of((transaction) => {
-            if (transaction.annotation(syncAnnotation) || !transaction.docChanged) {
+            if (transaction.annotation(syncAnnotation)) {
               return transaction;
             }
 
             const promptStart = transaction.startState.field(promptStartField);
-            let blocked = false;
-            transaction.changes.iterChangedRanges((fromA) => {
-              if (fromA < promptStart) {
-                blocked = true;
-              }
-            });
+            if (transaction.docChanged) {
+              let blocked = false;
+              transaction.changes.iterChangedRanges((fromA) => {
+                if (fromA < promptStart) {
+                  blocked = true;
+                }
+              });
 
-            return blocked ? [] : transaction;
+              if (blocked) {
+                return [];
+              }
+            }
+
+            const targetSelection = transaction.newSelection;
+            if (!targetSelection) {
+              return transaction;
+            }
+
+            const rawSelection: StoredSelection = {
+              anchor: targetSelection.main.anchor,
+              head: targetSelection.main.head,
+            };
+            const clampedSelection =
+              activeRegionRef.current === "prompt"
+                ? clampSelectionToPromptBounds(promptStart, transaction.newDoc.length, rawSelection)
+                : clampStoredSelectionToHistory(transaction.startState, rawSelection);
+
+            if (
+              clampedSelection.anchor === rawSelection.anchor &&
+              clampedSelection.head === rawSelection.head
+            ) {
+              return transaction;
+            }
+
+            return [
+              transaction,
+              {
+                selection: EditorSelection.range(clampedSelection.anchor, clampedSelection.head),
+              },
+            ];
           }),
           keymap.of([
             {
+              key: "Mod-e",
+              run() {
+                return toggleActiveRegion();
+              },
+            },
+            {
               key: "Enter",
               run() {
+                if (activeRegionRef.current !== "prompt") {
+                  return true;
+                }
                 void submitDraft();
                 return true;
               },
@@ -347,7 +580,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           EditorView.lineWrapping,
           buildEditorTheme(),
           decorationsCompartment.of(
-            EditorView.decorations.of(buildDecorations(docModel.lines, docModel.promptStart)),
+            EditorView.decorations.of(
+              buildDecorations(initialDocModel.lines, initialDocModel.promptStart),
+            ),
           ),
           EditorView.updateListener.of((update) => {
             if (syncingViewRef.current) {
@@ -361,7 +596,17 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               setDraft(nextDraft);
             }
 
-            if ((update.selectionSet || update.docChanged) && selectionInsidePrompt(update.view)) {
+            const currentSelection: StoredSelection = {
+              anchor: update.state.selection.main.anchor,
+              head: update.state.selection.main.head,
+            };
+            if (activeRegionRef.current === "prompt") {
+              promptSelectionRef.current = storePromptSelection(update.state, currentSelection);
+            } else {
+              historySelectionRef.current = clampStoredSelectionToHistory(update.state, currentSelection);
+            }
+
+            if (update.selectionSet || update.docChanged) {
               requestAnimationFrame(() => {
                 keepCursorWithinViewportPadding(update.view);
               });
@@ -369,10 +614,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           }),
           EditorView.domEventHandlers({
             focus(_event, view) {
-              if (!selectionInsidePrompt(view)) {
-                const end = view.state.doc.length;
-                view.dispatch({ selection: EditorSelection.cursor(end) });
-              }
+              const nextSelection =
+                activeRegionRef.current === "prompt"
+                  ? resolvePromptSelection(view.state, promptSelectionRef.current)
+                  : resolveHistorySelection(view.state, historySelectionRef.current);
+              view.dispatch({
+                selection: EditorSelection.range(nextSelection.anchor, nextSelection.head),
+                annotations: syncAnnotation.of(true),
+              });
 
               requestAnimationFrame(() => {
                 keepCursorWithinViewportPadding(view);
@@ -395,7 +644,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       });
 
       view.dispatch({
-        effects: setPromptStartEffect.of(docModel.promptStart),
+        effects: setPromptStartEffect.of(initialDocModel.promptStart),
         annotations: syncAnnotation.of(true),
       });
 
@@ -404,7 +653,15 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       if (!hasAutofocusedRef.current) {
         hasAutofocusedRef.current = true;
         const autofocus = () => {
-          focusPrompt(view);
+          activeRegionRef.current = "prompt";
+          const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
+          promptSelectionRef.current = storePromptSelection(view.state, promptSelection);
+          view.dispatch({
+            selection: EditorSelection.range(promptSelection.anchor, promptSelection.head),
+            annotations: syncAnnotation.of(true),
+          });
+          view.focus();
+          view.contentDOM.focus({ preventScroll: true });
           keepCursorWithinViewportPadding(view);
         };
         autofocus();
@@ -433,27 +690,15 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         return;
       }
 
-      const selection = view.state.selection.main;
-      const previousPromptStart = currentPromptStart;
-      const previousDraftLength = Math.max(0, view.state.doc.length - previousPromptStart);
-      const nextDraftLength = Math.max(0, docModel.text.length - docModel.promptStart);
-
-      const nextAnchor = docModel.promptStart + Math.min(
-        Math.max(0, selection.anchor - previousPromptStart),
-        nextDraftLength,
-      );
-      const nextHead = docModel.promptStart + Math.min(
-        Math.max(0, selection.head - previousPromptStart),
-        nextDraftLength,
-      );
+      const nextSelection =
+        activeRegionRef.current === "prompt"
+          ? resolvePromptSelectionForDocModel(docModel, promptSelectionRef.current)
+          : resolveHistorySelectionForDocModel(docModel, historySelectionRef.current);
 
       syncingViewRef.current = true;
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: docModel.text },
-        selection: EditorSelection.range(
-          previousDraftLength === 0 ? docModel.text.length : nextAnchor,
-          previousDraftLength === 0 ? docModel.text.length : nextHead,
-        ),
+        selection: EditorSelection.range(nextSelection.anchor, nextSelection.head),
         effects: [
           decorationsCompartment.reconfigure(
             EditorView.decorations.of(buildDecorations(docModel.lines, docModel.promptStart)),
@@ -463,6 +708,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         annotations: syncAnnotation.of(true),
       });
       syncingViewRef.current = false;
+
+      if (activeRegionRef.current === "prompt") {
+        promptSelectionRef.current = storePromptSelection(view.state, nextSelection);
+      } else {
+        historySelectionRef.current = clampStoredSelectionToHistory(view.state, nextSelection);
+      }
 
       if (view.hasFocus) {
         requestAnimationFrame(() => {

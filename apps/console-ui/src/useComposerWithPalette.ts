@@ -29,7 +29,7 @@ export function useComposerWithPalette(options: UseComposerWithPaletteOptions = 
 
   const paletteOpen = value.startsWith("/");
   const query = paletteOpen ? value.slice(1) : "";
-  const filteredCommands = useMemo(() => (paletteOpen ? filterCommands(query) : []), [paletteOpen, query]);
+  const filteredCommands = useMemo(() => (paletteOpen ? filterCommands([], query) : []), [paletteOpen, query]);
 
   const dismiss = useCallback(() => {
     setValue("");
