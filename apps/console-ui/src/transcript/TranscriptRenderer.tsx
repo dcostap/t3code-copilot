@@ -7,8 +7,9 @@ import {
   EditorState,
   StateEffect,
   StateField,
+  Text,
 } from "@codemirror/state";
-import { Decoration, EditorView, WidgetType, keymap } from "@codemirror/view";
+import { Decoration, EditorView, keymap } from "@codemirror/view";
 
 import { blockToLines, type AnnotatedLine, type LineKind, type TranscriptBlock } from "./TranscriptBlock";
 
@@ -36,8 +37,11 @@ interface StoredPromptSelection {
 
 interface TranscriptRendererProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly submitDisabled?: boolean;
   onSubmit?(value: string): Promise<void> | void;
 }
+
+export type TranscriptRegion = "prompt" | "history";
 
 export interface TranscriptRendererHandle {
   focus(): void;
@@ -119,34 +123,11 @@ function buildTranscriptDocument(
   };
 }
 
-class PromptMarkerWidget extends WidgetType {
-  override eq() {
-    return true;
-  }
-
-  override toDOM() {
-    const span = document.createElement("span");
-    span.className = "cm-prompt-marker";
-    span.textContent = "›";
-    span.setAttribute("aria-hidden", "true");
-    return span;
-  }
-
-  override ignoreEvent() {
-    return true;
-  }
-}
-
 function buildDecorations(lines: ReadonlyArray<PositionedLine>, promptStart: number) {
   const ranges = lines.map((line) =>
     Decoration.line({ class: `cm-line-${line.kind}` }).range(line.from),
   );
-  ranges.push(
-    Decoration.widget({
-      widget: new PromptMarkerWidget(),
-      side: -1,
-    }).range(promptStart),
-  );
+  ranges.push(Decoration.line({ class: "cm-line-promptStart" }).range(promptStart));
   return Decoration.set(ranges, true);
 }
 
@@ -183,18 +164,23 @@ function buildEditorTheme() {
         padding: "0",
         whiteSpace: "pre-wrap",
       },
-      ".cm-prompt-marker": {
-        display: "inline-block",
-        minWidth: "1ch",
-        marginRight: "1ch",
-        color: "#757b82",
-        userSelect: "none",
-        pointerEvents: "none",
-      },
       ".cm-line-meta": { color: "#5f676f" },
       ".cm-line-body": { color: "#cfd4d9" },
       ".cm-line-list": { color: "#c7ccd1" },
       ".cm-line-promptInput": { color: "#d6dbe0" },
+      ".cm-line-promptStart": {
+        position: "relative",
+        paddingLeft: "2ch",
+      },
+      ".cm-line-promptStart::before": {
+        content: '"›"',
+        position: "absolute",
+        left: "0",
+        top: "0",
+        color: "#757b82",
+        userSelect: "none",
+        pointerEvents: "none",
+      },
       ".cm-line-promptSeparator": {
         position: "relative",
         minHeight: "12px",
@@ -261,30 +247,40 @@ function keepCursorWithinViewportPadding(view: EditorView) {
   }
 }
 
-function focusPrompt(view: EditorView) {
-  const end = view.state.doc.length;
-  view.dispatch({
-    selection: EditorSelection.cursor(end),
-  });
-  view.focus();
-  view.contentDOM.focus({ preventScroll: true });
-}
-
-function selectionInsidePrompt(view: EditorView) {
-  const promptStart = view.state.field(promptStartField);
-  const selection = view.state.selection.main;
-  return selection.from >= promptStart && selection.to >= promptStart;
-}
-
-function getHistorySelectionLimit(state: EditorState) {
-  const promptStart = state.field(promptStartField);
-  const promptLine = state.doc.lineAt(promptStart);
+export function getHistorySelectionLimitForPromptStart(doc: Text, promptStart: number) {
+  const promptLine = doc.lineAt(promptStart);
   if (promptLine.number <= 1) {
     return 0;
   }
 
-  const separatorLine = state.doc.line(promptLine.number - 1);
+  const separatorLine = doc.line(promptLine.number - 1);
   return Math.max(0, separatorLine.from - 1);
+}
+
+export function getHistorySelectionLimit(state: EditorState) {
+  return getHistorySelectionLimitForPromptStart(state.doc, state.field(promptStartField));
+}
+
+export function resolveTranscriptRegionForPosition(
+  historyLimit: number,
+  position: number | null,
+): TranscriptRegion | null {
+  if (position === null) {
+    return null;
+  }
+
+  return position <= historyLimit ? "history" : "prompt";
+}
+
+export function resolveTranscriptRegionForPointer(
+  historyLimit: number,
+  precisePosition: number | null,
+  fallbackPosition: number | null,
+): TranscriptRegion | null {
+  return resolveTranscriptRegionForPosition(
+    historyLimit,
+    precisePosition ?? fallbackPosition,
+  );
 }
 
 function clampStoredSelectionToPrompt(
@@ -385,23 +381,25 @@ function resolveHistorySelectionForDocModel(
 }
 
 export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, TranscriptRendererProps>(
-  function TranscriptRenderer({ blocks, onSubmit }, ref) {
+  function TranscriptRenderer({ blocks, onSubmit, submitDisabled = false }, ref) {
     const editorRef = useRef<HTMLDivElement | null>(null);
     const viewRef = useRef<EditorView | null>(null);
     const hasAutofocusedRef = useRef(false);
     const syncingViewRef = useRef(false);
     const submittingRef = useRef(false);
-    const activeRegionRef = useRef<"prompt" | "history">("prompt");
+    const activeRegionRef = useRef<TranscriptRegion>("prompt");
     const promptSelectionRef = useRef<StoredPromptSelection | null>(null);
     const historySelectionRef = useRef<StoredSelection | null>(null);
     const draftRef = useRef("");
     const onSubmitRef = useRef(onSubmit);
+    const submitDisabledRef = useRef(submitDisabled);
     const [draft, setDraft] = useState("");
 
     useEffect(() => {
       draftRef.current = draft;
       onSubmitRef.current = onSubmit;
-    }, [draft, onSubmit]);
+      submitDisabledRef.current = submitDisabled;
+    }, [draft, onSubmit, submitDisabled]);
 
     const docModel = useMemo(() => buildTranscriptDocument(blocks, draft), [blocks, draft]);
     const initialDocModelRef = useRef(docModel);
@@ -440,6 +438,47 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         keepCursorWithinViewportPadding(view);
       });
     }, []);
+
+    const storeSelectionForRegion = useCallback(
+      (state: EditorState, region: TranscriptRegion, selection: StoredSelection) => {
+        if (region === "prompt") {
+          promptSelectionRef.current = storePromptSelection(state, selection);
+          return;
+        }
+
+        historySelectionRef.current = clampStoredSelectionToHistory(state, selection);
+      },
+      [],
+    );
+
+    const updateActiveRegionFromPointer = useCallback(
+      (view: EditorView, event: MouseEvent) => {
+        if (event.button !== 0) {
+          return;
+        }
+
+        const pointerCoords = { x: event.clientX, y: event.clientY };
+        const clickPosition = view.posAtCoords(pointerCoords);
+        const estimatedClickPosition =
+          clickPosition === null ? view.posAtCoords(pointerCoords, false) : clickPosition;
+        const nextRegion = resolveTranscriptRegionForPointer(
+          getHistorySelectionLimit(view.state),
+          clickPosition,
+          estimatedClickPosition,
+        );
+        if (!nextRegion || nextRegion === activeRegionRef.current) {
+          return;
+        }
+
+        const currentSelection: StoredSelection = {
+          anchor: view.state.selection.main.anchor,
+          head: view.state.selection.main.head,
+        };
+        storeSelectionForRegion(view.state, activeRegionRef.current, currentSelection);
+        activeRegionRef.current = nextRegion;
+      },
+      [storeSelectionForRegion],
+    );
 
     useImperativeHandle(ref, () => ({
       focus() {
@@ -491,7 +530,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
       const submitDraft = async () => {
         const value = draftRef.current.trim();
-        if (value.length === 0 || submittingRef.current) {
+        if (value.length === 0 || submittingRef.current || submitDisabledRef.current) {
           return true;
         }
 
@@ -560,6 +599,20 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           }),
           keymap.of([
             {
+              key: "Shift-Enter",
+              run(view) {
+                if (activeRegionRef.current !== "prompt") {
+                  return true;
+                }
+                const selection = view.state.selection.main;
+                view.dispatch({
+                  changes: { from: selection.from, to: selection.to, insert: "\n" },
+                  selection: EditorSelection.cursor(selection.from + 1),
+                });
+                return true;
+              },
+            },
+            {
               key: "Enter",
               run() {
                 if (activeRegionRef.current !== "prompt") {
@@ -594,11 +647,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               anchor: update.state.selection.main.anchor,
               head: update.state.selection.main.head,
             };
-            if (activeRegionRef.current === "prompt") {
-              promptSelectionRef.current = storePromptSelection(update.state, currentSelection);
-            } else {
-              historySelectionRef.current = clampStoredSelectionToHistory(update.state, currentSelection);
-            }
+            storeSelectionForRegion(update.state, activeRegionRef.current, currentSelection);
 
             if (update.selectionSet || update.docChanged) {
               requestAnimationFrame(() => {
@@ -622,6 +671,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               });
             },
             mousedown(_event, view) {
+              updateActiveRegionFromPointer(view, _event);
               requestAnimationFrame(() => {
                 keepCursorWithinViewportPadding(view);
               });
@@ -661,7 +711,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         view.destroy();
         viewRef.current = null;
       };
-    }, [focusPromptRegion]);
+    }, [focusPromptRegion, storeSelectionForRegion, updateActiveRegionFromPointer]);
 
     useEffect(() => {
       const view = viewRef.current;

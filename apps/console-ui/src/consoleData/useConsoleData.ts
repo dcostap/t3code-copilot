@@ -1,10 +1,7 @@
 import {
-  type EventId,
-  ORCHESTRATION_WS_CHANNELS,
-  ORCHESTRATION_WS_METHODS,
-  WS_CHANNELS,
+  type ApprovalRequestId,
+  type CommandId,
   type MessageId,
-  type OrchestrationEvent,
   type OrchestrationProject,
   type OrchestrationReadModel,
   type OrchestrationThread,
@@ -12,21 +9,23 @@ import {
   type ProviderInteractionMode,
   type ProviderKind,
   type RuntimeMode,
-  type TurnId,
+  type ServerConfig,
   type UserInputQuestion,
+  type WsWelcomePayload,
 } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { WsTransport } from "../wsTransport";
-import { buildDemoSnapshot } from "./demoSnapshot";
+import {
+  DemoConsoleBackend,
+  LiveConsoleBackend,
+  type ConsoleBackend,
+  type ConsoleBackendConnectionState,
+} from "../consoleBackend";
 
 export type ConsoleSourceMode = "demo" | "live";
 export type ConsoleConnectionState =
   | "demo"
-  | "connecting"
-  | "connected"
-  | "disconnected"
-  | "error";
+  | ConsoleBackendConnectionState;
 
 interface ConsoleSearchConfig {
   readonly mode: ConsoleSourceMode;
@@ -50,12 +49,21 @@ export interface ConsoleDataState {
   readonly mode: ConsoleSourceMode;
   readonly connectionState: ConsoleConnectionState;
   readonly snapshot: OrchestrationReadModel | null;
+  readonly serverConfig: ServerConfig | null;
+  readonly welcome: WsWelcomePayload | null;
   readonly threads: ReadonlyArray<OrchestrationThread>;
   readonly activeThreadId: string | null;
   readonly thread: OrchestrationThread | null;
   readonly project: OrchestrationProject | null;
   readonly pendingApprovals: ReadonlyArray<ConsolePendingApproval>;
   readonly pendingUserInputs: ReadonlyArray<ConsolePendingUserInput>;
+  readonly isTurnRunning: boolean;
+  readonly isPromptSubmitting: boolean;
+  readonly canSubmitPrompt: boolean;
+  readonly respondingApprovalRequestIds: ReadonlyArray<string>;
+  readonly respondingUserInputRequestIds: ReadonlyArray<string>;
+  readonly isInterruptingTurn: boolean;
+  readonly isStoppingSession: boolean;
   readonly error: string | null;
   setActiveThreadId(threadId: string): void;
   submitPrompt(prompt: string): Promise<void>;
@@ -67,23 +75,11 @@ export interface ConsoleDataState {
   stopSession(): Promise<void>;
 }
 
-interface DemoPendingTurn {
-  readonly requestId: string;
-  readonly kind: "approval" | "user-input";
-  readonly threadId: string;
-  readonly turnId: TurnId;
-  readonly assistantMessageId: MessageId;
-  readonly prompt: string;
-}
-
 function readSearchConfig(): ConsoleSearchConfig {
   const search = new URLSearchParams(window.location.search);
   const modeQuery = search.get("source");
   const envMode = import.meta.env.VITE_CONSOLE_UI_SOURCE as string | undefined;
-  const mode =
-    modeQuery === "live" || envMode === "live"
-      ? "live"
-      : "demo";
+  const mode = modeQuery === "live" || envMode === "live" ? "live" : "demo";
 
   return {
     mode,
@@ -95,8 +91,8 @@ function makeId(prefix: string) {
   return `${prefix}:${crypto.randomUUID()}`;
 }
 
-function makeEventId(prefix: string) {
-  return makeId(prefix) as EventId;
+function makeCommandId() {
+  return makeId("command") as CommandId;
 }
 
 function providerFromThread(thread: OrchestrationThread | null): ProviderKind | undefined {
@@ -262,6 +258,14 @@ function derivePendingUserInputs(thread: OrchestrationThread | null): ConsolePen
 
     if (activity.kind === "user-input.resolved") {
       openByRequestId.delete(requestId);
+      continue;
+    }
+
+    if (
+      activity.kind === "provider.user-input.respond.failed" &&
+      asString(payload?.detail)?.includes("Unknown pending")
+    ) {
+      openByRequestId.delete(requestId);
     }
   }
 
@@ -301,198 +305,135 @@ function buildPromptAnswers(
   return Object.keys(answers).length === pendingUserInput.questions.length ? answers : null;
 }
 
-function mapThread(
-  snapshot: OrchestrationReadModel,
-  threadId: string,
-  updater: (thread: OrchestrationThread) => OrchestrationThread,
-): OrchestrationReadModel {
-  const now = new Date().toISOString();
-  return {
-    ...snapshot,
-    snapshotSequence: snapshot.snapshotSequence + 1,
-    updatedAt: now,
-    threads: snapshot.threads.map((thread) =>
-      thread.id === threadId ? updater(thread) : thread,
-    ) as OrchestrationReadModel["threads"],
-  };
+function isTurnRunning(thread: OrchestrationThread | null) {
+  if (!thread) return false;
+  return thread.latestTurn?.state === "running" || thread.session?.status === "running";
 }
 
-function nextActivitySequence(thread: OrchestrationThread) {
-  return Math.max(0, ...thread.activities.map((activity) => activity.sequence ?? 0)) + 1;
-}
-
-function appendActivity(
-  thread: OrchestrationThread,
-  activity: Omit<OrchestrationThread["activities"][number], "sequence"> & { sequence?: number },
-) {
-  const nextActivities = [
-    ...thread.activities,
-    {
-      ...activity,
-      sequence: activity.sequence ?? nextActivitySequence(thread),
-    },
-  ] as OrchestrationThread["activities"];
-
-  return {
-    ...thread,
-    updatedAt: activity.createdAt,
-    activities: nextActivities,
-  };
-}
-
-function updateMessageText(
-  thread: OrchestrationThread,
-  messageId: MessageId,
-  nextText: string,
-  nextUpdatedAt: string,
-  streaming: boolean,
-) {
-  const nextMessages = thread.messages.map((message) =>
-    message.id !== messageId
-      ? message
-      : {
-          ...message,
-          text: nextText,
-          updatedAt: nextUpdatedAt,
-          streaming,
-        },
-  ) as OrchestrationThread["messages"];
-
-  return {
-    ...thread,
-    updatedAt: nextUpdatedAt,
-    messages: nextMessages,
-  };
-}
-
-function settleThreadTurn(
-  thread: OrchestrationThread,
-  turnId: TurnId,
-  state: "completed" | "interrupted" | "error",
-  completedAt: string,
-  assistantMessageId: MessageId | null,
-) {
-  const sessionStatus: NonNullable<OrchestrationThread["session"]>["status"] =
-    state === "completed" ? "ready" : state === "interrupted" ? "interrupted" : "error";
-  return {
-    ...thread,
-    updatedAt: completedAt,
-    latestTurn: {
-      turnId,
-      state,
-      requestedAt: thread.latestTurn?.requestedAt ?? completedAt,
-      startedAt: thread.latestTurn?.startedAt ?? completedAt,
-      completedAt,
-      assistantMessageId,
-    },
-    session: thread.session
-      ? {
-          ...thread.session,
-          status: sessionStatus,
-          activeTurnId: null,
-          lastError: state === "error" ? "Demo turn failed." : null,
-          updatedAt: completedAt,
-        }
-      : null,
-  };
-}
-
-function demoReplyForPrompt(prompt: string, answers?: Record<string, unknown>) {
-  const answerSummary =
-    answers && Object.keys(answers).length > 0
-      ? `\n\nI used these answers:\n${Object.entries(answers).map(([key, value]) => `- ${key}: ${String(value)}`).join("\n")}`
-      : "";
-
-  return [
-    "Demo orchestration mode is active.",
-    "",
-    `Prompt received: ${prompt}`,
-    "",
-    "This turn progressed through the same read model shapes the real backend emits: running session, activity append, streaming assistant text, and final turn settlement.",
-    answerSummary,
-  ].join("\n").trim();
-}
-
-function demoShouldFail(prompt: string) {
-  const lower = prompt.toLowerCase();
-  return lower.includes("fail") || lower.includes("error");
+function canDispatchLiveCommand(connectionState: ConsoleConnectionState) {
+  return connectionState === "connected";
 }
 
 export function useConsoleData(): ConsoleDataState {
   const searchConfig = useMemo(readSearchConfig, []);
-  const transportRef = useRef<WsTransport | null>(null);
-  const latestSequenceRef = useRef(0);
+  const backend = useMemo<ConsoleBackend>(
+    () => (searchConfig.mode === "demo" ? new DemoConsoleBackend() : new LiveConsoleBackend()),
+    [searchConfig.mode],
+  );
+  const latestEventSequenceRef = useRef(0);
   const queuedSyncRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bootstrapThreadIdRef = useRef<string | null>(null);
-  const demoTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
-  const demoPendingTurnsRef = useRef<Record<string, DemoPendingTurn>>({});
+  const syncInFlightRef = useRef(false);
+  const pendingSyncRef = useRef(false);
+  const serverConfigSyncInFlightRef = useRef(false);
+  const pendingServerConfigSyncRef = useRef(false);
+  const promptSubmittingRef = useRef(false);
+  const respondingApprovalRequestIdsRef = useRef(new Set<string>());
+  const respondingUserInputRequestIdsRef = useRef(new Set<string>());
+  const interruptInFlightRef = useRef(false);
+  const stopSessionInFlightRef = useRef(false);
 
-  const [snapshot, setSnapshot] = useState<OrchestrationReadModel | null>(() =>
-    searchConfig.mode === "demo" ? buildDemoSnapshot() : null,
-  );
+  const [snapshot, setSnapshot] = useState<OrchestrationReadModel | null>(null);
+  const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
+  const [welcome, setWelcome] = useState<WsWelcomePayload | null>(null);
   const [activeThreadId, setActiveThreadIdState] = useState<string | null>(searchConfig.threadId);
   const [connectionState, setConnectionState] = useState<ConsoleConnectionState>(
     searchConfig.mode === "demo" ? "demo" : "connecting",
   );
+  const [isPromptSubmitting, setIsPromptSubmitting] = useState(false);
+  const [respondingApprovalRequestIds, setRespondingApprovalRequestIds] = useState<string[]>([]);
+  const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<string[]>([]);
+  const [isInterruptingTurn, setIsInterruptingTurn] = useState(false);
+  const [isStoppingSession, setIsStoppingSession] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const scheduleDemo = useCallback((fn: () => void, delayMs: number) => {
-    const timeout = setTimeout(() => {
-      demoTimersRef.current = demoTimersRef.current.filter((entry) => entry !== timeout);
-      fn();
-    }, delayMs);
-    demoTimersRef.current.push(timeout);
-  }, []);
-
-  const clearDemoTimers = useCallback(() => {
-    demoTimersRef.current.forEach((timeout) => clearTimeout(timeout));
-    demoTimersRef.current = [];
-  }, []);
 
   const setActiveThreadId = useCallback((threadId: string) => {
     setActiveThreadIdState(threadId);
   }, []);
 
   useEffect(() => {
-    if (searchConfig.mode === "demo") {
-      clearDemoTimers();
-      demoPendingTurnsRef.current = {};
-      const nextSnapshot = buildDemoSnapshot();
-      setSnapshot(nextSnapshot);
-      setActiveThreadIdState(searchConfig.threadId ?? nextSnapshot.threads[0]?.id ?? null);
-      setConnectionState("demo");
-      setError(null);
-      return undefined;
-    }
-
-    const transport = new WsTransport();
-    transportRef.current = transport;
     let disposed = false;
+    latestEventSequenceRef.current = 0;
+    syncInFlightRef.current = false;
+    pendingSyncRef.current = false;
+    serverConfigSyncInFlightRef.current = false;
+    pendingServerConfigSyncRef.current = false;
+    promptSubmittingRef.current = false;
+    respondingApprovalRequestIdsRef.current.clear();
+    respondingUserInputRequestIdsRef.current.clear();
+    interruptInFlightRef.current = false;
+    stopSessionInFlightRef.current = false;
+    setIsPromptSubmitting(false);
+    setRespondingApprovalRequestIds([]);
+    setRespondingUserInputRequestIds([]);
+    setIsInterruptingTurn(false);
+    setIsStoppingSession(false);
 
-    const syncSnapshot = async () => {
-      try {
-        const nextSnapshot = await transport.request<OrchestrationReadModel>(
-          ORCHESTRATION_WS_METHODS.getSnapshot,
-          {},
-        );
-        if (disposed) return;
-        latestSequenceRef.current = Math.max(
-          latestSequenceRef.current,
+    const flushSnapshotSync = async (): Promise<void> => {
+      const nextSnapshot = await backend.getSnapshot();
+      if (disposed) return;
+      if (searchConfig.mode === "live") {
+        latestEventSequenceRef.current = Math.max(
+          latestEventSequenceRef.current,
           nextSnapshot.snapshotSequence,
         );
-        setSnapshot(nextSnapshot);
-        setActiveThreadIdState((current) =>
-          current
-            ?? searchConfig.threadId
-            ?? bootstrapThreadIdRef.current
-            ?? nextSnapshot.threads[0]?.id
-            ?? null,
-        );
+      }
+      setSnapshot(nextSnapshot);
+      setActiveThreadIdState((current) =>
+        current ??
+        searchConfig.threadId ??
+        bootstrapThreadIdRef.current ??
+        nextSnapshot.threads[0]?.id ??
+        null,
+      );
+      if (pendingSyncRef.current) {
+        pendingSyncRef.current = false;
+        await flushSnapshotSync();
+      }
+    };
+
+    const syncSnapshot = async () => {
+      if (syncInFlightRef.current) {
+        pendingSyncRef.current = true;
+        return;
+      }
+      syncInFlightRef.current = true;
+      pendingSyncRef.current = false;
+      try {
+        await flushSnapshotSync();
         setError(null);
       } catch (nextError) {
         if (disposed) return;
         setError(nextError instanceof Error ? nextError.message : "Snapshot sync failed.");
-        setConnectionState("error");
+      } finally {
+        syncInFlightRef.current = false;
+      }
+    };
+
+    const flushServerConfigSync = async (): Promise<void> => {
+      const nextServerConfig = await backend.getServerConfig();
+      if (disposed) return;
+      setServerConfig(nextServerConfig);
+      if (pendingServerConfigSyncRef.current) {
+        pendingServerConfigSyncRef.current = false;
+        await flushServerConfigSync();
+      }
+    };
+
+    const syncServerConfig = async () => {
+      if (serverConfigSyncInFlightRef.current) {
+        pendingServerConfigSyncRef.current = true;
+        return;
+      }
+      serverConfigSyncInFlightRef.current = true;
+      pendingServerConfigSyncRef.current = false;
+      try {
+        await flushServerConfigSync();
+      } catch (nextError) {
+        if (disposed) return;
+        setError(nextError instanceof Error ? nextError.message : "Server config sync failed.");
+      } finally {
+        serverConfigSyncInFlightRef.current = false;
       }
     };
 
@@ -504,59 +445,72 @@ export function useConsoleData(): ConsoleDataState {
       }, 80);
     };
 
-    const unsubscribeConnection = transport.onConnectionState((state) => {
-      setConnectionState(state);
-      if (state === "connected") {
-        void syncSnapshot();
+    const unsubscribe = backend.subscribe((event) => {
+      if (event.type === "connection.state") {
+        setConnectionState(event.state);
+        if (event.state === "connected") {
+          void syncSnapshot();
+          void syncServerConfig();
+        }
+        return;
       }
-    });
 
-    const unsubscribeWelcome = transport.subscribe(WS_CHANNELS.serverWelcome, (data) => {
-      const payload = data as { bootstrapThreadId?: string } | null;
-      if (payload?.bootstrapThreadId) {
-        bootstrapThreadIdRef.current = payload.bootstrapThreadId;
-        setActiveThreadIdState((current) => current ?? payload.bootstrapThreadId ?? null);
+      if (event.type === "snapshot.updated") {
+        scheduleSnapshotSync();
+        return;
       }
+
+      if (event.type === "server.welcome") {
+        setWelcome(event.payload);
+        if (event.payload.bootstrapThreadId) {
+          bootstrapThreadIdRef.current = event.payload.bootstrapThreadId;
+          setActiveThreadIdState((current) => current ?? event.payload.bootstrapThreadId ?? null);
+        }
+        scheduleSnapshotSync();
+        return;
+      }
+
+      if (event.type === "server.config.updated") {
+        void syncServerConfig();
+        return;
+      }
+
+      if (event.payload.sequence <= latestEventSequenceRef.current) {
+        return;
+      }
+      latestEventSequenceRef.current = event.payload.sequence;
       scheduleSnapshotSync();
     });
 
-    const unsubscribeDomainEvent = transport.subscribe(
-      ORCHESTRATION_WS_CHANNELS.domainEvent,
-      (data) => {
-        const event = data as Partial<OrchestrationEvent> | null;
-        const sequence =
-          event && typeof event === "object" && typeof event.sequence === "number"
-            ? event.sequence
-            : null;
-        if (sequence !== null && sequence <= latestSequenceRef.current) {
-          return;
-        }
-        scheduleSnapshotSync();
-      },
-    );
+    backend.connect();
+
+    if (searchConfig.mode === "demo") {
+      setConnectionState("demo");
+      void syncSnapshot();
+      void syncServerConfig();
+    }
 
     return () => {
       disposed = true;
+      syncInFlightRef.current = false;
+      pendingSyncRef.current = false;
+      serverConfigSyncInFlightRef.current = false;
+      pendingServerConfigSyncRef.current = false;
       if (queuedSyncRef.current !== null) {
         clearTimeout(queuedSyncRef.current);
         queuedSyncRef.current = null;
       }
-      unsubscribeDomainEvent();
-      unsubscribeWelcome();
-      unsubscribeConnection();
-      transport.dispose();
-      transportRef.current = null;
+      unsubscribe();
+      backend.disconnect();
+      backend.dispose();
     };
-  }, [clearDemoTimers, searchConfig.mode, searchConfig.threadId]);
+  }, [backend, searchConfig.mode, searchConfig.threadId]);
 
   const threads = snapshot?.threads ?? [];
 
   const thread = useMemo(() => {
     if (!snapshot) return null;
-    const preferredThreadId =
-      activeThreadId
-      ?? searchConfig.threadId
-      ?? bootstrapThreadIdRef.current;
+    const preferredThreadId = activeThreadId ?? searchConfig.threadId ?? bootstrapThreadIdRef.current;
     if (!preferredThreadId) {
       return snapshot.threads[0] ?? null;
     }
@@ -568,10 +522,8 @@ export function useConsoleData(): ConsoleDataState {
   }, [activeThreadId, searchConfig.threadId, snapshot]);
 
   useEffect(() => {
-    if (!snapshot) return;
-    if (thread) {
-      setActiveThreadIdState(thread.id);
-    }
+    if (!snapshot || !thread) return;
+    setActiveThreadIdState(thread.id);
   }, [snapshot, thread]);
 
   const project = useMemo(() => {
@@ -581,76 +533,35 @@ export function useConsoleData(): ConsoleDataState {
 
   const pendingApprovals = useMemo(() => derivePendingApprovals(thread), [thread]);
   const pendingUserInputs = useMemo(() => derivePendingUserInputs(thread), [thread]);
+  const turnRunning = useMemo(() => isTurnRunning(thread), [thread]);
+  const canSubmitPrompt = useMemo(() => {
+    if (!thread) return false;
+    if (isPromptSubmitting) return false;
+    const activePendingUserInput = pendingUserInputs[0];
+    if (
+      activePendingUserInput &&
+      respondingUserInputRequestIds.includes(activePendingUserInput.requestId)
+    ) {
+      return false;
+    }
+    if (pendingUserInputs.length === 0 && turnRunning) return false;
+    if (searchConfig.mode === "live" && !canDispatchLiveCommand(connectionState)) return false;
+    return true;
+  }, [
+    connectionState,
+    isPromptSubmitting,
+    pendingUserInputs,
+    respondingUserInputRequestIds,
+    searchConfig.mode,
+    thread,
+    turnRunning,
+  ]);
 
-  const dispatchLiveCommand = useCallback(
-    async (command: Record<string, unknown>) => {
-      const transport = transportRef.current;
-      if (!transport) {
-        throw new Error("Live orchestration transport is not connected.");
-      }
-      await transport.request(ORCHESTRATION_WS_METHODS.dispatchCommand, { command });
-    },
-    [],
-  );
-
-  const continueDemoTurn = useCallback((
-    pendingTurn: DemoPendingTurn,
-    answers?: Record<string, unknown>,
-  ) => {
-    const chunks = demoReplyForPrompt(pendingTurn.prompt, answers)
-      .split("\n")
-      .filter((line, index, all) => index < all.length - 1 || line.length > 0);
-    let nextText = "";
-
-    chunks.forEach((chunk, index) => {
-      scheduleDemo(() => {
-        setSnapshot((current) => {
-          if (!current) return current;
-          return mapThread(current, pendingTurn.threadId, (currentThread) => {
-            nextText = nextText.length === 0 ? chunk : `${nextText}\n${chunk}`;
-            return updateMessageText(
-              currentThread,
-              pendingTurn.assistantMessageId,
-              nextText,
-              new Date().toISOString(),
-              true,
-            );
-          });
-        });
-      }, 120 * (index + 1));
-    });
-
-    scheduleDemo(() => {
-      setSnapshot((current) => {
-        if (!current) return current;
-        return mapThread(current, pendingTurn.threadId, (currentThread) => {
-          let nextThread = updateMessageText(
-            currentThread,
-            pendingTurn.assistantMessageId,
-            nextText,
-            new Date().toISOString(),
-            false,
-          );
-          nextThread = settleThreadTurn(
-            nextThread,
-            pendingTurn.turnId,
-            "completed",
-            new Date().toISOString(),
-            pendingTurn.assistantMessageId,
-          );
-          return appendActivity(nextThread, {
-            id: makeEventId("demo-activity-complete"),
-            tone: "info",
-            kind: "turn.completed",
-            summary: "Turn completed",
-            payload: { detail: "Demo turn settled through the orchestration read model." },
-            turnId: pendingTurn.turnId,
-            createdAt: new Date().toISOString(),
-          });
-        });
-      });
-    }, 120 * (chunks.length + 1));
-  }, [scheduleDemo]);
+  const assertLiveCommandReady = useCallback(() => {
+    if (searchConfig.mode === "live" && !canDispatchLiveCommand(connectionState)) {
+      throw new Error("Live backend is not connected.");
+    }
+  }, [connectionState, searchConfig.mode]);
 
   const submitPrompt = useCallback(
     async (prompt: string) => {
@@ -658,6 +569,10 @@ export function useConsoleData(): ConsoleDataState {
       if (trimmed.length === 0) return;
       if (!thread) {
         throw new Error("No orchestration thread is available.");
+      }
+      assertLiveCommandReady();
+      if (promptSubmittingRef.current) {
+        return;
       }
 
       const pendingUserInput = pendingUserInputs[0];
@@ -667,305 +582,65 @@ export function useConsoleData(): ConsoleDataState {
           throw new Error("Pending user input expects one answer per question.");
         }
 
-        if (searchConfig.mode === "demo") {
-          const now = new Date().toISOString();
-          const pendingTurn = demoPendingTurnsRef.current[pendingUserInput.requestId];
-          setSnapshot((current) => {
-            if (!current) return current;
-            return mapThread(current, thread.id, (currentThread) =>
-              appendActivity(currentThread, {
-                id: makeEventId("demo-user-input-resolved"),
-                tone: "info",
-                kind: "user-input.resolved",
-                summary: "User input resolved",
-                payload: {
-                  requestId: pendingUserInput.requestId,
-                  answers,
-                },
-                turnId: pendingTurn?.turnId ?? currentThread.latestTurn?.turnId ?? null,
-                createdAt: now,
-              }),
-            );
-          });
-          if (pendingTurn) {
-            delete demoPendingTurnsRef.current[pendingUserInput.requestId];
-            continueDemoTurn(pendingTurn, answers);
-          }
+        if (respondingUserInputRequestIdsRef.current.has(pendingUserInput.requestId)) {
           return;
         }
 
-        await dispatchLiveCommand({
-          type: "thread.user-input.respond",
-          commandId: makeId("command"),
+        respondingUserInputRequestIdsRef.current.add(pendingUserInput.requestId);
+        setRespondingUserInputRequestIds((existing) =>
+          existing.includes(pendingUserInput.requestId)
+            ? existing
+            : [...existing, pendingUserInput.requestId],
+        );
+        try {
+          await backend.dispatchCommand({
+            type: "thread.user-input.respond",
+            commandId: makeCommandId(),
+            threadId: thread.id,
+            requestId: pendingUserInput.requestId as ApprovalRequestId,
+            answers,
+            createdAt: new Date().toISOString(),
+          });
+          return;
+        } finally {
+          respondingUserInputRequestIdsRef.current.delete(pendingUserInput.requestId);
+          setRespondingUserInputRequestIds((existing) =>
+            existing.filter((id) => id !== pendingUserInput.requestId),
+          );
+        }
+      }
+
+      if (turnRunning) {
+        throw new Error("A turn is already running.");
+      }
+
+      promptSubmittingRef.current = true;
+      setIsPromptSubmitting(true);
+      try {
+        const provider = providerFromThread(thread);
+        await backend.dispatchCommand({
+          type: "thread.turn.start",
+          commandId: makeCommandId(),
           threadId: thread.id,
-          requestId: pendingUserInput.requestId,
-          answers,
+          message: {
+            messageId: makeId("message") as MessageId,
+            role: "user",
+            text: trimmed,
+            attachments: [],
+          },
+          ...(provider ? { provider } : {}),
+          model: thread.model,
+          assistantDeliveryMode: "streaming",
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
           createdAt: new Date().toISOString(),
         });
-        return;
+      } finally {
+        promptSubmittingRef.current = false;
+        setIsPromptSubmitting(false);
       }
-
-      if (searchConfig.mode === "demo") {
-        clearDemoTimers();
-        const now = new Date().toISOString();
-        const turnId = makeId("demo-turn") as TurnId;
-        const userMessageId = makeId("demo-user-message") as MessageId;
-        const assistantMessageId = makeId("demo-assistant-message") as MessageId;
-        let scenario: "direct" | "approval" | "user-input" | "error" = "direct";
-        const userTurnCount = thread.messages.filter((message) => message.role === "user").length + 1;
-
-        if (demoShouldFail(trimmed)) {
-          scenario = "error";
-        } else if (userTurnCount % 3 === 1) {
-          scenario = "approval";
-        } else if (userTurnCount % 3 === 2) {
-          scenario = "user-input";
-        }
-
-        setSnapshot((current) => {
-          if (!current) return current;
-          return mapThread(current, thread.id, (currentThread) => {
-            const nextMessages = [
-              ...currentThread.messages,
-              {
-                id: userMessageId,
-                role: "user" as const,
-                text: trimmed,
-                attachments: [],
-                turnId,
-                streaming: false,
-                createdAt: now,
-                updatedAt: now,
-              },
-              {
-                id: assistantMessageId,
-                role: "assistant" as const,
-                text: "",
-                attachments: [],
-                turnId,
-                streaming: true,
-                createdAt: now,
-                updatedAt: now,
-              },
-            ] as OrchestrationThread["messages"];
-
-            let nextThread: OrchestrationThread = {
-              ...currentThread,
-              updatedAt: now,
-              messages: nextMessages,
-              latestTurn: {
-                turnId,
-                state: "running",
-                requestedAt: now,
-                startedAt: now,
-                completedAt: null,
-                assistantMessageId,
-              },
-              session: {
-                threadId: currentThread.id,
-                status: "running" as const,
-                providerName: currentThread.session?.providerName ?? "codex",
-                runtimeMode: currentThread.runtimeMode,
-                activeTurnId: turnId,
-                lastError: null,
-                updatedAt: now,
-              },
-            };
-
-            nextThread = appendActivity(nextThread, {
-              id: makeEventId("demo-turn-started"),
-              tone: "info",
-              kind: "turn.started",
-              summary: "Turn started",
-              payload: { detail: "Demo mode simulating orchestration turn lifecycle." },
-              turnId,
-              createdAt: now,
-            });
-
-            return nextThread;
-          });
-        });
-
-        scheduleDemo(() => {
-          setSnapshot((current) => {
-            if (!current) return current;
-            return mapThread(current, thread.id, (currentThread) =>
-              appendActivity(currentThread, {
-                id: makeEventId("demo-tool-started"),
-                tone: "tool",
-                kind: "tool.started",
-                summary: "Inspect transcript state",
-                payload: {
-                  itemType: "command_execution",
-                  title: "Inspect transcript state",
-                  status: "inProgress",
-                  data: {
-                    item: {
-                      input: {
-                        command: ["rg", "thread", "apps/console-ui/src"],
-                      },
-                    },
-                  },
-                },
-                turnId,
-                createdAt: new Date().toISOString(),
-              }),
-            );
-          });
-        }, 90);
-
-        if (scenario === "approval") {
-          const requestId = makeId("demo-approval");
-          demoPendingTurnsRef.current[requestId] = {
-            requestId,
-            kind: "approval",
-            threadId: thread.id,
-            turnId,
-            assistantMessageId,
-            prompt: trimmed,
-          };
-          scheduleDemo(() => {
-            setSnapshot((current) => {
-              if (!current) return current;
-              return mapThread(current, thread.id, (currentThread) =>
-                appendActivity(currentThread, {
-                  id: makeEventId("demo-approval-requested"),
-                  tone: "approval",
-                  kind: "approval.requested",
-                  summary: "File-change approval requested",
-                  payload: {
-                    requestId,
-                    requestKind: "file-change",
-                    requestType: "apply_patch_approval",
-                    detail: "Demo mode paused the turn to request a file-change approval.",
-                  },
-                  turnId,
-                  createdAt: new Date().toISOString(),
-                }),
-              );
-            });
-          }, 200);
-          return;
-        }
-
-        if (scenario === "user-input") {
-          const requestId = makeId("demo-user-input");
-          demoPendingTurnsRef.current[requestId] = {
-            requestId,
-            kind: "user-input",
-            threadId: thread.id,
-            turnId,
-            assistantMessageId,
-            prompt: trimmed,
-          };
-          scheduleDemo(() => {
-            setSnapshot((current) => {
-              if (!current) return current;
-              return mapThread(current, thread.id, (currentThread) =>
-                appendActivity(currentThread, {
-                  id: makeEventId("demo-user-input-requested"),
-                  tone: "info",
-                  kind: "user-input.requested",
-                  summary: "User input requested",
-                  payload: {
-                    requestId,
-                    questions: [
-                      {
-                        id: "demo_source",
-                        header: "Source",
-                        question: "Which mode should this console stay in?",
-                        options: [
-                          { label: "Demo", description: "Keep using local orchestration fixtures." },
-                          { label: "Live", description: "Connect to the orchestration websocket." },
-                        ],
-                      },
-                    ],
-                  },
-                  turnId,
-                  createdAt: new Date().toISOString(),
-                }),
-              );
-            });
-          }, 200);
-          return;
-        }
-
-        if (scenario === "error") {
-          scheduleDemo(() => {
-            setSnapshot((current) => {
-              if (!current) return current;
-              return mapThread(current, thread.id, (currentThread) => {
-                let nextThread = appendActivity(currentThread, {
-                  id: makeEventId("demo-turn-error"),
-                  tone: "error",
-                  kind: "provider.turn.failed",
-                  summary: "Turn failed",
-                  payload: {
-                    detail: "Demo mode simulated a provider failure for this prompt.",
-                  },
-                  turnId,
-                  createdAt: new Date().toISOString(),
-                });
-                nextThread = updateMessageText(
-                  nextThread,
-                  assistantMessageId,
-                  "Demo mode simulated a provider failure for this turn.",
-                  new Date().toISOString(),
-                  false,
-                );
-                return settleThreadTurn(
-                  nextThread,
-                  turnId,
-                  "error",
-                  new Date().toISOString(),
-                  assistantMessageId,
-                );
-              });
-            });
-          }, 260);
-          return;
-        }
-
-        continueDemoTurn({
-          requestId: makeId("demo-direct"),
-          kind: "approval",
-          threadId: thread.id,
-          turnId,
-          assistantMessageId,
-          prompt: trimmed,
-        });
-        return;
-      }
-
-      const createdAt = new Date().toISOString();
-      const provider = providerFromThread(thread);
-      await dispatchLiveCommand({
-        type: "thread.turn.start",
-        commandId: makeId("command"),
-        threadId: thread.id,
-        message: {
-          messageId: makeId("message"),
-          role: "user",
-          text: trimmed,
-          attachments: [],
-        },
-        ...(provider ? { provider } : {}),
-        model: thread.model,
-        assistantDeliveryMode: "streaming",
-        runtimeMode: thread.runtimeMode,
-        interactionMode: thread.interactionMode,
-        createdAt,
-      });
     },
-    [
-      clearDemoTimers,
-      continueDemoTurn,
-      dispatchLiveCommand,
-      pendingUserInputs,
-      scheduleDemo,
-      searchConfig.mode,
-      thread,
-    ],
+    [assertLiveCommandReady, backend, pendingUserInputs, thread, turnRunning],
   );
 
   const respondToApproval = useCallback(
@@ -973,71 +648,30 @@ export function useConsoleData(): ConsoleDataState {
       if (!thread) {
         throw new Error("No orchestration thread is available.");
       }
-
-      if (searchConfig.mode === "demo") {
-        const pendingTurn = demoPendingTurnsRef.current[requestId];
-        const now = new Date().toISOString();
-        setSnapshot((current) => {
-          if (!current) return current;
-          return mapThread(current, thread.id, (currentThread) =>
-            appendActivity(currentThread, {
-              id: makeEventId("demo-approval-resolved"),
-              tone: "approval",
-              kind: "approval.resolved",
-              summary: "Approval resolved",
-              payload: {
-                requestId,
-                requestKind: "file-change",
-                decision,
-              },
-              turnId: pendingTurn?.turnId ?? currentThread.latestTurn?.turnId ?? null,
-              createdAt: now,
-            }),
-          );
-        });
-
-        delete demoPendingTurnsRef.current[requestId];
-        if (!pendingTurn) {
-          return;
-        }
-
-        if (decision === "decline" || decision === "cancel") {
-          setSnapshot((current) => {
-            if (!current) return current;
-            return mapThread(current, thread.id, (currentThread) => {
-              let nextThread = updateMessageText(
-                currentThread,
-                pendingTurn.assistantMessageId,
-                "The demo turn was interrupted because the approval request was declined.",
-                new Date().toISOString(),
-                false,
-              );
-              return settleThreadTurn(
-                nextThread,
-                pendingTurn.turnId,
-                "interrupted",
-                new Date().toISOString(),
-                pendingTurn.assistantMessageId,
-              );
-            });
-          });
-          return;
-        }
-
-        continueDemoTurn(pendingTurn);
+      assertLiveCommandReady();
+      if (respondingApprovalRequestIdsRef.current.has(requestId)) {
         return;
       }
 
-      await dispatchLiveCommand({
-        type: "thread.approval.respond",
-        commandId: makeId("command"),
-        threadId: thread.id,
-        requestId,
-        decision,
-        createdAt: new Date().toISOString(),
-      });
+      respondingApprovalRequestIdsRef.current.add(requestId);
+      setRespondingApprovalRequestIds((existing) =>
+        existing.includes(requestId) ? existing : [...existing, requestId],
+      );
+      try {
+        await backend.dispatchCommand({
+          type: "thread.approval.respond",
+          commandId: makeCommandId(),
+          threadId: thread.id,
+          requestId: requestId as ApprovalRequestId,
+          decision,
+          createdAt: new Date().toISOString(),
+        });
+      } finally {
+        respondingApprovalRequestIdsRef.current.delete(requestId);
+        setRespondingApprovalRequestIds((existing) => existing.filter((id) => id !== requestId));
+      }
     },
-    [continueDemoTurn, dispatchLiveCommand, searchConfig.mode, thread],
+    [assertLiveCommandReady, backend, thread],
   );
 
   const respondToUserInput = useCallback(
@@ -1045,202 +679,133 @@ export function useConsoleData(): ConsoleDataState {
       if (!thread) {
         throw new Error("No orchestration thread is available.");
       }
-
-      if (searchConfig.mode === "demo") {
-        const pendingTurn = demoPendingTurnsRef.current[requestId];
-        const now = new Date().toISOString();
-        setSnapshot((current) => {
-          if (!current) return current;
-          return mapThread(current, thread.id, (currentThread) =>
-            appendActivity(currentThread, {
-              id: makeEventId("demo-user-input-resolved"),
-              tone: "info",
-              kind: "user-input.resolved",
-              summary: "User input resolved",
-              payload: {
-                requestId,
-                answers,
-              },
-              turnId: pendingTurn?.turnId ?? currentThread.latestTurn?.turnId ?? null,
-              createdAt: now,
-            }),
-          );
-        });
-
-        delete demoPendingTurnsRef.current[requestId];
-        if (pendingTurn) {
-          continueDemoTurn(pendingTurn, answers);
-        }
+      assertLiveCommandReady();
+      if (respondingUserInputRequestIdsRef.current.has(requestId)) {
         return;
       }
 
-      await dispatchLiveCommand({
-        type: "thread.user-input.respond",
-        commandId: makeId("command"),
-        threadId: thread.id,
-        requestId,
-        answers,
-        createdAt: new Date().toISOString(),
-      });
+      respondingUserInputRequestIdsRef.current.add(requestId);
+      setRespondingUserInputRequestIds((existing) =>
+        existing.includes(requestId) ? existing : [...existing, requestId],
+      );
+      try {
+        await backend.dispatchCommand({
+          type: "thread.user-input.respond",
+          commandId: makeCommandId(),
+          threadId: thread.id,
+          requestId: requestId as ApprovalRequestId,
+          answers,
+          createdAt: new Date().toISOString(),
+        });
+      } finally {
+        respondingUserInputRequestIdsRef.current.delete(requestId);
+        setRespondingUserInputRequestIds((existing) =>
+          existing.filter((id) => id !== requestId),
+        );
+      }
     },
-    [continueDemoTurn, dispatchLiveCommand, searchConfig.mode, thread],
+    [assertLiveCommandReady, backend, thread],
   );
 
   const setRuntimeMode = useCallback(
     async (runtimeMode: RuntimeMode) => {
       if (!thread || thread.runtimeMode === runtimeMode) return;
+      assertLiveCommandReady();
 
-      if (searchConfig.mode === "demo") {
-        setSnapshot((current) => {
-          if (!current) return current;
-          return mapThread(current, thread.id, (currentThread) => ({
-            ...currentThread,
-            runtimeMode,
-            updatedAt: new Date().toISOString(),
-            session: currentThread.session
-              ? {
-                  ...currentThread.session,
-                  runtimeMode,
-                  updatedAt: new Date().toISOString(),
-                }
-              : null,
-          }));
-        });
-        return;
-      }
-
-      await dispatchLiveCommand({
+      await backend.dispatchCommand({
         type: "thread.runtime-mode.set",
-        commandId: makeId("command"),
+        commandId: makeCommandId(),
         threadId: thread.id,
         runtimeMode,
         createdAt: new Date().toISOString(),
       });
     },
-    [dispatchLiveCommand, searchConfig.mode, thread],
+    [assertLiveCommandReady, backend, thread],
   );
 
   const setInteractionMode = useCallback(
     async (interactionMode: ProviderInteractionMode) => {
       if (!thread || thread.interactionMode === interactionMode) return;
+      assertLiveCommandReady();
 
-      if (searchConfig.mode === "demo") {
-        setSnapshot((current) => {
-          if (!current) return current;
-          return mapThread(current, thread.id, (currentThread) => ({
-            ...currentThread,
-            interactionMode,
-            updatedAt: new Date().toISOString(),
-          }));
-        });
-        return;
-      }
-
-      await dispatchLiveCommand({
+      await backend.dispatchCommand({
         type: "thread.interaction-mode.set",
-        commandId: makeId("command"),
+        commandId: makeCommandId(),
         threadId: thread.id,
         interactionMode,
         createdAt: new Date().toISOString(),
       });
     },
-    [dispatchLiveCommand, searchConfig.mode, thread],
+    [assertLiveCommandReady, backend, thread],
   );
 
   const interruptTurn = useCallback(async () => {
     if (!thread) {
       throw new Error("No orchestration thread is available.");
     }
-
-    if (searchConfig.mode === "demo") {
-      clearDemoTimers();
-      setSnapshot((current) => {
-        if (!current) return current;
-        return mapThread(current, thread.id, (currentThread) => {
-          const turnId = currentThread.latestTurn?.turnId ?? null;
-          let nextThread = appendActivity(currentThread, {
-            id: makeEventId("demo-interrupt"),
-            tone: "info",
-            kind: "thread.turn.interrupt-requested",
-            summary: "Turn interrupt requested",
-            payload: {},
-            turnId,
-            createdAt: new Date().toISOString(),
-          });
-          if (turnId) {
-            nextThread = settleThreadTurn(
-              nextThread,
-              turnId,
-              "interrupted",
-              new Date().toISOString(),
-              currentThread.latestTurn?.assistantMessageId ?? null,
-            );
-          }
-          return nextThread;
-        });
-      });
-      demoPendingTurnsRef.current = {};
+    assertLiveCommandReady();
+    if (interruptInFlightRef.current) {
       return;
     }
 
-    await dispatchLiveCommand({
-      type: "thread.turn.interrupt",
-      commandId: makeId("command"),
-      threadId: thread.id,
-      createdAt: new Date().toISOString(),
-    });
-  }, [clearDemoTimers, dispatchLiveCommand, searchConfig.mode, thread]);
+    interruptInFlightRef.current = true;
+    setIsInterruptingTurn(true);
+    try {
+      await backend.dispatchCommand({
+        type: "thread.turn.interrupt",
+        commandId: makeCommandId(),
+        threadId: thread.id,
+        createdAt: new Date().toISOString(),
+      });
+    } finally {
+      interruptInFlightRef.current = false;
+      setIsInterruptingTurn(false);
+    }
+  }, [assertLiveCommandReady, backend, thread]);
 
   const stopSession = useCallback(async () => {
     if (!thread) {
       throw new Error("No orchestration thread is available.");
     }
-
-    if (searchConfig.mode === "demo") {
-      clearDemoTimers();
-      setSnapshot((current) => {
-        if (!current) return current;
-        return mapThread(current, thread.id, (currentThread) => ({
-          ...currentThread,
-          updatedAt: new Date().toISOString(),
-          session: currentThread.session
-            ? {
-                ...currentThread.session,
-                status: "stopped",
-                activeTurnId: null,
-                updatedAt: new Date().toISOString(),
-              }
-            : null,
-        }));
-      });
-      demoPendingTurnsRef.current = {};
+    assertLiveCommandReady();
+    if (stopSessionInFlightRef.current) {
       return;
     }
 
-    await dispatchLiveCommand({
-      type: "thread.session.stop",
-      commandId: makeId("command"),
-      threadId: thread.id,
-      createdAt: new Date().toISOString(),
-    });
-  }, [clearDemoTimers, dispatchLiveCommand, searchConfig.mode, thread]);
-
-  useEffect(() => {
-    return () => {
-      clearDemoTimers();
-    };
-  }, [clearDemoTimers]);
+    stopSessionInFlightRef.current = true;
+    setIsStoppingSession(true);
+    try {
+      await backend.dispatchCommand({
+        type: "thread.session.stop",
+        commandId: makeCommandId(),
+        threadId: thread.id,
+        createdAt: new Date().toISOString(),
+      });
+    } finally {
+      stopSessionInFlightRef.current = false;
+      setIsStoppingSession(false);
+    }
+  }, [assertLiveCommandReady, backend, thread]);
 
   return {
     mode: searchConfig.mode,
     connectionState,
     snapshot,
+    serverConfig,
+    welcome,
     threads,
     activeThreadId: thread?.id ?? null,
     thread,
     project,
     pendingApprovals,
     pendingUserInputs,
+    isTurnRunning: turnRunning,
+    isPromptSubmitting,
+    canSubmitPrompt,
+    respondingApprovalRequestIds,
+    respondingUserInputRequestIds,
+    isInterruptingTurn,
+    isStoppingSession,
     error,
     setActiveThreadId,
     submitPrompt,

@@ -1,16 +1,16 @@
 import { useEffect, useRef } from "react";
 
-import type { PaletteCommand } from "./slashCommands";
+import type { CommandPaletteCommand } from "./commandPaletteCommands";
 
 interface CommandPaletteProps {
   readonly open: boolean;
   readonly query: string;
-  readonly commands: ReadonlyArray<PaletteCommand>;
+  readonly commands: ReadonlyArray<CommandPaletteCommand>;
   readonly selectedIndex: number;
   onClose(): void;
   onQueryChange(value: string): void;
   onSelectedIndexChange(index: number): void;
-  onRun(command: PaletteCommand): void;
+  onRun(command: CommandPaletteCommand): void;
 }
 
 export function CommandPalette({

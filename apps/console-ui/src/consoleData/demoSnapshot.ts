@@ -275,27 +275,13 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
           {
             id: EventId.makeUnsafe("activity-console-demo-8"),
             tone: "info",
-            kind: "user-input.requested",
-            summary: "User input requested",
+            kind: "user-input.resolved",
+            summary: "User input resolved",
             payload: {
               requestId: "user-input-console-demo-1",
-              questions: [
-                {
-                  id: "source_mode",
-                  header: "Source",
-                  question: "Which data source should the console use by default?",
-                  options: [
-                    {
-                      label: "Demo",
-                      description: "Use local thread fixtures without a provider session.",
-                    },
-                    {
-                      label: "Live",
-                      description: "Connect to the orchestration websocket and render real backend state.",
-                    },
-                  ],
-                },
-              ],
+              answers: {
+                source_mode: "Demo",
+              },
             },
             turnId: TURN_3,
             sequence: 8,

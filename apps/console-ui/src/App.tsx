@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CommandPalette } from "./CommandPalette";
+import {
+  filterCommandPaletteCommands,
+  type CommandPaletteCommand,
+} from "./commandPaletteCommands";
 import { TranscriptRenderer, type TranscriptRendererHandle, threadToTranscriptBlocks } from "./transcript";
 import { useConsoleData } from "./consoleData/useConsoleData";
-import { filterCommands, type PaletteCommand } from "./slashCommands";
 
-interface AppPaletteCommand extends PaletteCommand {
+interface AppPaletteCommand extends CommandPaletteCommand {
   run(): Promise<void> | void;
 }
 
@@ -39,6 +42,8 @@ export function App() {
   const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
     const commands: AppPaletteCommand[] = [];
     const activeThread = consoleData.thread;
+    const canDispatchBackendCommands =
+      consoleData.mode === "demo" || consoleData.connectionState === "connected";
 
     for (const thread of consoleData.threads) {
       commands.push({
@@ -52,7 +57,7 @@ export function App() {
       });
     }
 
-    if (activeThread) {
+    if (activeThread && canDispatchBackendCommands) {
       commands.push(
         {
           id: `runtime:${activeThread.id}:full-access`,
@@ -91,7 +96,7 @@ export function App() {
         },
       );
 
-      if (activeThread.latestTurn?.state === "running" || activeThread.session?.status === "running") {
+      if (consoleData.isTurnRunning && !consoleData.isInterruptingTurn && !consoleData.isStoppingSession) {
         commands.push({
           id: `turn:${activeThread.id}:interrupt`,
           label: "Interrupt Turn",
@@ -103,6 +108,12 @@ export function App() {
     }
 
     for (const approval of consoleData.pendingApprovals) {
+      if (!canDispatchBackendCommands) {
+        continue;
+      }
+      if (consoleData.respondingApprovalRequestIds.includes(approval.requestId)) {
+        continue;
+      }
       commands.push(
         {
           id: `approval:${approval.requestId}:accept`,
@@ -122,6 +133,12 @@ export function App() {
     }
 
     for (const pendingUserInput of consoleData.pendingUserInputs) {
+      if (!canDispatchBackendCommands) {
+        continue;
+      }
+      if (consoleData.respondingUserInputRequestIds.includes(pendingUserInput.requestId)) {
+        continue;
+      }
       if (pendingUserInput.questions.length === 1) {
         const question = pendingUserInput.questions[0];
         if (!question) continue;
@@ -155,7 +172,7 @@ export function App() {
     return commands;
   }, [consoleData]);
   const filteredCommands = useMemo(
-    () => filterCommands(paletteCommands, paletteQuery),
+    () => filterCommandPaletteCommands(paletteCommands, paletteQuery),
     [paletteCommands, paletteQuery],
   );
 
@@ -189,7 +206,7 @@ export function App() {
     });
   }, []);
 
-  const runPaletteCommand = useCallback(async (command: PaletteCommand) => {
+  const runPaletteCommand = useCallback(async (command: CommandPaletteCommand) => {
     const executable = command as AppPaletteCommand;
     try {
       await executable.run();
@@ -252,11 +269,18 @@ export function App() {
     const cwd = consoleData.project?.workspaceRoot ?? "no project";
     const runtime = consoleData.thread?.runtimeMode ?? "full-access";
     const errorText = submitError ?? consoleData.error;
-    const base = `${source} · ${provider} · ${runtime} · ${title} · ${cwd}`;
+    const phase = consoleData.isTurnRunning
+      ? "running"
+      : consoleData.isPromptSubmitting
+        ? "submitting"
+        : "idle";
+    const base = `${source} · ${phase} · ${provider} · ${runtime} · ${title} · ${cwd}`;
     return errorText ? `${base} · ${errorText}` : base;
   }, [
     consoleData.connectionState,
     consoleData.error,
+    consoleData.isPromptSubmitting,
+    consoleData.isTurnRunning,
     consoleData.mode,
     consoleData.project?.workspaceRoot,
     consoleData.thread?.model,
@@ -273,7 +297,12 @@ export function App() {
       <div className="console-shell">
         <main className="conversation-scroll">
           <div className="transcript-shell">
-            <TranscriptRenderer ref={transcriptRef} blocks={blocks} onSubmit={handleSubmit} />
+            <TranscriptRenderer
+              ref={transcriptRef}
+              blocks={blocks}
+              onSubmit={handleSubmit}
+              submitDisabled={!consoleData.canSubmitPrompt}
+            />
           </div>
         </main>
         <footer className="status-line">{footerText}</footer>

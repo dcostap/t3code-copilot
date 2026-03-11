@@ -22,6 +22,7 @@ This is not meant to evolve into a generic chat dashboard. The target is a focus
 - Keep the backend stack, provider integrations, event model, and desktop packaging flow.
 - Keep the existing frontend in the repo while building a new frontend alongside it.
 - Make the new frontend the main product surface over time, without requiring immediate deletion of the current one.
+- Treat the new frontend as a parallel client of the same canonical backend, not as a separate product architecture.
 - Reuse pieces of the existing frontend only when they are clearly useful. Do not inherit old UI patterns by default.
 - Favor simple, text-first interactions over dense control surfaces.
 - The transcript is the product. Input, streaming, diffs, approvals, plans, and tool activity should all support transcript quality first.
@@ -41,8 +42,11 @@ If a tradeoff is required, choose coherence, reliability, and transcript quality
 - Do not treat the existing web UI as the design source of truth.
 - Do not assume the current frontend must be rewritten in place. Parallel frontend development is a valid and preferred path.
 - Build new UI flows intentionally from first principles.
+- Keep the new frontend aligned with the shared backend/contracts so this fork can continue absorbing external repo changes cleanly over time.
+- Use Context7 whenever possible to consult up-to-date library and framework documentation before making architectural or implementation decisions based on package behavior.
 - Preserve the provider/runtime boundary. Provider-specific quirks belong in the backend adapter layer, not in the frontend.
 - Keep shared contracts canonical. If the frontend needs new behavior, prefer evolving contracts and runtime events cleanly rather than inventing ad hoc client state.
+- Do not invent a console-specific backend contract or frontend-only runtime protocol for the new UI.
 - Avoid duplicating logic across frontend surfaces. Extract shared primitives when behavior is reused.
 - Keep the UI visually restrained. No generic enterprise dashboard patterns.
 
@@ -63,8 +67,10 @@ The backend is a major reason this fork exists. Protect these qualities:
 - resumable sessions
 - approval and user-input flows
 - provider-specific capability handling
+- shared support for the existing Codex and Copilot integration paths
 
 Frontend work should adapt to this backend cleanly, not bypass it.
+Backend and provider fixes should land once and benefit both frontend surfaces whenever possible.
 
 ## Completion Requirements
 
@@ -76,5 +82,6 @@ Frontend work should adapt to this backend cleanly, not bypass it.
 
 - Prefer evolving this fork over building parallel prototypes in the old TUI repo.
 - Prefer adding the new frontend beside the existing one rather than forcing a risky in-place rewrite.
+- When external or upstream changes land in the fork, prefer adapting the new UI to the shared backend/contracts rather than forking backend behavior in the frontend.
 - When making UX decisions, bias toward the desired product feel, not toward preserving legacy frontend behavior.
 - When in doubt, make the app feel more like a sharp local instrument and less like a web app in a window.
