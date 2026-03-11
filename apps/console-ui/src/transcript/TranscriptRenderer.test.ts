@@ -3,6 +3,7 @@ import { EditorState } from "@codemirror/state";
 
 import {
   getHistorySelectionLimitForPromptStart,
+  promptSeparatorClassesForInteractionMode,
   resolveTranscriptRegionForPointer,
   resolveTranscriptRegionForPosition,
   shouldRedirectHistoryTypingToPrompt,
@@ -45,6 +46,13 @@ describe("getHistorySelectionLimit", () => {
     const state = EditorState.create({ doc: "prompt" });
 
     expect(getHistorySelectionLimitForPromptStart(state.doc, 0)).toBe(0);
+  });
+});
+
+describe("promptSeparatorClassesForInteractionMode", () => {
+  it("adds the plan-mode separator class only in plan mode", () => {
+    expect(promptSeparatorClassesForInteractionMode("default")).toEqual([]);
+    expect(promptSeparatorClassesForInteractionMode("plan")).toEqual(["cm-line-promptSeparatorPlan"]);
   });
 });
 

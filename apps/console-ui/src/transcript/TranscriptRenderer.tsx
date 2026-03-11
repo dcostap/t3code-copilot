@@ -48,6 +48,7 @@ interface PositionedWidget {
   readonly position: number;
   readonly side: -1 | 1;
   readonly widget: WidgetType;
+  readonly signature: string;
 }
 
 interface StoredSelection {
@@ -63,6 +64,7 @@ interface StoredPromptSelection {
 interface TranscriptRendererProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
   readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
+  readonly interactionMode?: "default" | "plan";
   readonly pendingUserInputHighlight?: {
     readonly requestId: string;
     readonly questionIndex: number;
@@ -212,7 +214,10 @@ function flattenBlocks(
   },
 ) {
   const allLines: AnnotatedLine[] = [];
-  const widgetsByLineIndex = new Map<number, { widget: WidgetType; side: -1 | 1 }>();
+  const widgetsByLineIndex = new Map<
+    number,
+    { widget: WidgetType; side: -1 | 1; signature: string }
+  >();
 
   for (const block of blocks) {
     const blockLines = blockToLines(block).map((line) => {
@@ -256,6 +261,7 @@ function flattenBlocks(
         widgetsByLineIndex.set(startLineIndex + lineOffset, {
           widget: new ImageAttachmentTileWidget(attachment),
           side: 1,
+          signature: `${attachment.id}:${attachment.name}:${attachment.mimeType}:${attachment.sizeBytes}:${attachment.previewUrl ?? ""}`,
         });
       });
     }
@@ -270,6 +276,7 @@ function flattenBlocks(
 function buildTranscriptDocument(
   blocks: ReadonlyArray<TranscriptBlock>,
   draft: string,
+  interactionMode: "default" | "plan",
   pendingUserInputHighlight?: {
     readonly requestId: string;
     readonly questionIndex: number;
@@ -280,7 +287,11 @@ function buildTranscriptDocument(
   const draftLines = draft.length > 0 ? draft.split("\n") : [""];
   const allLines: AnnotatedLine[] = [
     ...historyLines,
-    { text: "", kind: "promptSeparator" },
+    {
+      text: "",
+      kind: "promptSeparator",
+      extraClasses: promptSeparatorClassesForInteractionMode(interactionMode),
+    },
     { text: draftLines[0] ?? "", kind: "promptInput" },
     ...draftLines.slice(1).map((line) => ({ text: line, kind: "promptInput" as const })),
   ];
@@ -317,6 +328,7 @@ function buildTranscriptDocument(
         position: widget.side > 0 ? lineEnd : from,
         side: widget.side,
         widget: widget.widget,
+        signature: widget.signature,
       });
     }
     if (index < allLines.length - 1) {
@@ -351,6 +363,16 @@ function buildDecorations(
   );
   ranges.push(Decoration.line({ class: "cm-line-promptStart" }).range(promptStart));
   return Decoration.set(ranges, true);
+}
+
+function buildDecorationSignature(docModel: TranscriptDocumentModel) {
+  const lineSignature = docModel.lines
+    .map((line) => `${line.from}:${line.kind}:${(line.extraClasses ?? []).join(",")}`)
+    .join("|");
+  const widgetSignature = docModel.widgets
+    .map((widget) => `${widget.position}:${widget.side}:${widget.signature}`)
+    .join("|");
+  return `${docModel.promptStart}::${lineSignature}::${widgetSignature}`;
 }
 
 function buildEditorTheme() {
@@ -454,6 +476,28 @@ function buildEditorTheme() {
         right: "0",
         top: "50%",
         borderTop: "1px solid rgba(95, 103, 111, 0.42)",
+        transform: "translateY(-50%)",
+      },
+      ".cm-line-promptSeparator.cm-line-promptSeparatorPlan": {
+        minHeight: "16px",
+      },
+      ".cm-line-promptSeparator.cm-line-promptSeparatorPlan::before": {
+        content: '"──── Plan mode "',
+        position: "absolute",
+        left: "0",
+        top: "50%",
+        color: "#7fc96d",
+        backgroundColor: "#0e1419",
+        paddingRight: "1ch",
+        transform: "translateY(-50%)",
+      },
+      ".cm-line-promptSeparator.cm-line-promptSeparatorPlan::after": {
+        content: '""',
+        position: "absolute",
+        left: "18ch",
+        right: "0",
+        top: "50%",
+        borderTop: "1px solid rgba(127, 201, 109, 0.62)",
         transform: "translateY(-50%)",
       },
       ".cm-line-userMessage": { color: "#e0e4e8" },
@@ -587,6 +631,12 @@ export function resolveTranscriptRegionForPointer(
   );
 }
 
+export function promptSeparatorClassesForInteractionMode(
+  interactionMode: "default" | "plan",
+) {
+  return interactionMode === "plan" ? ["cm-line-promptSeparatorPlan"] : [];
+}
+
 export function shouldRedirectHistoryTypingToPrompt(
   event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey">,
 ) {
@@ -699,6 +749,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     {
       blocks,
       composerAttachments = [],
+      interactionMode = "default",
       pendingUserInputHighlight,
       onAddImageFiles,
       onDraftChange,
@@ -721,6 +772,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const onDraftChangeRef = useRef(onDraftChange);
     const submitDisabledRef = useRef(submitDisabled);
     const composerAttachmentsRef = useRef(composerAttachments);
+    const appliedDecorationSignatureRef = useRef("");
     const dragDepthRef = useRef(0);
     const [isDraggingImages, setIsDraggingImages] = useState(false);
     const [draft, setDraft] = useState("");
@@ -734,8 +786,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     }, [composerAttachments, draft, onDraftChange, onSubmit, submitDisabled]);
 
     const docModel = useMemo(
-      () => buildTranscriptDocument(blocks, draft, pendingUserInputHighlight),
-      [blocks, draft, pendingUserInputHighlight],
+      () => buildTranscriptDocument(blocks, draft, interactionMode, pendingUserInputHighlight),
+      [blocks, draft, interactionMode, pendingUserInputHighlight],
     );
     const initialDocModelRef = useRef(docModel);
 
@@ -1081,6 +1133,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       });
 
       viewRef.current = view;
+      appliedDecorationSignatureRef.current = buildDecorationSignature(initialDocModel);
 
       if (!hasAutofocusedRef.current) {
         hasAutofocusedRef.current = true;
@@ -1109,11 +1162,13 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
       const currentText = view.state.doc.toString();
       const currentPromptStart = view.state.field(promptStartField);
-      if (currentText === docModel.text && currentPromptStart === docModel.promptStart) {
+      const nextDecorationSignature = buildDecorationSignature(docModel);
+      const isTextStable = currentText === docModel.text && currentPromptStart === docModel.promptStart;
+      if (isTextStable && appliedDecorationSignatureRef.current === nextDecorationSignature) {
         return;
       }
 
-    const nextSelection =
+      const nextSelection =
         activeRegionRef.current === "prompt"
           ? resolvePromptSelectionForDocModel(docModel, promptSelectionRef.current)
           : resolveHistorySelectionForDocModel(docModel, historySelectionRef.current);
@@ -1124,8 +1179,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
       syncingViewRef.current = true;
       view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: docModel.text },
-        selection: EditorSelection.range(nextSelection.anchor, nextSelection.head),
+        ...(!isTextStable ? { changes: { from: 0, to: view.state.doc.length, insert: docModel.text } } : {}),
+        selection: isTextStable
+          ? view.state.selection
+          : EditorSelection.range(nextSelection.anchor, nextSelection.head),
         effects: [
           decorationsCompartment.reconfigure(
             EditorView.decorations.of(
@@ -1137,11 +1194,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         annotations: syncAnnotation.of(true),
       });
       syncingViewRef.current = false;
+      appliedDecorationSignatureRef.current = nextDecorationSignature;
 
-      if (activeRegionRef.current === "prompt") {
-        promptSelectionRef.current = storePromptSelection(view.state, nextSelection);
-      } else {
-        historySelectionRef.current = clampStoredSelectionToHistory(view.state, nextSelection);
+      if (!isTextStable) {
+        if (activeRegionRef.current === "prompt") {
+          promptSelectionRef.current = storePromptSelection(view.state, nextSelection);
+        } else {
+          historySelectionRef.current = clampStoredSelectionToHistory(view.state, nextSelection);
+        }
       }
 
       if (view.hasFocus) {

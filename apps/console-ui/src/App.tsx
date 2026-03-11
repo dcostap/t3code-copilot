@@ -499,6 +499,7 @@ export function App() {
               ref={transcriptRef}
               blocks={blocks}
               composerAttachments={composerAttachments}
+              interactionMode={consoleData.thread?.interactionMode ?? "default"}
               {...(activePendingUserInput && activePendingQuestion
                 ? {
                     pendingUserInputHighlight: {

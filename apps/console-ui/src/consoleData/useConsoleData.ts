@@ -23,6 +23,7 @@ import {
   type ConsoleBackend,
   type ConsoleBackendConnectionState,
 } from "../consoleBackend";
+import { reconcileReadModelWithEvents } from "./readModelReconciliation";
 
 export type ConsoleSourceMode = "demo" | "live";
 export type ConsoleConnectionState =
@@ -342,6 +343,7 @@ export function useConsoleData(): ConsoleDataState {
     [searchConfig.mode],
   );
   const latestEventSequenceRef = useRef(0);
+  const orchestrationEventsRef = useRef<ReadonlyArray<OrchestrationEvent>>([]);
   const queuedSyncRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bootstrapThreadIdRef = useRef<string | null>(null);
   const syncInFlightRef = useRef(false);
@@ -385,6 +387,7 @@ export function useConsoleData(): ConsoleDataState {
     respondingUserInputRequestIdsRef.current.clear();
     interruptInFlightRef.current = false;
     stopSessionInFlightRef.current = false;
+    orchestrationEventsRef.current = [];
     setOrchestrationEvents([]);
     setIsPromptSubmitting(false);
     setRespondingApprovalRequestIds([]);
@@ -401,7 +404,7 @@ export function useConsoleData(): ConsoleDataState {
           nextSnapshot.snapshotSequence,
         );
       }
-      setSnapshot(nextSnapshot);
+      setSnapshot(reconcileReadModelWithEvents(nextSnapshot, orchestrationEventsRef.current));
       setActiveThreadIdState((current) =>
         current ??
         searchConfig.threadId ??
@@ -425,7 +428,9 @@ export function useConsoleData(): ConsoleDataState {
         latestEventSequenceRef.current,
         ...nextEvents.map((event) => event.sequence),
       );
-      setOrchestrationEvents((existing) => mergeOrchestrationEvents(existing, nextEvents));
+      orchestrationEventsRef.current = mergeOrchestrationEvents(orchestrationEventsRef.current, nextEvents);
+      setOrchestrationEvents(orchestrationEventsRef.current);
+      setSnapshot((current) => reconcileReadModelWithEvents(current, nextEvents));
     };
 
     const syncSnapshot = async () => {
@@ -517,7 +522,11 @@ export function useConsoleData(): ConsoleDataState {
           latestEventSequenceRef.current,
           event.payload.sequence,
         );
-        setOrchestrationEvents((existing) => mergeOrchestrationEvents(existing, [event.payload]));
+        orchestrationEventsRef.current = mergeOrchestrationEvents(orchestrationEventsRef.current, [
+          event.payload,
+        ]);
+        setOrchestrationEvents(orchestrationEventsRef.current);
+        setSnapshot((current) => reconcileReadModelWithEvents(current, [event.payload]));
         scheduleSnapshotSync();
         return;
       }
