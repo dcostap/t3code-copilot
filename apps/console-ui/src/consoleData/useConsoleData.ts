@@ -10,6 +10,7 @@ import {
   type ProviderKind,
   type RuntimeMode,
   type ServerConfig,
+  type UploadChatImageAttachment,
   type UserInputQuestion,
   type WsWelcomePayload,
 } from "@t3tools/contracts";
@@ -66,7 +67,10 @@ export interface ConsoleDataState {
   readonly isStoppingSession: boolean;
   readonly error: string | null;
   setActiveThreadId(threadId: string): void;
-  submitPrompt(prompt: string): Promise<void>;
+  submitPrompt(input: {
+    prompt: string;
+    attachments?: ReadonlyArray<UploadChatImageAttachment>;
+  }): Promise<void>;
   respondToApproval(requestId: string, decision: ProviderApprovalDecision): Promise<void>;
   respondToUserInput(requestId: string, answers: Record<string, unknown>): Promise<void>;
   setRuntimeMode(runtimeMode: RuntimeMode): Promise<void>;
@@ -313,6 +317,9 @@ function isTurnRunning(thread: OrchestrationThread | null) {
 function canDispatchLiveCommand(connectionState: ConsoleConnectionState) {
   return connectionState === "connected";
 }
+
+const IMAGE_ONLY_BOOTSTRAP_PROMPT =
+  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 
 export function useConsoleData(): ConsoleDataState {
   const searchConfig = useMemo(readSearchConfig, []);
@@ -564,9 +571,13 @@ export function useConsoleData(): ConsoleDataState {
   }, [connectionState, searchConfig.mode]);
 
   const submitPrompt = useCallback(
-    async (prompt: string) => {
-      const trimmed = prompt.trim();
-      if (trimmed.length === 0) return;
+    async (input: {
+      prompt: string;
+      attachments?: ReadonlyArray<UploadChatImageAttachment>;
+    }) => {
+      const trimmed = input.prompt.trim();
+      const attachments = [...(input.attachments ?? [])];
+      if (trimmed.length === 0 && attachments.length === 0) return;
       if (!thread) {
         throw new Error("No orchestration thread is available.");
       }
@@ -577,6 +588,9 @@ export function useConsoleData(): ConsoleDataState {
 
       const pendingUserInput = pendingUserInputs[0];
       if (pendingUserInput) {
+        if (attachments.length > 0) {
+          throw new Error("Image attachments are not supported while a user-input request is pending.");
+        }
         const answers = buildPromptAnswers(pendingUserInput, trimmed);
         if (!answers) {
           throw new Error("Pending user input expects one answer per question.");
@@ -625,8 +639,8 @@ export function useConsoleData(): ConsoleDataState {
           message: {
             messageId: makeId("message") as MessageId,
             role: "user",
-            text: trimmed,
-            attachments: [],
+            text: trimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+            attachments,
           },
           ...(provider ? { provider } : {}),
           model: thread.model,

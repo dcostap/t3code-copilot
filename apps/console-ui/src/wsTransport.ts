@@ -45,6 +45,21 @@ function resolveDefaultWsUrl() {
   );
 }
 
+export function resolveWsHttpOrigin(rawUrl = resolveDefaultWsUrl()) {
+  try {
+    const wsUrl = new URL(rawUrl, window.location.href);
+    const protocol =
+      wsUrl.protocol === "wss:"
+        ? "https:"
+        : wsUrl.protocol === "ws:"
+          ? "http:"
+          : wsUrl.protocol;
+    return `${protocol}//${wsUrl.host}`;
+  } catch {
+    return window.location.origin;
+  }
+}
+
 export class WsTransport {
   private ws: WebSocket | null = null;
   private nextId = 1;
