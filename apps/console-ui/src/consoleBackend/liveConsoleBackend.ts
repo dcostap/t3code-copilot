@@ -156,6 +156,18 @@ export class LiveConsoleBackend implements ConsoleBackend {
     );
   }
 
+  async replayEvents(fromSequenceExclusive: number) {
+    const transport = this.requireTransport();
+    const result = await transport.request(ORCHESTRATION_WS_METHODS.replayEvents, {
+      fromSequenceExclusive,
+    });
+    return decodeOrThrow(
+      Schema.Array(OrchestrationEvent),
+      result,
+      "Failed to decode orchestration replay events response",
+    );
+  }
+
   async dispatchCommand(command: ClientOrchestrationCommand) {
     const transport = this.requireTransport();
     await transport.request(ORCHESTRATION_WS_METHODS.dispatchCommand, { command });

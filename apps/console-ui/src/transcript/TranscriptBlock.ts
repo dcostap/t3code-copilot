@@ -13,6 +13,7 @@ export type LineKind =
   | "meta"
   | "list"
   | "attachmentPanel"
+  | "userPromptSeparator"
   | "workGroupSeparator"
   | "workGroupHeader"
   | "workGroupFooter"
@@ -35,6 +36,12 @@ export type LineKind =
 export interface AnnotatedLine {
   readonly text: string;
   readonly kind: LineKind;
+  readonly extraClasses?: ReadonlyArray<string>;
+  readonly userInputRef?: {
+    readonly requestId: string;
+    readonly questionIndex: number;
+    readonly optionIndex?: number;
+  };
 }
 
 // ── Block types ─────────────────────────────────────────────────────
@@ -118,7 +125,10 @@ export interface ApprovalRequestBlock {
 export interface UserInputRequestBlock {
   readonly type: "user-input-request";
   readonly requestId: string;
+  readonly resolved?: boolean;
+  readonly answers?: Readonly<Record<string, string>>;
   readonly questions: ReadonlyArray<{
+    readonly id?: string;
     readonly header: string;
     readonly question: string;
     readonly options: ReadonlyArray<{
@@ -168,6 +178,24 @@ function prefixWrappedLines(
   prefix: string,
 ): AnnotatedLine[] {
   return text.split("\n").map((line) => ({ text: `${prefix}${line}`, kind }));
+}
+
+function userPromptToLines(
+  text: string,
+  options: { attachmentCount?: number } = {},
+): AnnotatedLine[] {
+  const contentLines = text.length > 0 ? wrapLines(text, "userMessage") : [];
+  const attachmentLines = Array.from(
+    { length: options.attachmentCount ?? 0 },
+    () => ({ text: "", kind: "attachmentPanel" as const }),
+  );
+
+  return [
+    { text: "", kind: "userPromptSeparator" },
+    ...contentLines,
+    ...attachmentLines,
+    { text: "", kind: "userPromptSeparator" },
+  ];
 }
 
 function formatElapsedDuration(ms: number) {
@@ -250,12 +278,9 @@ const DIVIDER_TEXT = "───────────────────�
 export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
   switch (block.type) {
     case "user-message":
-      return [
-        { text: "", kind: "meta" },
-        ...wrapLines(block.text, "userMessage"),
-        ...((block.attachments ?? []).map(() => ({ text: "", kind: "attachmentPanel" as const }))),
-        { text: "", kind: "meta" },
-      ];
+      return userPromptToLines(block.text, {
+        attachmentCount: block.attachments?.length ?? 0,
+      });
 
     case "assistant-text":
       return [
@@ -332,16 +357,54 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
 
     case "user-input-request": {
       const lines: AnnotatedLine[] = [
-        { text: "[?] User input requested", kind: "approvalPrompt" },
+        {
+          text: block.resolved ? "[✓] User input answered" : "[?] User input requested",
+          kind: "approvalPrompt",
+          ...(block.resolved ? { extraClasses: ["cm-line-userInputResolved"] } : {}),
+        },
       ];
-      for (const question of block.questions) {
-        lines.push({ text: `    ${question.header}: ${question.question}`, kind: "approvalPrompt" });
-        for (const option of question.options) {
+      block.questions.forEach((question, questionIndex) => {
+        const answer = question.id ? block.answers?.[question.id] : undefined;
+        lines.push({
+          text: `    ${question.header}: ${question.question}`,
+          kind: "approvalPrompt",
+          extraClasses: [
+            "cm-line-userInputQuestion",
+            ...(block.resolved ? ["cm-line-userInputResolved"] : []),
+          ],
+          userInputRef: {
+            requestId: block.requestId,
+            questionIndex,
+          },
+        });
+        question.options.forEach((option, optionIndex) => {
           lines.push(
-            { text: `      - ${option.label}: ${option.description}`, kind: "approvalPrompt" },
+            {
+              text: `      ${optionIndex + 1}  ${option.label}: ${option.description}`,
+              kind: "approvalPrompt",
+              extraClasses: [
+                "cm-line-userInputOption",
+                ...(block.resolved
+                  ? ["cm-line-userInputResolved", "cm-line-userInputResolvedOption"]
+                  : []),
+                ...(answer === option.label ? ["cm-line-userInputAnsweredOption"] : []),
+              ],
+              userInputRef: {
+                requestId: block.requestId,
+                questionIndex,
+                optionIndex,
+              },
+            },
+          );
+        });
+        if (block.resolved && answer && !question.options.some((option) => option.label === answer)) {
+          lines.push(
+            ...userPromptToLines(
+              block.questions.length > 1 ? `${question.header}: ${answer}` : answer,
+            ),
           );
         }
-      }
+      });
       return lines;
     }
 

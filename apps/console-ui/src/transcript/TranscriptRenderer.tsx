@@ -33,6 +33,7 @@ import {
 interface PositionedLine {
   readonly from: number;
   readonly kind: LineKind;
+  readonly extraClasses?: ReadonlyArray<string>;
 }
 
 interface TranscriptDocumentModel {
@@ -62,8 +63,14 @@ interface StoredPromptSelection {
 interface TranscriptRendererProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
   readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
+  readonly pendingUserInputHighlight?: {
+    readonly requestId: string;
+    readonly questionIndex: number;
+    readonly optionIndex?: number;
+  };
   readonly submitDisabled?: boolean;
   onAddImageFiles?(files: ReadonlyArray<File>): void;
+  onDraftChange?(value: string): void;
   onRemoveImage?(attachmentId: string): void;
   onSubmit?(value: string): Promise<void> | void;
 }
@@ -196,12 +203,41 @@ class ImageAttachmentTileWidget extends WidgetType {
   }
 }
 
-function flattenBlocks(blocks: ReadonlyArray<TranscriptBlock>) {
+function flattenBlocks(
+  blocks: ReadonlyArray<TranscriptBlock>,
+  pendingUserInputHighlight?: {
+    readonly requestId: string;
+    readonly questionIndex: number;
+    readonly optionIndex?: number;
+  },
+) {
   const allLines: AnnotatedLine[] = [];
   const widgetsByLineIndex = new Map<number, { widget: WidgetType; side: -1 | 1 }>();
 
   for (const block of blocks) {
-    const blockLines = blockToLines(block);
+    const blockLines = blockToLines(block).map((line) => {
+      if (!pendingUserInputHighlight || !line.userInputRef) {
+        return line;
+      }
+
+      if (
+        line.userInputRef.requestId !== pendingUserInputHighlight.requestId
+        || line.userInputRef.questionIndex !== pendingUserInputHighlight.questionIndex
+      ) {
+        return line;
+      }
+
+      const extraClasses = [...(line.extraClasses ?? []), "cm-line-userInputActiveQuestion"];
+      if (
+        line.userInputRef.optionIndex !== undefined
+        && pendingUserInputHighlight.optionIndex !== undefined
+        && line.userInputRef.optionIndex === pendingUserInputHighlight.optionIndex
+      ) {
+        extraClasses.push("cm-line-userInputActiveOption");
+      }
+
+      return Object.assign({}, line, { extraClasses });
+    });
     const startLineIndex = allLines.length;
     allLines.push(...blockLines);
 
@@ -234,8 +270,13 @@ function flattenBlocks(blocks: ReadonlyArray<TranscriptBlock>) {
 function buildTranscriptDocument(
   blocks: ReadonlyArray<TranscriptBlock>,
   draft: string,
+  pendingUserInputHighlight?: {
+    readonly requestId: string;
+    readonly questionIndex: number;
+    readonly optionIndex?: number;
+  },
 ): TranscriptDocumentModel {
-  const { lines: historyLines, widgetsByLineIndex } = flattenBlocks(blocks);
+  const { lines: historyLines, widgetsByLineIndex } = flattenBlocks(blocks, pendingUserInputHighlight);
   const draftLines = draft.length > 0 ? draft.split("\n") : [""];
   const allLines: AnnotatedLine[] = [
     ...historyLines,
@@ -253,7 +294,11 @@ function buildTranscriptDocument(
 
   allLines.forEach((line, index) => {
     const from = offset;
-    positioned.push({ from, kind: line.kind });
+    positioned.push({
+      from,
+      kind: line.kind,
+      ...(line.extraClasses ? { extraClasses: line.extraClasses } : {}),
+    });
     const lineEnd = from + line.text.length;
     text += line.text;
 
@@ -295,7 +340,9 @@ function buildDecorations(
   promptStart: number,
 ) {
   const ranges = lines.map((line) =>
-    Decoration.line({ class: `cm-line-${line.kind}` }).range(line.from),
+    Decoration.line({
+      class: [`cm-line-${line.kind}`, ...(line.extraClasses ?? [])].join(" "),
+    }).range(line.from),
   );
   ranges.push(
     ...widgets.map(({ position, side, widget }) =>
@@ -342,6 +389,19 @@ function buildEditorTheme() {
       ".cm-line-meta": { color: "#5f676f" },
       ".cm-line-body": { color: "#cfd4d9" },
       ".cm-line-list": { color: "#c7ccd1" },
+      ".cm-line-userPromptSeparator": {
+        position: "relative",
+        minHeight: "12px",
+      },
+      ".cm-line-userPromptSeparator::before": {
+        content: '""',
+        position: "absolute",
+        left: "0",
+        right: "0",
+        top: "50%",
+        borderTop: "1px solid rgba(95, 103, 111, 0.38)",
+        transform: "translateY(-50%)",
+      },
       ".cm-line-workGroupSeparator": {
         position: "relative",
         minHeight: "10px",
@@ -412,6 +472,24 @@ function buildEditorTheme() {
       ".cm-line-divider": { color: "#40464d" },
       ".cm-line-status": { color: "#5f676f", fontStyle: "italic" },
       ".cm-line-approvalPrompt": { color: "#e8a84c" },
+      ".cm-line-userInputQuestion": { color: "#cfa764" },
+      ".cm-line-userInputOption": { color: "#d1a65f" },
+      ".cm-line-userInputResolved": { opacity: "0.54" },
+      ".cm-line-userInputResolvedOption": {
+        color: "#737a82",
+        opacity: "0.72",
+      },
+      ".cm-line-userInputAnsweredOption": {
+        color: "#eed3a0",
+        backgroundColor: "rgba(88, 70, 35, 0.26)",
+        fontWeight: "600",
+        opacity: "1",
+      },
+      ".cm-line-userInputActiveQuestion": { color: "#f0bc6b" },
+      ".cm-line-userInputActiveOption": {
+        color: "#f3c877",
+        backgroundColor: "rgba(93, 72, 31, 0.22)",
+      },
       ".cm-line-commandExec": { color: "#a3d9a5" },
       ".cm-line-commandOutput": { color: "#7a828b" },
       ".cm-line-planText": { color: "#b8bfc7" },
@@ -423,6 +501,30 @@ function buildEditorTheme() {
 function getConversationScrollContainer(view: EditorView) {
   const scrollContainer = view.dom.closest(".conversation-scroll");
   return scrollContainer instanceof HTMLElement ? scrollContainer : null;
+}
+
+function isConversationScrollNearBottom(view: EditorView, thresholdPx = 24) {
+  const scrollContainer = getConversationScrollContainer(view);
+  if (!scrollContainer) {
+    return false;
+  }
+
+  return (
+    scrollContainer.scrollHeight - (scrollContainer.scrollTop + scrollContainer.clientHeight)
+      <= thresholdPx
+  );
+}
+
+function scrollConversationToBottom(view: EditorView) {
+  const scrollContainer = getConversationScrollContainer(view);
+  if (!scrollContainer) {
+    return;
+  }
+
+  scrollContainer.scrollTop = Math.max(
+    0,
+    scrollContainer.scrollHeight - scrollContainer.clientHeight,
+  );
 }
 
 function keepCursorWithinViewportPadding(view: EditorView) {
@@ -587,7 +689,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     {
       blocks,
       composerAttachments = [],
+      pendingUserInputHighlight,
       onAddImageFiles,
+      onDraftChange,
       onRemoveImage,
       onSubmit,
       submitDisabled = false,
@@ -604,6 +708,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const historySelectionRef = useRef<StoredSelection | null>(null);
     const draftRef = useRef("");
     const onSubmitRef = useRef(onSubmit);
+    const onDraftChangeRef = useRef(onDraftChange);
     const submitDisabledRef = useRef(submitDisabled);
     const composerAttachmentsRef = useRef(composerAttachments);
     const dragDepthRef = useRef(0);
@@ -613,11 +718,15 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     useEffect(() => {
       draftRef.current = draft;
       onSubmitRef.current = onSubmit;
+      onDraftChangeRef.current = onDraftChange;
       submitDisabledRef.current = submitDisabled;
       composerAttachmentsRef.current = composerAttachments;
-    }, [composerAttachments, draft, onSubmit, submitDisabled]);
+    }, [composerAttachments, draft, onDraftChange, onSubmit, submitDisabled]);
 
-    const docModel = useMemo(() => buildTranscriptDocument(blocks, draft), [blocks, draft]);
+    const docModel = useMemo(
+      () => buildTranscriptDocument(blocks, draft, pendingUserInputHighlight),
+      [blocks, draft, pendingUserInputHighlight],
+    );
     const initialDocModelRef = useRef(docModel);
 
     const focusPromptRegion = useCallback((view: EditorView) => {
@@ -865,6 +974,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             if (nextDraft !== draftRef.current) {
               draftRef.current = nextDraft;
               setDraft(nextDraft);
+              onDraftChangeRef.current?.(nextDraft);
             }
 
             const currentSelection: StoredSelection = {
@@ -949,10 +1059,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         return;
       }
 
-      const nextSelection =
+    const nextSelection =
         activeRegionRef.current === "prompt"
           ? resolvePromptSelectionForDocModel(docModel, promptSelectionRef.current)
           : resolveHistorySelectionForDocModel(docModel, historySelectionRef.current);
+      const shouldPinToBottom =
+        view.hasFocus
+        && activeRegionRef.current === "prompt"
+        && isConversationScrollNearBottom(view);
 
       syncingViewRef.current = true;
       view.dispatch({
@@ -978,6 +1092,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
       if (view.hasFocus) {
         requestAnimationFrame(() => {
+          if (shouldPinToBottom) {
+            scrollConversationToBottom(view);
+            return;
+          }
           keepCursorWithinViewportPadding(view);
         });
       }

@@ -43,6 +43,7 @@ export interface ConsoleBackend {
   subscribe(listener: (event: ConsoleBackendEvent) => void): () => void;
   getServerConfig(): Promise<ServerConfig>;
   getSnapshot(): Promise<OrchestrationReadModel>;
+  replayEvents(fromSequenceExclusive: number): Promise<ReadonlyArray<OrchestrationEvent>>;
   dispatchCommand(command: ClientOrchestrationCommand): Promise<void>;
   getTurnDiff(input: OrchestrationGetTurnDiffInput): Promise<OrchestrationGetTurnDiffResult>;
   getFullThreadDiff(

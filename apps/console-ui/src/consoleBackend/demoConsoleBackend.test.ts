@@ -180,7 +180,7 @@ describe("DemoConsoleBackend", () => {
     expect(thread).toBeDefined();
 
     await backend.dispatchCommand(buildTurnStartCommand(thread!, "[input] choose mode"));
-    scheduler.advanceBy(500);
+    scheduler.advanceBy(900);
 
     let snapshot = await backend.getSnapshot();
     const inputActivity = snapshot.threads[0]?.activities.findLast(
@@ -188,6 +188,8 @@ describe("DemoConsoleBackend", () => {
     );
     const requestId = (inputActivity?.payload as { requestId?: string } | undefined)?.requestId;
     expect(requestId).toBeTruthy();
+    expect(snapshot.threads[0]?.messages.at(-1)?.role).toBe("assistant");
+    expect(snapshot.threads[0]?.messages.at(-1)?.text.length ?? 0).toBeGreaterThan(0);
 
     backend.disconnect();
     scheduler.runAll();
@@ -212,6 +214,17 @@ describe("DemoConsoleBackend", () => {
     snapshot = await backend.getSnapshot();
     expect(snapshot.threads[0]?.latestTurn?.state).toBe("completed");
     expect(snapshot.threads[0]?.messages.at(-1)?.text).toContain("- demo_source: Demo");
+
+    const replayedEvents = await backend.replayEvents(0);
+    expect(
+      replayedEvents.some(
+        (event) =>
+          event.type === "thread.message-sent"
+          && event.payload.threadId === thread!.id
+          && event.payload.role === "assistant"
+          && event.payload.streaming,
+      ),
+    ).toBe(true);
   });
 
   it("interrupts only the targeted thread", async () => {

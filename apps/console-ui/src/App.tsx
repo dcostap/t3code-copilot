@@ -15,6 +15,10 @@ import {
   toUploadImageAttachment,
   type ComposerImageAttachment,
 } from "./composerAttachments";
+import {
+  resolvePendingUserInputAnswer,
+  resolvePendingUserInputShortcut,
+} from "./pendingUserInput";
 import { TranscriptRenderer, type TranscriptRendererHandle, threadToTranscriptBlocks } from "./transcript";
 import { useConsoleData } from "./consoleData/useConsoleData";
 import { resolveWsHttpOrigin } from "./wsTransport";
@@ -30,13 +34,93 @@ export function App() {
   const [paletteQuery, setPaletteQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [composerAttachments, setComposerAttachments] = useState<ComposerImageAttachment[]>([]);
+  const [composerDraft, setComposerDraft] = useState("");
+  const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<
+    Record<string, Record<string, string>>
+  >({});
+  const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] = useState<
+    Record<string, number>
+  >({});
   const transcriptRef = useRef<TranscriptRendererHandle | null>(null);
   const composerAttachmentsRef = useRef(composerAttachments);
   composerAttachmentsRef.current = composerAttachments;
+  const activePendingUserInput = consoleData.pendingUserInputs[0] ?? null;
+  const activePendingQuestionIndex = activePendingUserInput
+    ? (pendingUserInputQuestionIndexByRequestId[activePendingUserInput.requestId] ?? 0)
+    : 0;
+  const activePendingQuestion = activePendingUserInput?.questions[activePendingQuestionIndex] ?? null;
+  const activePendingDraftAnswers = useMemo(
+    () => (activePendingUserInput
+      ? (pendingUserInputAnswersByRequestId[activePendingUserInput.requestId] ?? {})
+      : {}),
+    [activePendingUserInput, pendingUserInputAnswersByRequestId],
+  );
+  const activePendingShortcut = activePendingQuestion
+    ? resolvePendingUserInputShortcut(composerDraft, activePendingQuestion.options)
+    : null;
+
+  useEffect(() => {
+    const openRequestIds = new Set(consoleData.pendingUserInputs.map((entry) => entry.requestId));
+    setPendingUserInputAnswersByRequestId((existing) =>
+      Object.fromEntries(
+        Object.entries(existing).filter(([requestId]) => openRequestIds.has(requestId)),
+      ),
+    );
+    setPendingUserInputQuestionIndexByRequestId((existing) =>
+      Object.fromEntries(
+        Object.entries(existing).filter(([requestId]) => openRequestIds.has(requestId)),
+      ),
+    );
+  }, [consoleData.pendingUserInputs]);
+
   const handleSubmit = useCallback(
     async (value: string) => {
       const attachmentSnapshot = [...composerAttachments];
       try {
+        if (activePendingUserInput) {
+          if (attachmentSnapshot.length > 0) {
+            throw new Error("Image attachments are not supported while a user-input request is pending.");
+          }
+          if (!activePendingQuestion) {
+            throw new Error("Pending user input is missing an active question.");
+          }
+
+          const answer = resolvePendingUserInputAnswer(value, activePendingQuestion);
+          if (!answer) {
+            throw new Error("Type an answer or enter an option number for the active user-input question.");
+          }
+
+          const nextAnswers = {
+            ...activePendingDraftAnswers,
+            [activePendingQuestion.id]: answer,
+          };
+
+          if (activePendingQuestionIndex < activePendingUserInput.questions.length - 1) {
+            setPendingUserInputAnswersByRequestId((existing) => ({
+              ...existing,
+              [activePendingUserInput.requestId]: nextAnswers,
+            }));
+            setPendingUserInputQuestionIndexByRequestId((existing) => ({
+              ...existing,
+              [activePendingUserInput.requestId]: activePendingQuestionIndex + 1,
+            }));
+            setSubmitError(null);
+            return;
+          }
+
+          await consoleData.respondToUserInput(activePendingUserInput.requestId, nextAnswers);
+          setPendingUserInputAnswersByRequestId((existing) => ({
+            ...existing,
+            [activePendingUserInput.requestId]: nextAnswers,
+          }));
+          setPendingUserInputQuestionIndexByRequestId((existing) => ({
+            ...existing,
+            [activePendingUserInput.requestId]: activePendingQuestionIndex,
+          }));
+          setSubmitError(null);
+          return;
+        }
+
         await consoleData.submitPrompt({
           prompt: value,
           attachments: await Promise.all(attachmentSnapshot.map(toUploadImageAttachment)),
@@ -54,7 +138,14 @@ export function App() {
         setSubmitError(error instanceof Error ? error.message : "Failed to submit prompt.");
       }
     },
-    [composerAttachments, consoleData],
+    [
+      activePendingDraftAnswers,
+      activePendingQuestion,
+      activePendingQuestionIndex,
+      activePendingUserInput,
+      composerAttachments,
+      consoleData,
+    ],
   );
   const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
   const blocks = useMemo(() => {
@@ -62,13 +153,14 @@ export function App() {
       return threadToTranscriptBlocks(consoleData.thread, {
         resolveAttachmentPreviewUrl: (attachmentId) =>
           `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
+        orchestrationEvents: consoleData.threadEvents,
       });
     }
     if (consoleData.error) {
       return [{ type: "status" as const, text: `Connection error: ${consoleData.error}` }];
     }
     return [{ type: "status" as const, text: "Waiting for orchestration snapshot..." }];
-  }, [attachmentPreviewBaseUrl, consoleData.error, consoleData.thread]);
+  }, [attachmentPreviewBaseUrl, consoleData.error, consoleData.thread, consoleData.threadEvents]);
   const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
     const commands: AppPaletteCommand[] = [];
     const activeThread = consoleData.thread;
@@ -407,7 +499,19 @@ export function App() {
               ref={transcriptRef}
               blocks={blocks}
               composerAttachments={composerAttachments}
+              {...(activePendingUserInput && activePendingQuestion
+                ? {
+                    pendingUserInputHighlight: {
+                      requestId: activePendingUserInput.requestId,
+                      questionIndex: activePendingQuestionIndex,
+                      ...(activePendingShortcut
+                        ? { optionIndex: activePendingShortcut.optionIndex }
+                        : {}),
+                    },
+                  }
+                : {})}
               onAddImageFiles={handleAddImageFiles}
+              onDraftChange={setComposerDraft}
               onRemoveImage={handleRemoveImage}
               onSubmit={handleSubmit}
               submitDisabled={!consoleData.canSubmitPrompt}
