@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { defaultKeymap } from "@codemirror/commands";
 import {
   Annotation,
@@ -41,6 +41,8 @@ interface TranscriptRendererProps {
 
 export interface TranscriptRendererHandle {
   focus(): void;
+  focusPrompt(): void;
+  focusHistory(): void;
 }
 
 const CURSOR_VIEWPORT_PADDING_LINES = 7;
@@ -404,27 +406,64 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const docModel = useMemo(() => buildTranscriptDocument(blocks, draft), [blocks, draft]);
     const initialDocModelRef = useRef(docModel);
 
+    const focusPromptRegion = useCallback((view: EditorView) => {
+      activeRegionRef.current = "prompt";
+      const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
+      promptSelectionRef.current = storePromptSelection(view.state, promptSelection);
+      view.dispatch({
+        selection: EditorSelection.range(promptSelection.anchor, promptSelection.head),
+        annotations: syncAnnotation.of(true),
+      });
+      view.focus();
+      view.contentDOM.focus({ preventScroll: true });
+      requestAnimationFrame(() => {
+        keepCursorWithinViewportPadding(view);
+      });
+    }, []);
+
+    const focusHistoryRegion = useCallback((view: EditorView) => {
+      const currentSelection: StoredSelection = {
+        anchor: view.state.selection.main.anchor,
+        head: view.state.selection.main.head,
+      };
+      promptSelectionRef.current = storePromptSelection(view.state, currentSelection);
+      activeRegionRef.current = "history";
+      const historySelection = resolveHistorySelection(view.state, historySelectionRef.current);
+      historySelectionRef.current = historySelection;
+      view.dispatch({
+        selection: EditorSelection.range(historySelection.anchor, historySelection.head),
+        annotations: syncAnnotation.of(true),
+      });
+      view.focus();
+      view.contentDOM.focus({ preventScroll: true });
+      requestAnimationFrame(() => {
+        keepCursorWithinViewportPadding(view);
+      });
+    }, []);
+
     useImperativeHandle(ref, () => ({
       focus() {
         const view = viewRef.current;
         if (!view) {
           return;
         }
-
-        activeRegionRef.current = "prompt";
-        const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
-        promptSelectionRef.current = storePromptSelection(view.state, promptSelection);
-        view.dispatch({
-          selection: EditorSelection.range(promptSelection.anchor, promptSelection.head),
-          annotations: syncAnnotation.of(true),
-        });
-        view.focus();
-        view.contentDOM.focus({ preventScroll: true });
-        requestAnimationFrame(() => {
-          keepCursorWithinViewportPadding(view);
-        });
+        focusPromptRegion(view);
       },
-    }), []);
+      focusPrompt() {
+        const view = viewRef.current;
+        if (!view) {
+          return;
+        }
+        focusPromptRegion(view);
+      },
+      focusHistory() {
+        const view = viewRef.current;
+        if (!view) {
+          return;
+        }
+        focusHistoryRegion(view);
+      },
+    }), [focusHistoryRegion, focusPromptRegion]);
 
     useEffect(() => {
       if (!editorRef.current) {
@@ -464,45 +503,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           submittingRef.current = false;
         }
 
-        return true;
-      };
-
-      const toggleActiveRegion = () => {
-        const view = viewRef.current;
-        if (!view) {
-          return true;
-        }
-
-        const currentSelection: StoredSelection = {
-          anchor: view.state.selection.main.anchor,
-          head: view.state.selection.main.head,
-        };
-
-        if (activeRegionRef.current === "prompt") {
-          promptSelectionRef.current = storePromptSelection(view.state, currentSelection);
-          activeRegionRef.current = "history";
-          const historySelection = resolveHistorySelection(view.state, historySelectionRef.current);
-          historySelectionRef.current = historySelection;
-          view.dispatch({
-            selection: EditorSelection.range(historySelection.anchor, historySelection.head),
-            annotations: syncAnnotation.of(true),
-          });
-        } else {
-          historySelectionRef.current = clampStoredSelectionToHistory(view.state, currentSelection);
-          activeRegionRef.current = "prompt";
-          const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
-          promptSelectionRef.current = storePromptSelection(view.state, promptSelection);
-          view.dispatch({
-            selection: EditorSelection.range(promptSelection.anchor, promptSelection.head),
-            annotations: syncAnnotation.of(true),
-          });
-        }
-
-        view.focus();
-        view.contentDOM.focus({ preventScroll: true });
-        requestAnimationFrame(() => {
-          keepCursorWithinViewportPadding(view);
-        });
         return true;
       };
 
@@ -559,12 +559,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             ];
           }),
           keymap.of([
-            {
-              key: "Mod-e",
-              run() {
-                return toggleActiveRegion();
-              },
-            },
             {
               key: "Enter",
               run() {
@@ -653,16 +647,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       if (!hasAutofocusedRef.current) {
         hasAutofocusedRef.current = true;
         const autofocus = () => {
-          activeRegionRef.current = "prompt";
-          const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
-          promptSelectionRef.current = storePromptSelection(view.state, promptSelection);
-          view.dispatch({
-            selection: EditorSelection.range(promptSelection.anchor, promptSelection.head),
-            annotations: syncAnnotation.of(true),
-          });
-          view.focus();
-          view.contentDOM.focus({ preventScroll: true });
-          keepCursorWithinViewportPadding(view);
+          focusPromptRegion(view);
         };
         autofocus();
         requestAnimationFrame(() => {
@@ -676,7 +661,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         view.destroy();
         viewRef.current = null;
       };
-    }, []);
+    }, [focusPromptRegion]);
 
     useEffect(() => {
       const view = viewRef.current;
