@@ -5,6 +5,7 @@ import {
   getHistorySelectionLimitForPromptStart,
   resolveTranscriptRegionForPointer,
   resolveTranscriptRegionForPosition,
+  shouldRedirectHistoryTypingToPrompt,
 } from "./TranscriptRenderer";
 
 describe("resolveTranscriptRegionForPosition", () => {
@@ -44,5 +45,25 @@ describe("getHistorySelectionLimit", () => {
     const state = EditorState.create({ doc: "prompt" });
 
     expect(getHistorySelectionLimitForPromptStart(state.doc, 0)).toBe(0);
+  });
+});
+
+describe("shouldRedirectHistoryTypingToPrompt", () => {
+  it("redirects plain printable keys", () => {
+    expect(
+      shouldRedirectHistoryTypingToPrompt({ key: "a", ctrlKey: false, metaKey: false, altKey: false }),
+    ).toBe(true);
+    expect(
+      shouldRedirectHistoryTypingToPrompt({ key: "A", ctrlKey: false, metaKey: false, altKey: false }),
+    ).toBe(true);
+  });
+
+  it("ignores modifier shortcuts and non-printable keys", () => {
+    expect(
+      shouldRedirectHistoryTypingToPrompt({ key: "a", ctrlKey: true, metaKey: false, altKey: false }),
+    ).toBe(false);
+    expect(
+      shouldRedirectHistoryTypingToPrompt({ key: "Enter", ctrlKey: false, metaKey: false, altKey: false }),
+    ).toBe(false);
   });
 });

@@ -587,6 +587,16 @@ export function resolveTranscriptRegionForPointer(
   );
 }
 
+export function shouldRedirectHistoryTypingToPrompt(
+  event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey">,
+) {
+  if (event.ctrlKey || event.metaKey || event.altKey) {
+    return false;
+  }
+
+  return event.key.length === 1;
+}
+
 function clampStoredSelectionToPrompt(
   state: EditorState,
   selection: StoredSelection,
@@ -763,6 +773,38 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         keepCursorWithinViewportPadding(view);
       });
     }, []);
+
+    const redirectHistoryTypingToPrompt = useCallback(
+      (view: EditorView, text: string) => {
+        const currentSelection: StoredSelection = {
+          anchor: view.state.selection.main.anchor,
+          head: view.state.selection.main.head,
+        };
+        historySelectionRef.current = clampStoredSelectionToHistory(view.state, currentSelection);
+        activeRegionRef.current = "prompt";
+
+        const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
+        view.dispatch({
+          changes: {
+            from: promptSelection.anchor,
+            to: promptSelection.head,
+            insert: text,
+          },
+          selection: EditorSelection.cursor(promptSelection.anchor + text.length),
+          annotations: syncAnnotation.of(true),
+        });
+        promptSelectionRef.current = storePromptSelection(view.state, {
+          anchor: promptSelection.anchor + text.length,
+          head: promptSelection.anchor + text.length,
+        });
+        view.focus();
+        view.contentDOM.focus({ preventScroll: true });
+        requestAnimationFrame(() => {
+          keepCursorWithinViewportPadding(view);
+        });
+      },
+      [],
+    );
 
     const storeSelectionForRegion = useCallback(
       (state: EditorState, region: TranscriptRegion, selection: StoredSelection) => {
@@ -1010,6 +1052,18 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                 keepCursorWithinViewportPadding(view);
               });
             },
+            keydown(event, view) {
+              if (activeRegionRef.current !== "history") {
+                return false;
+              }
+              if (!shouldRedirectHistoryTypingToPrompt(event)) {
+                return false;
+              }
+
+              event.preventDefault();
+              redirectHistoryTypingToPrompt(view, event.key);
+              return true;
+            },
           }),
           EditorView.editable.of(true),
           EditorState.readOnly.of(false),
@@ -1045,7 +1099,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         view.destroy();
         viewRef.current = null;
       };
-    }, [focusPromptRegion, storeSelectionForRegion, updateActiveRegionFromPointer]);
+    }, [focusPromptRegion, redirectHistoryTypingToPrompt, storeSelectionForRegion, updateActiveRegionFromPointer]);
 
     useEffect(() => {
       const view = viewRef.current;
