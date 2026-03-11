@@ -1,4 +1,14 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent as ReactClipboardEvent,
+  type DragEvent as ReactDragEvent,
+} from "react";
 import { defaultKeymap } from "@codemirror/commands";
 import {
   Annotation,
@@ -9,9 +19,16 @@ import {
   StateField,
   Text,
 } from "@codemirror/state";
-import { Decoration, EditorView, keymap } from "@codemirror/view";
+import { Decoration, EditorView, WidgetType, keymap } from "@codemirror/view";
 
-import { blockToLines, type AnnotatedLine, type LineKind, type TranscriptBlock } from "./TranscriptBlock";
+import type { ComposerImageAttachment } from "../composerAttachments";
+import {
+  blockToLines,
+  type AnnotatedLine,
+  type LineKind,
+  type TranscriptBlock,
+  type TranscriptImageAttachment,
+} from "./TranscriptBlock";
 
 interface PositionedLine {
   readonly from: number;
@@ -21,8 +38,15 @@ interface PositionedLine {
 interface TranscriptDocumentModel {
   readonly text: string;
   readonly lines: ReadonlyArray<PositionedLine>;
+  readonly widgets: ReadonlyArray<PositionedWidget>;
   readonly separatorStart: number;
   readonly promptStart: number;
+}
+
+interface PositionedWidget {
+  readonly position: number;
+  readonly side: -1 | 1;
+  readonly widget: WidgetType;
 }
 
 interface StoredSelection {
@@ -37,7 +61,10 @@ interface StoredPromptSelection {
 
 interface TranscriptRendererProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
   readonly submitDisabled?: boolean;
+  onAddImageFiles?(files: ReadonlyArray<File>): void;
+  onRemoveImage?(attachmentId: string): void;
   onSubmit?(value: string): Promise<void> | void;
 }
 
@@ -68,19 +95,147 @@ const promptStartField = StateField.define<number>({
   },
 });
 
-function flattenBlocks(blocks: ReadonlyArray<TranscriptBlock>): AnnotatedLine[] {
-  const allLines: AnnotatedLine[] = [];
-  for (const block of blocks) {
-    allLines.push(...blockToLines(block));
+function formatAttachmentSize(sizeBytes: number) {
+  if (sizeBytes >= 1024 * 1024) {
+    return `${(sizeBytes / (1024 * 1024)).toFixed(sizeBytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
   }
-  return allLines;
+  if (sizeBytes >= 1024) {
+    return `${Math.round(sizeBytes / 1024)} KB`;
+  }
+  return `${sizeBytes} B`;
+}
+
+function attachmentBadgeLabel(mimeType: string) {
+  const subtype = mimeType.split("/")[1]?.trim().toUpperCase();
+  return subtype && subtype.length <= 5 ? subtype : "IMG";
+}
+
+function createAttachmentTileDom(
+  attachment: TranscriptImageAttachment,
+  variant: "history" | "composer",
+  options: {
+    onRemoveImage?(attachmentId: string): void;
+  } = {},
+) {
+  const tile = document.createElement("div");
+  tile.className = "attachment-tile";
+  tile.title = `${attachment.name} (${attachment.mimeType}, ${formatAttachmentSize(attachment.sizeBytes)})`;
+
+  const media =
+    attachment.previewUrl && variant === "history"
+      ? document.createElement("a")
+      : document.createElement("div");
+  media.className = "attachment-tile__media";
+  if (media instanceof HTMLAnchorElement && attachment.previewUrl) {
+    media.href = attachment.previewUrl;
+    media.target = "_blank";
+    media.rel = "noreferrer";
+  }
+
+  const fallback = document.createElement("div");
+  fallback.className = "attachment-tile__fallback";
+  fallback.textContent = attachmentBadgeLabel(attachment.mimeType);
+  media.append(fallback);
+
+  if (attachment.previewUrl) {
+    const image = document.createElement("img");
+    image.className = "attachment-tile__image";
+    image.alt = attachment.name;
+    image.loading = "lazy";
+    image.src = attachment.previewUrl;
+    image.addEventListener("load", () => {
+      fallback.hidden = true;
+    });
+    image.addEventListener("error", () => {
+      image.hidden = true;
+      fallback.hidden = false;
+    });
+    media.append(image);
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "attachment-tile__meta";
+
+  const name = document.createElement("div");
+  name.className = "attachment-tile__name";
+  name.textContent = attachment.name;
+
+  const detail = document.createElement("div");
+  detail.className = "attachment-tile__detail";
+  detail.textContent = `${attachment.mimeType} · ${formatAttachmentSize(attachment.sizeBytes)}`;
+
+  meta.append(name, detail);
+  tile.append(media, meta);
+
+  if (variant === "composer" && options.onRemoveImage) {
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = "attachment-tile__remove";
+    removeButton.textContent = "×";
+    removeButton.setAttribute("aria-label", `Remove ${attachment.name}`);
+    removeButton.addEventListener("click", () => {
+      options.onRemoveImage?.(attachment.id);
+    });
+    tile.append(removeButton);
+  }
+
+  return tile;
+}
+
+class ImageAttachmentTileWidget extends WidgetType {
+  constructor(private readonly attachment: TranscriptImageAttachment) {
+    super();
+  }
+
+  override eq(other: ImageAttachmentTileWidget) {
+    return JSON.stringify(this.attachment) === JSON.stringify(other.attachment);
+  }
+
+  override toDOM() {
+    return createAttachmentTileDom(this.attachment, "history");
+  }
+}
+
+function flattenBlocks(blocks: ReadonlyArray<TranscriptBlock>) {
+  const allLines: AnnotatedLine[] = [];
+  const widgetsByLineIndex = new Map<number, { widget: WidgetType; side: -1 | 1 }>();
+
+  for (const block of blocks) {
+    const blockLines = blockToLines(block);
+    const startLineIndex = allLines.length;
+    allLines.push(...blockLines);
+
+    if (block.type === "user-message" && block.attachments && block.attachments.length > 0) {
+      const attachmentLineOffsets = [...blockLines]
+        .map((line, index) => ({ line, index }))
+        .filter(({ line }) => line.kind === "attachmentPanel")
+        .map(({ index }) => index)
+        .slice(0, block.attachments.length);
+
+      attachmentLineOffsets.forEach((lineOffset, index) => {
+        const attachment = block.attachments?.[index];
+        if (!attachment) {
+          return;
+        }
+        widgetsByLineIndex.set(startLineIndex + lineOffset, {
+          widget: new ImageAttachmentTileWidget(attachment),
+          side: 1,
+        });
+      });
+    }
+  }
+
+  return {
+    lines: allLines,
+    widgetsByLineIndex,
+  };
 }
 
 function buildTranscriptDocument(
   blocks: ReadonlyArray<TranscriptBlock>,
   draft: string,
 ): TranscriptDocumentModel {
-  const historyLines = flattenBlocks(blocks);
+  const { lines: historyLines, widgetsByLineIndex } = flattenBlocks(blocks);
   const draftLines = draft.length > 0 ? draft.split("\n") : [""];
   const allLines: AnnotatedLine[] = [
     ...historyLines,
@@ -94,10 +249,12 @@ function buildTranscriptDocument(
   let separatorStart = -1;
   let promptStart = -1;
   const positioned: PositionedLine[] = [];
+  const widgets: PositionedWidget[] = [];
 
   allLines.forEach((line, index) => {
     const from = offset;
     positioned.push({ from, kind: line.kind });
+    const lineEnd = from + line.text.length;
     text += line.text;
 
     if (line.kind === "promptSeparator" && separatorStart === -1) {
@@ -109,6 +266,14 @@ function buildTranscriptDocument(
     }
 
     offset += line.text.length;
+    const widget = widgetsByLineIndex.get(index);
+    if (widget) {
+      widgets.push({
+        position: widget.side > 0 ? lineEnd : from,
+        side: widget.side,
+        widget: widget.widget,
+      });
+    }
     if (index < allLines.length - 1) {
       text += "\n";
       offset += 1;
@@ -118,14 +283,24 @@ function buildTranscriptDocument(
   return {
     text,
     lines: positioned,
+    widgets,
     separatorStart: separatorStart === -1 ? promptStart === -1 ? text.length : promptStart : separatorStart,
     promptStart: promptStart === -1 ? text.length : promptStart,
   };
 }
 
-function buildDecorations(lines: ReadonlyArray<PositionedLine>, promptStart: number) {
+function buildDecorations(
+  lines: ReadonlyArray<PositionedLine>,
+  widgets: ReadonlyArray<PositionedWidget>,
+  promptStart: number,
+) {
   const ranges = lines.map((line) =>
     Decoration.line({ class: `cm-line-${line.kind}` }).range(line.from),
+  );
+  ranges.push(
+    ...widgets.map(({ position, side, widget }) =>
+      Decoration.widget({ widget, side }).range(position),
+    ),
   );
   ranges.push(Decoration.line({ class: "cm-line-promptStart" }).range(promptStart));
   return Decoration.set(ranges, true);
@@ -168,6 +343,9 @@ function buildEditorTheme() {
       ".cm-line-body": { color: "#cfd4d9" },
       ".cm-line-list": { color: "#c7ccd1" },
       ".cm-line-promptInput": { color: "#d6dbe0" },
+      ".cm-line-attachmentPanel": {
+        paddingLeft: "2ch",
+      },
       ".cm-line-promptStart": {
         position: "relative",
         paddingLeft: "2ch",
@@ -381,7 +559,17 @@ function resolveHistorySelectionForDocModel(
 }
 
 export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, TranscriptRendererProps>(
-  function TranscriptRenderer({ blocks, onSubmit, submitDisabled = false }, ref) {
+  function TranscriptRenderer(
+    {
+      blocks,
+      composerAttachments = [],
+      onAddImageFiles,
+      onRemoveImage,
+      onSubmit,
+      submitDisabled = false,
+    },
+    ref,
+  ) {
     const editorRef = useRef<HTMLDivElement | null>(null);
     const viewRef = useRef<EditorView | null>(null);
     const hasAutofocusedRef = useRef(false);
@@ -393,13 +581,17 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const draftRef = useRef("");
     const onSubmitRef = useRef(onSubmit);
     const submitDisabledRef = useRef(submitDisabled);
+    const composerAttachmentsRef = useRef(composerAttachments);
+    const dragDepthRef = useRef(0);
+    const [isDraggingImages, setIsDraggingImages] = useState(false);
     const [draft, setDraft] = useState("");
 
     useEffect(() => {
       draftRef.current = draft;
       onSubmitRef.current = onSubmit;
       submitDisabledRef.current = submitDisabled;
-    }, [draft, onSubmit, submitDisabled]);
+      composerAttachmentsRef.current = composerAttachments;
+    }, [composerAttachments, draft, onSubmit, submitDisabled]);
 
     const docModel = useMemo(() => buildTranscriptDocument(blocks, draft), [blocks, draft]);
     const initialDocModelRef = useRef(docModel);
@@ -530,7 +722,11 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
       const submitDraft = async () => {
         const value = draftRef.current.trim();
-        if (value.length === 0 || submittingRef.current || submitDisabledRef.current) {
+        if (
+          (value.length === 0 && composerAttachmentsRef.current.length === 0) ||
+          submittingRef.current ||
+          submitDisabledRef.current
+        ) {
           return true;
         }
 
@@ -628,7 +824,11 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           buildEditorTheme(),
           decorationsCompartment.of(
             EditorView.decorations.of(
-              buildDecorations(initialDocModel.lines, initialDocModel.promptStart),
+              buildDecorations(
+                initialDocModel.lines,
+                initialDocModel.widgets,
+                initialDocModel.promptStart,
+              ),
             ),
           ),
           EditorView.updateListener.of((update) => {
@@ -736,7 +936,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         selection: EditorSelection.range(nextSelection.anchor, nextSelection.head),
         effects: [
           decorationsCompartment.reconfigure(
-            EditorView.decorations.of(buildDecorations(docModel.lines, docModel.promptStart)),
+            EditorView.decorations.of(
+              buildDecorations(docModel.lines, docModel.widgets, docModel.promptStart),
+            ),
           ),
           setPromptStartEffect.of(docModel.promptStart),
         ],
@@ -757,9 +959,122 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
     }, [docModel]);
 
+    const focusPromptForAttachments = useCallback(() => {
+      const view = viewRef.current;
+      if (!view) {
+        return;
+      }
+      focusPromptRegion(view);
+    }, [focusPromptRegion]);
+
+    const handleIncomingFiles = useCallback((files: ReadonlyArray<File>) => {
+      const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+      if (imageFiles.length === 0) {
+        return false;
+      }
+
+      onAddImageFiles?.(imageFiles);
+      focusPromptForAttachments();
+      return true;
+    }, [focusPromptForAttachments, onAddImageFiles]);
+
+    const handlePasteCapture = useCallback((event: ReactClipboardEvent<HTMLDivElement>) => {
+      const files = Array.from(event.clipboardData.files);
+      if (files.length === 0) {
+        return;
+      }
+      if (handleIncomingFiles(files)) {
+        event.preventDefault();
+      }
+    }, [handleIncomingFiles]);
+
+    const handleDragEnter = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+      if (!event.dataTransfer.types.includes("Files")) {
+        return;
+      }
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      setIsDraggingImages(true);
+    }, []);
+
+    const handleDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+      if (!event.dataTransfer.types.includes("Files")) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      setIsDraggingImages(true);
+    }, []);
+
+    const handleDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+      if (!event.dataTransfer.types.includes("Files")) {
+        return;
+      }
+      event.preventDefault();
+      const nextTarget = event.relatedTarget;
+      if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+        return;
+      }
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) {
+        setIsDraggingImages(false);
+      }
+    }, []);
+
+    const handleDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+      if (!event.dataTransfer.types.includes("Files")) {
+        return;
+      }
+      event.preventDefault();
+      dragDepthRef.current = 0;
+      setIsDraggingImages(false);
+      handleIncomingFiles(Array.from(event.dataTransfer.files));
+    }, [handleIncomingFiles]);
+
     return (
-      <div className="transcript-surface">
+      <div
+        className={`transcript-surface${isDraggingImages ? " transcript-surface--drag-over" : ""}`}
+        onPasteCapture={handlePasteCapture}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         <div className="transcript-editor" ref={editorRef} />
+        {composerAttachments.length > 0 ? (
+          <div className="attachment-panel attachment-panel--composer">
+            {composerAttachments.map((attachment) => (
+              <div className="attachment-tile" key={attachment.id}>
+                <div className="attachment-tile__media">
+                  <div className="attachment-tile__fallback" hidden>
+                    {attachmentBadgeLabel(attachment.mimeType)}
+                  </div>
+                  <img
+                    className="attachment-tile__image"
+                    alt={attachment.name}
+                    src={attachment.previewUrl}
+                  />
+                </div>
+                <div className="attachment-tile__meta">
+                  <div className="attachment-tile__name">{attachment.name}</div>
+                  <div className="attachment-tile__detail">
+                    {attachment.mimeType} · {formatAttachmentSize(attachment.sizeBytes)}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="attachment-tile__remove"
+                  aria-label={`Remove ${attachment.name}`}
+                  onClick={() => {
+                    onRemoveImage?.(attachment.id);
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
     );
   },

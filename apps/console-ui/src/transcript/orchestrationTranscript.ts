@@ -5,6 +5,13 @@ import type {
 
 import type { TranscriptBlock } from "./TranscriptBlock";
 
+const IMAGE_ONLY_BOOTSTRAP_PROMPT =
+  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
+
+interface TranscriptBlockOptions {
+  readonly resolveAttachmentPreviewUrl?: (attachmentId: string) => string;
+}
+
 interface TimelineEntry {
   readonly id: string;
   readonly createdAt: string;
@@ -340,7 +347,10 @@ function compareByCreatedAt(left: TimelineEntry, right: TimelineEntry) {
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
-export function threadToTranscriptBlocks(thread: OrchestrationThread): TranscriptBlock[] {
+export function threadToTranscriptBlocks(
+  thread: OrchestrationThread,
+  options: TranscriptBlockOptions = {},
+): TranscriptBlock[] {
   const checkpointsByAssistantMessageId = new Map(
     thread.checkpoints
       .filter((checkpoint) => checkpoint.assistantMessageId !== null)
@@ -350,15 +360,29 @@ export function threadToTranscriptBlocks(thread: OrchestrationThread): Transcrip
   const entries: TimelineEntry[] = [];
 
   for (const message of thread.messages) {
-    const text = message.attachments && message.attachments.length > 0
-      ? [message.text, "", ...message.attachments.map((attachment) => `[image] ${attachment.name}`)]
-          .filter((line) => line.length > 0)
-          .join("\n")
-      : message.text;
+    const text =
+      message.attachments && message.attachments.length > 0 && message.text === IMAGE_ONLY_BOOTSTRAP_PROMPT
+        ? ""
+        : message.text;
+    const attachments = message.attachments?.map((attachment) => ({
+      id: attachment.id,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      ...(options.resolveAttachmentPreviewUrl
+        ? { previewUrl: options.resolveAttachmentPreviewUrl(attachment.id) }
+        : {}),
+    }));
 
     const blocks: TranscriptBlock[] =
       message.role === "user"
-        ? [{ type: "user-message", text }]
+        ? [
+            {
+              type: "user-message",
+              text,
+              ...(attachments && attachments.length > 0 ? { attachments } : {}),
+            },
+          ]
         : message.role === "assistant"
           ? [{ type: "assistant-text", text, streaming: message.streaming }]
           : [{ type: "status", text }];

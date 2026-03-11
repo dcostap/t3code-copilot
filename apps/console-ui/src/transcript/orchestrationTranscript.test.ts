@@ -1,4 +1,4 @@
-import { EventId } from "@t3tools/contracts";
+import { EventId, MessageId } from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 
 import { buildDemoSnapshot } from "../consoleData/demoSnapshot";
@@ -43,6 +43,58 @@ describe("threadToTranscriptBlocks", () => {
     expect(derived).toEqual([
       { type: "status", text: "First: first" },
       { type: "status", text: "Second: second" },
+    ]);
+  });
+
+  it("keeps image attachments out of user message text and resolves preview urls", () => {
+    const snapshot = buildDemoSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        checkpoints: [],
+        proposedPlans: [],
+        activities: [],
+        messages: [
+          {
+            id: MessageId.makeUnsafe("message-1"),
+            role: "user",
+            text: "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]",
+            attachments: [
+              {
+                type: "image",
+                id: "attachment-1",
+                name: "screenshot.png",
+                mimeType: "image/png",
+                sizeBytes: 128,
+              },
+            ],
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-11T09:00:00.000Z",
+            updatedAt: "2026-03-11T09:00:00.000Z",
+          },
+        ],
+      },
+      { resolveAttachmentPreviewUrl: (attachmentId) => `/attachments/${attachmentId}` },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "user-message",
+        text: "",
+        attachments: [
+          {
+            id: "attachment-1",
+            name: "screenshot.png",
+            mimeType: "image/png",
+            sizeBytes: 128,
+            previewUrl: "/attachments/attachment-1",
+          },
+        ],
+      },
     ]);
   });
 });

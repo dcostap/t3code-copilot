@@ -71,8 +71,118 @@ body {
   min-height: 100%;
 }
 
+.transcript-surface--drag-over::after {
+  content: "Drop images to attach";
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+  z-index: 3;
+  padding: 4px 8px;
+  border: 1px solid rgba(90, 168, 243, 0.35);
+  background: rgba(18, 21, 26, 0.92);
+  color: #8cc4f7;
+  font-size: 12px;
+  line-height: 1;
+  pointer-events: none;
+}
+
 .transcript-editor {
   min-height: 100%;
+}
+
+.attachment-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 220px));
+  gap: 10px;
+}
+
+.attachment-panel--composer {
+  padding: 0 22px 16px 34px;
+}
+
+.attachment-panel--history {
+  margin: 8px 0 10px;
+  padding-left: 2ch;
+}
+
+.attachment-tile {
+  position: relative;
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid rgba(95, 103, 111, 0.28);
+  background: rgba(18, 21, 26, 0.72);
+  padding: 8px;
+}
+
+.attachment-tile__media {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 88px;
+  height: 62px;
+  overflow: hidden;
+  background: rgba(9, 11, 14, 0.92);
+  color: #6d747c;
+  text-decoration: none;
+}
+
+.attachment-tile__image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.attachment-tile__fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+}
+
+.attachment-tile__meta {
+  min-width: 0;
+}
+
+.attachment-tile__name {
+  overflow: hidden;
+  color: #d5dae0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-tile__detail {
+  margin-top: 4px;
+  overflow: hidden;
+  color: #727980;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-tile__remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgba(95, 103, 111, 0.28);
+  background: rgba(9, 11, 14, 0.92);
+  color: #98a0a8;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.attachment-tile__remove:hover {
+  color: #d7dde3;
+  border-color: rgba(153, 170, 184, 0.36);
 }
 
 /* ── Command Palette ──────────────────────────────────── */

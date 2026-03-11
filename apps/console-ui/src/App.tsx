@@ -5,8 +5,19 @@ import {
   filterCommandPaletteCommands,
   type CommandPaletteCommand,
 } from "./commandPaletteCommands";
+import {
+  IMAGE_ATTACHMENT_SIZE_LIMIT_LABEL,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+  composerImageDedupKey,
+  createComposerImageAttachment,
+  revokeComposerImageAttachmentPreview,
+  toUploadImageAttachment,
+  type ComposerImageAttachment,
+} from "./composerAttachments";
 import { TranscriptRenderer, type TranscriptRendererHandle, threadToTranscriptBlocks } from "./transcript";
 import { useConsoleData } from "./consoleData/useConsoleData";
+import { resolveWsHttpOrigin } from "./wsTransport";
 
 interface AppPaletteCommand extends CommandPaletteCommand {
   run(): Promise<void> | void;
@@ -18,27 +29,46 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [composerAttachments, setComposerAttachments] = useState<ComposerImageAttachment[]>([]);
   const transcriptRef = useRef<TranscriptRendererHandle | null>(null);
+  const composerAttachmentsRef = useRef(composerAttachments);
+  composerAttachmentsRef.current = composerAttachments;
   const handleSubmit = useCallback(
     async (value: string) => {
+      const attachmentSnapshot = [...composerAttachments];
       try {
-        await consoleData.submitPrompt(value);
+        await consoleData.submitPrompt({
+          prompt: value,
+          attachments: await Promise.all(attachmentSnapshot.map(toUploadImageAttachment)),
+        });
+        for (const attachment of attachmentSnapshot) {
+          revokeComposerImageAttachmentPreview(attachment);
+        }
+        setComposerAttachments((existing) =>
+          existing.filter(
+            (attachment) => !attachmentSnapshot.some((candidate) => candidate.id === attachment.id),
+          ),
+        );
         setSubmitError(null);
       } catch (error) {
         setSubmitError(error instanceof Error ? error.message : "Failed to submit prompt.");
       }
     },
-    [consoleData],
+    [composerAttachments, consoleData],
   );
+  const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
   const blocks = useMemo(() => {
     if (consoleData.thread) {
-      return threadToTranscriptBlocks(consoleData.thread);
+      return threadToTranscriptBlocks(consoleData.thread, {
+        resolveAttachmentPreviewUrl: (attachmentId) =>
+          `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
+      });
     }
     if (consoleData.error) {
       return [{ type: "status" as const, text: `Connection error: ${consoleData.error}` }];
     }
     return [{ type: "status" as const, text: "Waiting for orchestration snapshot..." }];
-  }, [consoleData.error, consoleData.thread]);
+  }, [attachmentPreviewBaseUrl, consoleData.error, consoleData.thread]);
   const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
     const commands: AppPaletteCommand[] = [];
     const activeThread = consoleData.thread;
@@ -176,6 +206,82 @@ export function App() {
     [paletteCommands, paletteQuery],
   );
 
+  const handleAddImageFiles = useCallback(
+    (files: ReadonlyArray<File>) => {
+      if (files.length === 0) {
+        return;
+      }
+
+      const accepted: ComposerImageAttachment[] = [];
+      let nextCount = composerAttachments.length;
+      const dedupKeys = new Set(
+        composerAttachments.map((attachment) => composerImageDedupKey(attachment)),
+      );
+      let nextError: string | null = null;
+
+      for (const file of files) {
+        if (!file.type.startsWith("image/")) {
+          nextError = `Unsupported file type for '${file.name}'. Attach image files only.`;
+          continue;
+        }
+        if (file.size === 0 || file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
+          nextError = `'${file.name}' exceeds the ${IMAGE_ATTACHMENT_SIZE_LIMIT_LABEL} attachment limit.`;
+          continue;
+        }
+        if (nextCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+          nextError = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`;
+          break;
+        }
+
+        const attachment = createComposerImageAttachment(file);
+        const dedupKey = composerImageDedupKey(attachment);
+        if (dedupKeys.has(dedupKey)) {
+          revokeComposerImageAttachmentPreview(attachment);
+          continue;
+        }
+
+        accepted.push(attachment);
+        dedupKeys.add(dedupKey);
+        nextCount += 1;
+      }
+
+      if (accepted.length > 0) {
+        setComposerAttachments((existing) => [...existing, ...accepted]);
+      }
+      if (nextError || accepted.length > 0) {
+        setSubmitError(nextError);
+      }
+    },
+    [composerAttachments],
+  );
+
+  const handleRemoveImage = useCallback((attachmentId: string) => {
+    setComposerAttachments((existing) => {
+      const removed = existing.find((attachment) => attachment.id === attachmentId);
+      if (removed) {
+        revokeComposerImageAttachmentPreview(removed);
+      }
+      return existing.filter((attachment) => attachment.id !== attachmentId);
+    });
+  }, []);
+
+  useEffect(() => {
+    setComposerAttachments((existing) => {
+      for (const attachment of existing) {
+        revokeComposerImageAttachmentPreview(attachment);
+      }
+      return [];
+    });
+  }, [consoleData.thread?.id]);
+
+  useEffect(() => {
+    return () => {
+      for (const attachment of composerAttachmentsRef.current) {
+        revokeComposerImageAttachmentPreview(attachment);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const focusTranscript = () => {
       transcriptRef.current?.focus();
@@ -300,6 +406,9 @@ export function App() {
             <TranscriptRenderer
               ref={transcriptRef}
               blocks={blocks}
+              composerAttachments={composerAttachments}
+              onAddImageFiles={handleAddImageFiles}
+              onRemoveImage={handleRemoveImage}
               onSubmit={handleSubmit}
               submitDisabled={!consoleData.canSubmitPrompt}
             />

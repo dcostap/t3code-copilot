@@ -12,6 +12,7 @@ export type LineKind =
   | "body"
   | "meta"
   | "list"
+  | "attachmentPanel"
   | "promptInput"
   | "promptSeparator"
   | "toolCall"
@@ -38,6 +39,15 @@ export interface AnnotatedLine {
 export interface UserMessageBlock {
   readonly type: "user-message";
   readonly text: string;
+  readonly attachments?: ReadonlyArray<TranscriptImageAttachment>;
+}
+
+export interface TranscriptImageAttachment {
+  readonly id: string;
+  readonly name: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+  readonly previewUrl?: string;
 }
 
 export interface AssistantTextBlock {
@@ -136,6 +146,7 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
       return [
         { text: "", kind: "meta" },
         ...wrapLines(block.text, "userMessage"),
+        ...((block.attachments ?? []).map(() => ({ text: "", kind: "attachmentPanel" as const }))),
         { text: "", kind: "meta" },
       ];
 
