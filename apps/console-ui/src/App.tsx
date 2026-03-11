@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { TranscriptRenderer, threadToTranscriptBlocks } from "./transcript";
-import { CommandPalette } from "./CommandPalette";
-import { useComposerWithPalette } from "./useComposerWithPalette";
+import { TranscriptRenderer, type TranscriptRendererHandle, threadToTranscriptBlocks } from "./transcript";
 import { useConsoleData } from "./consoleData/useConsoleData";
 
 export function App() {
   const consoleData = useConsoleData();
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const transcriptRef = useRef<TranscriptRendererHandle | null>(null);
   const handleSubmit = useCallback(
     async (value: string) => {
       try {
@@ -19,7 +18,6 @@ export function App() {
     },
     [consoleData],
   );
-  const composer = useComposerWithPalette({ onSubmit: handleSubmit });
   const blocks = useMemo(() => {
     if (consoleData.thread) {
       return threadToTranscriptBlocks(consoleData.thread);
@@ -29,14 +27,19 @@ export function App() {
     }
     return [{ type: "status" as const, text: "Waiting for orchestration snapshot..." }];
   }, [consoleData.error, consoleData.thread]);
-  const conversationRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
-    const node = conversationRef.current;
-    if (!node) return;
+    const focusTranscript = () => {
+      transcriptRef.current?.focus();
+    };
 
-    node.scrollTop = node.scrollHeight;
-  }, [composer.value, composer.paletteOpen]);
+    focusTranscript();
+    requestAnimationFrame(() => {
+      focusTranscript();
+      setTimeout(focusTranscript, 0);
+      setTimeout(focusTranscript, 40);
+    });
+  }, []);
 
   const footerText = useMemo(() => {
     const source = consoleData.mode === "demo" ? "demo snapshot" : `live ${consoleData.connectionState}`;
@@ -64,35 +67,9 @@ export function App() {
       <div className="bg-image" />
       <div className="bg-gradient" />
       <div className="console-shell">
-        <main className="conversation-scroll" ref={conversationRef}>
+        <main className="conversation-scroll">
           <div className="transcript-shell">
-            <TranscriptRenderer blocks={blocks} />
-          </div>
-          <div className="composer-area">
-            {composer.paletteOpen && (
-              <CommandPalette
-                commands={composer.filteredCommands}
-                selectedIndex={composer.selectedIndex}
-              />
-            )}
-            <section className="composer-shell">
-              <span className="composer-prompt" aria-hidden="true">›</span>
-              <textarea
-                ref={composer.textareaRef}
-                aria-label="Prompt composer"
-                className="composer-input"
-                placeholder={
-                  consoleData.mode === "demo"
-                    ? "Demo mode: type a prompt and press Enter"
-                    : "Live mode: send a turn to the orchestration backend"
-                }
-                rows={1}
-                spellCheck={false}
-                value={composer.value}
-                onChange={composer.onChange}
-                onKeyDown={composer.onKeyDown}
-              />
-            </section>
+            <TranscriptRenderer ref={transcriptRef} blocks={blocks} onSubmit={handleSubmit} />
           </div>
         </main>
         <footer className="status-line">{footerText}</footer>

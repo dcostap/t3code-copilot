@@ -14,6 +14,7 @@ export interface ComposerPaletteState {
 
 interface UseComposerWithPaletteOptions {
   onSubmit?(value: string): Promise<void> | void;
+  onHistoryFocusRequest?(): void;
 }
 
 function autoResize(el: HTMLTextAreaElement) {
@@ -96,6 +97,9 @@ export function useComposerWithPalette(options: UseComposerWithPaletteOptions = 
           const cmd = filteredCommands[selectedIndex];
           if (cmd) acceptCommand(cmd);
         }
+      } else if (e.key === "Tab" && !e.shiftKey) {
+        e.preventDefault();
+        options.onHistoryFocusRequest?.();
       } else if (e.key === "Escape") {
         e.preventDefault();
         dismiss();
@@ -104,7 +108,7 @@ export function useComposerWithPalette(options: UseComposerWithPaletteOptions = 
         void submit();
       }
     },
-    [paletteOpen, filteredCommands, selectedIndex, acceptCommand, dismiss, submit],
+    [paletteOpen, filteredCommands, selectedIndex, acceptCommand, dismiss, options, submit],
   );
 
   return {

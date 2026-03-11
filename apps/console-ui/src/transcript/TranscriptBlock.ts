@@ -12,6 +12,8 @@ export type LineKind =
   | "body"
   | "meta"
   | "list"
+  | "promptInput"
+  | "promptSeparator"
   | "toolCall"
   | "toolResult"
   | "diffRemoved"
