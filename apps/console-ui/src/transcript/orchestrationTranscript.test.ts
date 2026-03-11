@@ -1,4 +1,4 @@
-import { EventId, MessageId } from "@t3tools/contracts";
+import { EventId, MessageId, TurnId } from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 
 import { buildDemoSnapshot } from "../consoleData/demoSnapshot";
@@ -158,6 +158,200 @@ describe("threadToTranscriptBlocks", () => {
             detail: "Matched App.tsx and TranscriptRenderer.tsx.",
           },
         ],
+      },
+    ]);
+  });
+
+  it("keeps resolved user-input request blocks in the transcript in answered state", () => {
+    const snapshot = buildDemoSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-user-input-requested"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "req-user-input-1",
+            questions: [
+              {
+                header: "Source",
+                question: "Which mode should this console stay in?",
+                options: [
+                  { label: "Demo", description: "Keep using local orchestration fixtures." },
+                  { label: "Live", description: "Connect to the orchestration websocket." },
+                ],
+              },
+            ],
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:00.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-user-input-resolved"),
+          tone: "info",
+          kind: "user-input.resolved",
+          summary: "User input resolved",
+          payload: {
+            requestId: "req-user-input-1",
+            answers: { answer: "Demo" },
+          },
+          turnId: null,
+          sequence: 2,
+          createdAt: "2026-03-11T09:00:01.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "user-input-request",
+        requestId: "req-user-input-1",
+        resolved: true,
+        answers: { answer: "Demo" },
+        questions: [
+          {
+            header: "Source",
+            question: "Which mode should this console stay in?",
+            options: [
+              { label: "Demo", description: "Keep using local orchestration fixtures." },
+              { label: "Live", description: "Connect to the orchestration websocket." },
+            ],
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("splits assistant output around inline user-input requests using orchestration events", () => {
+    const snapshot = buildDemoSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-inline-user-input");
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-user-input-requested-inline"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "req-user-input-inline",
+            questions: [
+              {
+                id: "demo_source",
+                header: "Source",
+                question: "Which mode should this console stay in?",
+                options: [
+                  { label: "Demo", description: "Keep using local orchestration fixtures." },
+                  { label: "Live", description: "Connect to the orchestration websocket." },
+                ],
+              },
+            ],
+          },
+          turnId,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:05.000Z",
+        },
+      ],
+      messages: [
+        {
+          id: MessageId.makeUnsafe("assistant-stream-after-input"),
+          role: "assistant",
+          text: "Before the question. After the answer.",
+          attachments: [],
+          turnId,
+          streaming: true,
+          createdAt: "2026-03-11T09:00:01.000Z",
+          updatedAt: "2026-03-11T09:00:06.000Z",
+        },
+      ],
+    }, {
+      orchestrationEvents: [
+        {
+          sequence: 1,
+          eventId: EventId.makeUnsafe("event-assistant-before"),
+          aggregateKind: "thread",
+          aggregateId: thread!.id,
+          occurredAt: "2026-03-11T09:00:01.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.message-sent",
+          payload: {
+            threadId: thread!.id,
+            messageId: MessageId.makeUnsafe("assistant-stream-after-input"),
+            role: "assistant",
+            text: "Before the question. ",
+            turnId,
+            streaming: true,
+            createdAt: "2026-03-11T09:00:01.000Z",
+            updatedAt: "2026-03-11T09:00:01.000Z",
+          },
+        },
+        {
+          sequence: 2,
+          eventId: EventId.makeUnsafe("event-assistant-after"),
+          aggregateKind: "thread",
+          aggregateId: thread!.id,
+          occurredAt: "2026-03-11T09:00:06.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.message-sent",
+          payload: {
+            threadId: thread!.id,
+            messageId: MessageId.makeUnsafe("assistant-stream-after-input"),
+            role: "assistant",
+            text: "After the answer.",
+            turnId,
+            streaming: true,
+            createdAt: "2026-03-11T09:00:06.000Z",
+            updatedAt: "2026-03-11T09:00:06.000Z",
+          },
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Before the question. ",
+        streaming: false,
+      },
+      {
+        type: "user-input-request",
+        requestId: "req-user-input-inline",
+        questions: [
+          {
+            id: "demo_source",
+            header: "Source",
+            question: "Which mode should this console stay in?",
+            options: [
+              { label: "Demo", description: "Keep using local orchestration fixtures." },
+              { label: "Live", description: "Connect to the orchestration websocket." },
+            ],
+          },
+        ],
+      },
+      {
+        type: "assistant-text",
+        text: "After the answer.",
+        streaming: true,
       },
     ]);
   });

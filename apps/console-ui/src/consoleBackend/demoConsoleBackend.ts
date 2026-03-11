@@ -41,6 +41,8 @@ const DEMO_TOOL_ACTIVITY_DELAY_MS = 180;
 const DEMO_PENDING_REQUEST_DELAY_MS = 420;
 const DEMO_ERROR_DELAY_MS = 520;
 const DEMO_STREAM_CHUNK_DELAY_MS = 180;
+const DEMO_PENDING_USER_INPUT_PREAMBLE =
+  "I can continue, but I need one concrete detail first.\n\n";
 
 function cloneValue<T>(value: T): T {
   return structuredClone(value);
@@ -389,6 +391,7 @@ export class DemoConsoleBackend implements ConsoleBackend {
   private readonly pendingTurns = new Map<string, DemoPendingTurn>();
   private readonly scheduledTasks = new Set<ScheduledScenarioTask>();
   private readonly scheduledTasksByThread = new Map<ThreadId, Set<ScheduledScenarioTask>>();
+  private readonly eventLog: OrchestrationEvent[] = [];
   private connected = false;
   private nextSequence: number;
 
@@ -439,6 +442,12 @@ export class DemoConsoleBackend implements ConsoleBackend {
 
   async getSnapshot() {
     return cloneValue(this.snapshot);
+  }
+
+  async replayEvents(fromSequenceExclusive: number) {
+    return cloneValue(
+      this.eventLog.filter((event) => event.sequence > fromSequenceExclusive),
+    );
   }
 
   async dispatchCommand(command: ClientOrchestrationCommand) {
@@ -642,15 +651,29 @@ export class DemoConsoleBackend implements ConsoleBackend {
 
     if (scenario === "user-input") {
       const requestId = makeId("demo-user-input") as ApprovalRequestId;
-      this.pendingTurns.set(requestId, {
+      const pendingTurn = {
         requestId,
         kind: "user-input",
         threadId: command.threadId,
         turnId,
         assistantMessageId,
         prompt: command.message.text,
+      } satisfies DemoPendingTurn;
+      this.pendingTurns.set(requestId, pendingTurn);
+      const preambleChunks = chunkDemoReply(DEMO_PENDING_USER_INPUT_PREAMBLE);
+      let previewText = "";
+      const requestDelayMs = Math.max(
+        DEMO_PENDING_REQUEST_DELAY_MS,
+        (preambleChunks.length + 1) * DEMO_STREAM_CHUNK_DELAY_MS,
+      );
+      preambleChunks.forEach((chunk, index) => {
+        this.schedule(DEMO_STREAM_CHUNK_DELAY_MS * (index + 1), () => {
+          const updatedAt = this.nowIso();
+          previewText += chunk;
+          this.streamAssistantTextChunk(pendingTurn, previewText, chunk, updatedAt);
+        }, command.threadId);
       });
-      this.schedule(DEMO_PENDING_REQUEST_DELAY_MS, () => {
+      this.schedule(requestDelayMs, () => {
         this.appendActivityAndEmit(command.threadId, {
           id: makeId("demo-user-input-requested") as EventId,
           tone: "info",
@@ -999,16 +1022,16 @@ export class DemoConsoleBackend implements ConsoleBackend {
 
   private continuePendingTurn(pendingTurn: DemoPendingTurn, answers?: Record<string, unknown>) {
     const chunks = chunkDemoReply(demoReplyForPrompt(pendingTurn.prompt, answers));
-    let nextText = "";
+    let nextText =
+      this.requireThread(pendingTurn.threadId).messages.find(
+        (message) => message.id === pendingTurn.assistantMessageId,
+      )?.text ?? "";
 
     chunks.forEach((chunk, index) => {
       this.schedule(DEMO_STREAM_CHUNK_DELAY_MS * (index + 1), () => {
         const updatedAt = this.nowIso();
         nextText += chunk;
-        this.updateThread(pendingTurn.threadId, updatedAt, (thread) =>
-          updateMessageText(thread, pendingTurn.assistantMessageId, nextText, updatedAt, true),
-        );
-        this.emit({ type: "snapshot.updated" });
+        this.streamAssistantTextChunk(pendingTurn, nextText, chunk, updatedAt);
       }, pendingTurn.threadId);
     });
 
@@ -1039,11 +1062,43 @@ export class DemoConsoleBackend implements ConsoleBackend {
           createdAt: completedAt,
         });
       });
+      this.emitThreadEvent("thread.message-sent", pendingTurn.threadId, null, {
+        threadId: pendingTurn.threadId,
+        messageId: pendingTurn.assistantMessageId,
+        role: "assistant",
+        text: "",
+        turnId: pendingTurn.turnId,
+        streaming: false,
+        createdAt: completedAt,
+        updatedAt: completedAt,
+      });
       this.emitThreadEvent("thread.activity-appended", pendingTurn.threadId, null, {
         threadId: pendingTurn.threadId,
         activity: this.requireThread(pendingTurn.threadId).activities.at(-1)!,
       });
     }, pendingTurn.threadId);
+  }
+
+  private streamAssistantTextChunk(
+    pendingTurn: DemoPendingTurn,
+    nextText: string,
+    chunk: string,
+    updatedAt: string,
+  ) {
+    this.updateThread(pendingTurn.threadId, updatedAt, (thread) =>
+      updateMessageText(thread, pendingTurn.assistantMessageId, nextText, updatedAt, true),
+    );
+    this.emitThreadEvent("thread.message-sent", pendingTurn.threadId, null, {
+      threadId: pendingTurn.threadId,
+      messageId: pendingTurn.assistantMessageId,
+      role: "assistant",
+      text: chunk,
+      turnId: pendingTurn.turnId,
+      streaming: true,
+      createdAt: updatedAt,
+      updatedAt,
+    });
+    this.emit({ type: "snapshot.updated" });
   }
 
   private appendActivityAndEmit(
@@ -1086,6 +1141,7 @@ export class DemoConsoleBackend implements ConsoleBackend {
       payload,
     } as Extract<OrchestrationEvent, { type: T }>;
 
+    this.eventLog.push(cloneValue(event));
     this.emit({ type: "orchestration.event", payload: event });
   }
 

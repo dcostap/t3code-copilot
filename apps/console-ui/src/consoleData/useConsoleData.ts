@@ -5,6 +5,7 @@ import {
   type OrchestrationProject,
   type OrchestrationReadModel,
   type OrchestrationThread,
+  type OrchestrationEvent,
   type ProviderApprovalDecision,
   type ProviderInteractionMode,
   type ProviderKind,
@@ -56,6 +57,7 @@ export interface ConsoleDataState {
   readonly activeThreadId: string | null;
   readonly thread: OrchestrationThread | null;
   readonly project: OrchestrationProject | null;
+  readonly threadEvents: ReadonlyArray<OrchestrationEvent>;
   readonly pendingApprovals: ReadonlyArray<ConsolePendingApproval>;
   readonly pendingUserInputs: ReadonlyArray<ConsolePendingUserInput>;
   readonly isTurnRunning: boolean;
@@ -182,10 +184,6 @@ function parseUserInputQuestions(
           return { label, description };
         })
         .filter((option): option is UserInputQuestion["options"][number] => option !== null);
-
-      if (normalizedOptions.length === 0) {
-        return null;
-      }
 
       return {
         id,
@@ -318,6 +316,22 @@ function canDispatchLiveCommand(connectionState: ConsoleConnectionState) {
   return connectionState === "connected";
 }
 
+function mergeOrchestrationEvents(
+  existing: ReadonlyArray<OrchestrationEvent>,
+  incoming: ReadonlyArray<OrchestrationEvent>,
+) {
+  if (incoming.length === 0) {
+    return existing;
+  }
+
+  const bySequence = new Map(existing.map((event) => [event.sequence, event] as const));
+  incoming.forEach((event) => {
+    bySequence.set(event.sequence, event);
+  });
+
+  return [...bySequence.values()].toSorted((left, right) => left.sequence - right.sequence);
+}
+
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 
@@ -341,6 +355,7 @@ export function useConsoleData(): ConsoleDataState {
   const stopSessionInFlightRef = useRef(false);
 
   const [snapshot, setSnapshot] = useState<OrchestrationReadModel | null>(null);
+  const [orchestrationEvents, setOrchestrationEvents] = useState<ReadonlyArray<OrchestrationEvent>>([]);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const [welcome, setWelcome] = useState<WsWelcomePayload | null>(null);
   const [activeThreadId, setActiveThreadIdState] = useState<string | null>(searchConfig.threadId);
@@ -370,6 +385,7 @@ export function useConsoleData(): ConsoleDataState {
     respondingUserInputRequestIdsRef.current.clear();
     interruptInFlightRef.current = false;
     stopSessionInFlightRef.current = false;
+    setOrchestrationEvents([]);
     setIsPromptSubmitting(false);
     setRespondingApprovalRequestIds([]);
     setRespondingUserInputRequestIds([]);
@@ -397,6 +413,19 @@ export function useConsoleData(): ConsoleDataState {
         pendingSyncRef.current = false;
         await flushSnapshotSync();
       }
+    };
+
+    const syncEvents = async (fromSequenceExclusive: number) => {
+      const nextEvents = await backend.replayEvents(fromSequenceExclusive);
+      if (disposed || nextEvents.length === 0) {
+        return;
+      }
+
+      latestEventSequenceRef.current = Math.max(
+        latestEventSequenceRef.current,
+        ...nextEvents.map((event) => event.sequence),
+      );
+      setOrchestrationEvents((existing) => mergeOrchestrationEvents(existing, nextEvents));
     };
 
     const syncSnapshot = async () => {
@@ -457,6 +486,7 @@ export function useConsoleData(): ConsoleDataState {
         setConnectionState(event.state);
         if (event.state === "connected") {
           void syncSnapshot();
+          void syncEvents(latestEventSequenceRef.current);
           void syncServerConfig();
         }
         return;
@@ -482,11 +512,15 @@ export function useConsoleData(): ConsoleDataState {
         return;
       }
 
-      if (event.payload.sequence <= latestEventSequenceRef.current) {
+      if (event.type === "orchestration.event") {
+        latestEventSequenceRef.current = Math.max(
+          latestEventSequenceRef.current,
+          event.payload.sequence,
+        );
+        setOrchestrationEvents((existing) => mergeOrchestrationEvents(existing, [event.payload]));
+        scheduleSnapshotSync();
         return;
       }
-      latestEventSequenceRef.current = event.payload.sequence;
-      scheduleSnapshotSync();
     });
 
     backend.connect();
@@ -494,6 +528,7 @@ export function useConsoleData(): ConsoleDataState {
     if (searchConfig.mode === "demo") {
       setConnectionState("demo");
       void syncSnapshot();
+      void syncEvents(0);
       void syncServerConfig();
     }
 
@@ -537,6 +572,15 @@ export function useConsoleData(): ConsoleDataState {
     if (!snapshot || !thread) return null;
     return snapshot.projects.find((entry: OrchestrationProject) => entry.id === thread.projectId) ?? null;
   }, [snapshot, thread]);
+  const threadEvents = useMemo(
+    () =>
+      thread
+        ? orchestrationEvents.filter(
+            (event) => event.aggregateKind === "thread" && event.aggregateId === thread.id,
+          )
+        : [],
+    [orchestrationEvents, thread],
+  );
 
   const pendingApprovals = useMemo(() => derivePendingApprovals(thread), [thread]);
   const pendingUserInputs = useMemo(() => derivePendingUserInputs(thread), [thread]);
@@ -811,6 +855,7 @@ export function useConsoleData(): ConsoleDataState {
     activeThreadId: thread?.id ?? null,
     thread,
     project,
+    threadEvents,
     pendingApprovals,
     pendingUserInputs,
     isTurnRunning: turnRunning,

@@ -1,15 +1,25 @@
 import type {
+  OrchestrationEvent,
   OrchestrationThread,
   OrchestrationThreadActivity,
 } from "@t3tools/contracts";
 
-import type { TranscriptBlock, WorkGroupItem } from "./TranscriptBlock";
+import type {
+  TranscriptBlock,
+  UserInputRequestBlock,
+  WorkGroupItem,
+} from "./TranscriptBlock";
 
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 
 interface TranscriptBlockOptions {
   readonly resolveAttachmentPreviewUrl?: (attachmentId: string) => string;
+  readonly orchestrationEvents?: ReadonlyArray<OrchestrationEvent>;
+}
+
+interface ActivityBlockOptions {
+  readonly resolvedUserInputsByRequestId?: ReadonlyMap<string, Readonly<Record<string, string>>>;
 }
 
 interface TimelineEntry {
@@ -22,6 +32,7 @@ interface TimelineEntry {
 }
 
 interface UserInputQuestionBlock {
+  id?: string;
   header: string;
   question: string;
   options: Array<{
@@ -33,6 +44,8 @@ interface UserInputQuestionBlock {
 interface PendingWorkItem extends WorkGroupItem {
   readonly mergeKey: string;
 }
+
+type ThreadMessageSentEvent = Extract<OrchestrationEvent, { type: "thread.message-sent" }>;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
@@ -243,7 +256,7 @@ function planUpdateMarkdown(payload: Record<string, unknown> | null): string | n
   ].join("\n");
 }
 
-function userInputBlock(payload: Record<string, unknown> | null): TranscriptBlock | null {
+function userInputBlock(payload: Record<string, unknown> | null): UserInputRequestBlock | null {
   const requestId = asString(payload?.requestId);
   const questions = Array.isArray(payload?.questions) ? payload.questions : [];
   const normalizedQuestions = questions
@@ -251,6 +264,7 @@ function userInputBlock(payload: Record<string, unknown> | null): TranscriptBloc
       const question = asRecord(entry);
       const header = asString(question?.header);
       const prompt = asString(question?.question);
+      const questionId = asString(question?.id);
       const options = Array.isArray(question?.options) ? question.options : [];
       if (!header || !prompt) return null;
       const normalizedOptions = options
@@ -262,11 +276,17 @@ function userInputBlock(payload: Record<string, unknown> | null): TranscriptBloc
           return { label, description };
         })
         .filter((option): option is { label: string; description: string } => option !== null);
-      return {
+
+      const normalizedQuestion: UserInputQuestionBlock = {
         header,
         question: prompt,
         options: normalizedOptions,
       };
+      if (questionId) {
+        normalizedQuestion.id = questionId;
+      }
+
+      return normalizedQuestion;
     })
     .filter((question): question is UserInputQuestionBlock => question !== null);
 
@@ -276,6 +296,32 @@ function userInputBlock(payload: Record<string, unknown> | null): TranscriptBloc
     requestId,
     questions: normalizedQuestions,
   };
+}
+
+function deriveResolvedUserInputsByRequestId(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ReadonlyMap<string, Readonly<Record<string, string>>> {
+  const resolvedByRequestId = new Map<string, Readonly<Record<string, string>>>();
+
+  for (const activity of [...activities].toSorted(compareActivitiesByOrder)) {
+    const payload = asRecord(activity.payload);
+    const requestId = asString(payload?.requestId);
+    if (!requestId) {
+      continue;
+    }
+
+    if (activity.kind === "user-input.resolved") {
+      const answersRecord = asRecord(payload?.answers);
+      const answers = Object.fromEntries(
+        Object.entries(answersRecord ?? {})
+          .filter((entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string"),
+      );
+      resolvedByRequestId.set(requestId, answers);
+      continue;
+    }
+  }
+
+  return resolvedByRequestId;
 }
 
 function isWorkActivityType(itemType: string | null) {
@@ -410,7 +456,10 @@ function workItemsToBlock(
   };
 }
 
-function activityToBlocks(activity: OrchestrationThreadActivity): TranscriptBlock[] {
+function activityToBlocks(
+  activity: OrchestrationThreadActivity,
+  options: ActivityBlockOptions = {},
+): TranscriptBlock[] {
   const payload = asRecord(activity.payload);
 
   switch (activity.kind) {
@@ -447,8 +496,29 @@ function activityToBlocks(activity: OrchestrationThreadActivity): TranscriptBloc
     }
 
     case "user-input.requested": {
+      const requestId = asString(payload?.requestId);
       const block = userInputBlock(payload);
-      return block ? [block] : [{ type: "status", text: activity.summary }];
+      const resolvedAnswers =
+        requestId && options.resolvedUserInputsByRequestId
+          ? options.resolvedUserInputsByRequestId.get(requestId)
+          : undefined;
+      if (!block) {
+        return [{ type: "status", text: activity.summary }];
+      }
+
+      return [
+        resolvedAnswers
+          ? {
+              ...block,
+              resolved: true,
+              answers: resolvedAnswers,
+            }
+          : block,
+      ];
+    }
+
+    case "user-input.resolved": {
+      return [];
     }
 
     case "turn.plan.updated": {
@@ -497,6 +567,22 @@ function activityToBlocks(activity: OrchestrationThreadActivity): TranscriptBloc
   ];
 }
 
+function compareActivitiesByOrder(
+  left: OrchestrationThreadActivity,
+  right: OrchestrationThreadActivity,
+) {
+  if (left.sequence !== undefined && right.sequence !== undefined && left.sequence !== right.sequence) {
+    return left.sequence - right.sequence;
+  }
+  if (left.sequence !== undefined && right.sequence === undefined) {
+    return 1;
+  }
+  if (left.sequence === undefined && right.sequence !== undefined) {
+    return -1;
+  }
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
 function compareByCreatedAt(left: TimelineEntry, right: TimelineEntry) {
   if (left.source === "activity" && right.source === "activity") {
     if (left.sequence !== undefined && right.sequence !== undefined && left.sequence !== right.sequence) {
@@ -506,10 +592,126 @@ function compareByCreatedAt(left: TimelineEntry, right: TimelineEntry) {
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
+function isAssistantBoundaryActivity(activity: OrchestrationThreadActivity) {
+  return activity.kind === "user-input.requested" || activity.kind === "approval.requested";
+}
+
+function buildAssistantBoundaryMap(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+) {
+  const boundariesByTurnId = new Map<string, string[]>();
+
+  for (const activity of activities.toSorted(compareActivitiesByOrder)) {
+    if (!activity.turnId || !isAssistantBoundaryActivity(activity)) {
+      continue;
+    }
+
+    const boundaries = boundariesByTurnId.get(activity.turnId) ?? [];
+    boundaries.push(activity.createdAt);
+    boundariesByTurnId.set(activity.turnId, boundaries);
+  }
+
+  return boundariesByTurnId;
+}
+
+function buildAssistantMessageEntriesFromEvents(
+  thread: OrchestrationThread,
+  message: OrchestrationThread["messages"][number],
+  events: ReadonlyArray<OrchestrationEvent>,
+  boundariesByTurnId: ReadonlyMap<string, ReadonlyArray<string>>,
+): TimelineEntry[] | null {
+  if (message.role !== "assistant") {
+    return null;
+  }
+
+  const assistantEvents = events
+    .filter(
+      (event): event is ThreadMessageSentEvent =>
+        event.type === "thread.message-sent"
+        && event.payload.threadId === thread.id
+        && event.payload.messageId === message.id
+        && event.payload.role === "assistant",
+    )
+    .filter((event) => event.payload.updatedAt.localeCompare(message.updatedAt) <= 0)
+    .toSorted((left, right) => left.sequence - right.sequence);
+
+  if (assistantEvents.length === 0) {
+    return null;
+  }
+
+  const boundaries = message.turnId
+    ? (boundariesByTurnId.get(message.turnId) ?? [])
+    : [];
+  const entries: TimelineEntry[] = [];
+  let boundaryIndex = 0;
+  let segmentText = "";
+  let segmentCreatedAt: string | null = null;
+
+  const flushSegment = (streaming: boolean) => {
+    if (!segmentCreatedAt || segmentText.length === 0) {
+      segmentText = "";
+      segmentCreatedAt = null;
+      return;
+    }
+
+    entries.push({
+      id: `message:${message.id}:segment:${entries.length}`,
+      createdAt: segmentCreatedAt,
+      source: "message",
+      blocks: [{ type: "assistant-text", text: segmentText, streaming }],
+    });
+    segmentText = "";
+    segmentCreatedAt = null;
+  };
+
+  for (const event of assistantEvents) {
+    while (
+      boundaryIndex < boundaries.length
+      && (boundaries[boundaryIndex]?.localeCompare(event.payload.createdAt) ?? 1) < 0
+    ) {
+      flushSegment(false);
+      boundaryIndex += 1;
+    }
+
+    if (event.payload.text.length > 0) {
+      if (!segmentCreatedAt) {
+        segmentCreatedAt = event.payload.createdAt;
+      }
+      segmentText += event.payload.text;
+    }
+  }
+
+  if (segmentText.length === 0 && message.text.length > 0) {
+    return null;
+  }
+
+  const reconstructedText = entries
+    .flatMap((entry) => entry.blocks ?? [])
+    .map((block) => (block.type === "assistant-text" ? block.text : ""))
+    .join("") + segmentText;
+
+  if (!message.text.startsWith(reconstructedText)) {
+    return null;
+  }
+
+  const remainingText = message.text.slice(reconstructedText.length);
+  if (remainingText.length > 0) {
+    if (!segmentCreatedAt) {
+      segmentCreatedAt = message.updatedAt;
+    }
+    segmentText += remainingText;
+  }
+
+  flushSegment(message.streaming);
+  return entries.length > 0 ? entries : null;
+}
+
 export function threadToTranscriptBlocks(
   thread: OrchestrationThread,
   options: TranscriptBlockOptions = {},
 ): TranscriptBlock[] {
+  const resolvedUserInputsByRequestId = deriveResolvedUserInputsByRequestId(thread.activities);
+  const assistantBoundariesByTurnId = buildAssistantBoundaryMap(thread.activities);
   const checkpointsByAssistantMessageId = new Map(
     thread.checkpoints
       .filter((checkpoint) => checkpoint.assistantMessageId !== null)
@@ -533,6 +735,16 @@ export function threadToTranscriptBlocks(
         : {}),
     }));
 
+    const assistantEntries =
+      message.role === "assistant" && options.orchestrationEvents
+        ? buildAssistantMessageEntriesFromEvents(
+            thread,
+            message,
+            options.orchestrationEvents,
+            assistantBoundariesByTurnId,
+          )
+        : null;
+
     const blocks: TranscriptBlock[] =
       message.role === "user"
         ? [
@@ -548,7 +760,9 @@ export function threadToTranscriptBlocks(
 
     if (message.role === "assistant") {
       const checkpoint = checkpointsByAssistantMessageId.get(message.id);
-      if (checkpoint) {
+      if (assistantEntries) {
+        entries.push(...assistantEntries);
+      } else if (checkpoint) {
         blocks.push(
           ...checkpoint.files.map((file) => ({
             type: "file-diff" as const,
@@ -557,7 +771,38 @@ export function threadToTranscriptBlocks(
             deletions: file.deletions,
           })),
         );
+        entries.push({
+          id: `message:${message.id}`,
+          createdAt: message.createdAt,
+          source: "message",
+          blocks,
+        });
+        continue;
+      } else {
+        entries.push({
+          id: `message:${message.id}`,
+          createdAt: message.createdAt,
+          source: "message",
+          blocks,
+        });
+        continue;
       }
+
+      if (checkpoint) {
+        const checkpointEntries = checkpoint.files.map((file, index) => ({
+          id: `checkpoint:${checkpoint.turnId}:${message.id}:${index}`,
+          createdAt: checkpoint.completedAt,
+          source: "message" as const,
+          blocks: [{
+            type: "file-diff" as const,
+            path: file.path,
+            additions: file.additions,
+            deletions: file.deletions,
+          }],
+        }));
+        entries.push(...checkpointEntries);
+      }
+      continue;
     }
 
     entries.push({
@@ -621,7 +866,7 @@ export function threadToTranscriptBlocks(
     }
 
     if (entry.source === "activity" && entry.activity) {
-      blocks.push(...activityToBlocks(entry.activity));
+      blocks.push(...activityToBlocks(entry.activity, { resolvedUserInputsByRequestId }));
       continue;
     }
 
