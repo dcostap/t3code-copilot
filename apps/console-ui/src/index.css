@@ -67,27 +67,30 @@ body {
 }
 
 .transcript-surface {
+  position: relative;
   min-height: 100%;
 }
 
-/* ── Composer area (palette + input) ──────────────────── */
-
-.composer-area {
-  position: relative;
-  margin-top: 8px;
-  background:
-    linear-gradient(to bottom, rgba(17, 20, 25, 0.92), rgba(17, 20, 25, 0.98));
-  border-top: 1px solid rgba(95, 103, 111, 0.28);
-  box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.26);
+.transcript-editor {
+  min-height: 100%;
 }
 
 /* ── Command Palette ──────────────────────────────────── */
 
+.transcript-palette {
+  position: sticky;
+  bottom: 14px;
+  z-index: 3;
+  margin: -8px 0 0;
+  padding: 0 22px 12px;
+}
+
 .palette {
-  margin: 0 12px;
+  margin: 0;
   padding: 6px 0;
   background: #12151a;
   border: 1px solid rgba(95, 103, 111, 0.22);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
 }
 
 .palette-row {
@@ -115,43 +118,6 @@ body {
 
 .palette-row--active .palette-desc {
   color: #8b929a;
-}
-
-/* ── Composer ──────────────────────────────────────────── */
-
-.composer-shell {
-  display: flex;
-  align-items: flex-start;
-  gap: 0;
-  padding: 10px 12px 12px;
-}
-
-.composer-prompt {
-  flex-shrink: 0;
-  padding: 4px 6px 0 12px;
-  color: #757b82;
-  font-size: 15px;
-  line-height: 1.45;
-  user-select: none;
-}
-
-.composer-input {
-  flex: 1;
-  min-height: 24px;
-  max-height: 50vh;
-  padding: 4px 10px 0 2px;
-  border: 0;
-  outline: none;
-  resize: none;
-  overflow-y: hidden;
-  background: transparent;
-  color: #d6dbe0;
-  font: inherit;
-  line-height: 1.45;
-}
-
-.composer-input::placeholder {
-  color: #555b62;
 }
 
 /* ── Status bar ───────────────────────────────────────── */
