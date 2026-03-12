@@ -157,6 +157,71 @@ describe("blockToLines", () => {
     ]);
   });
 
+  it("renders markdown tables in assistant text as unicode box tables", () => {
+    expect(
+      blockToLines({
+        type: "assistant-text",
+        text:
+          "| Name | Role | Status |\n"
+          + "| --- | --- | --- |\n"
+          + "| Alice | Developer | Active |\n"
+          + "| Bob | Designer | Inactive |",
+        streaming: false,
+      }),
+    ).toEqual([
+      { text: "┌───────┬───────────┬──────────┐", kind: "table" },
+      { text: "│ Name  │ Role      │ Status   │", kind: "table" },
+      { text: "├───────┼───────────┼──────────┤", kind: "table" },
+      { text: "│ Alice │ Developer │ Active   │", kind: "table" },
+      { text: "├───────┼───────────┼──────────┤", kind: "table" },
+      { text: "│ Bob   │ Designer  │ Inactive │", kind: "table" },
+      { text: "└───────┴───────────┴──────────┘", kind: "table" },
+    ]);
+  });
+
+  it("renders closed fenced code blocks as transcript-native code sections", () => {
+    expect(
+      blockToLines({
+        type: "assistant-text",
+        text:
+          "Before\n"
+          + "```ts\n"
+          + "const x = 1;\n"
+          + "console.log(x);\n"
+          + "```\n"
+          + "After",
+        streaming: false,
+      }),
+    ).toEqual([
+      { text: "Before", kind: "body" },
+      {
+        text: "╭──────────────────────────────────────────────────────────────────────────────",
+        kind: "codeFenceSeparator",
+      },
+      { text: "code · ts", kind: "codeFenceHeader" },
+      { text: "const x = 1;", kind: "codeFenceBody" },
+      { text: "console.log(x);", kind: "codeFenceBody" },
+      {
+        text: "╰──────────────────────────────────────────────────────────────────────────────",
+        kind: "codeFenceSeparator",
+      },
+      { text: "After", kind: "body" },
+    ]);
+  });
+
+  it("keeps unfinished fenced code blocks as plain text while streaming", () => {
+    expect(
+      blockToLines({
+        type: "assistant-text",
+        text: "```ts\nconst x = 1;",
+        streaming: true,
+      }),
+    ).toEqual([
+      { text: "```ts", kind: "body" },
+      { text: "const x = 1;", kind: "body" },
+    ]);
+  });
+
   it("renders proposed plans with a distinct header and body", () => {
     expect(
       blockToLines({

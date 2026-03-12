@@ -10,6 +10,10 @@
 
 export type LineKind =
   | "body"
+  | "table"
+  | "codeFenceSeparator"
+  | "codeFenceHeader"
+  | "codeFenceBody"
   | "meta"
   | "list"
   | "attachmentPanel"
@@ -207,6 +211,149 @@ function wrapLines(text: string, kind: LineKind): AnnotatedLine[] {
   return text.split("\n").map((line) => ({ text: line, kind }));
 }
 
+function splitMarkdownTableRow(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) {
+    return null;
+  }
+
+  const normalized = trimmed.replace(/^\|/, "").replace(/\|$/, "");
+  const cells = normalized.split("|").map((cell) => cell.trim());
+  if (cells.length < 2 || cells.every((cell) => cell.length === 0)) {
+    return null;
+  }
+  return cells;
+}
+
+function isMarkdownTableDividerLine(line: string, expectedColumns: number): boolean {
+  const cells = splitMarkdownTableRow(line);
+  if (!cells || cells.length !== expectedColumns) {
+    return false;
+  }
+
+  return cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, "")));
+}
+
+function buildTableBorder(
+  widths: ReadonlyArray<number>,
+  left: string,
+  middle: string,
+  right: string,
+) {
+  return `${left}${widths.map((width) => "─".repeat(width + 2)).join(middle)}${right}`;
+}
+
+function formatTableRow(cells: ReadonlyArray<string>, widths: ReadonlyArray<number>) {
+  return `│ ${cells.map((cell, index) => cell.padEnd(widths[index] ?? cell.length, " ")).join(" │ ")} │`;
+}
+
+function tableBlockToLines(rows: ReadonlyArray<ReadonlyArray<string>>): AnnotatedLine[] {
+  const headerRow = rows[0];
+  if (!headerRow) {
+    return [];
+  }
+
+  const widths = headerRow.map((_, index) =>
+    Math.max(...rows.map((row) => row[index]?.length ?? 0)),
+  );
+  if (widths.length === 0) {
+    return [];
+  }
+
+  const header = headerRow;
+  const bodyRows = rows.slice(1);
+  const lines: AnnotatedLine[] = [
+    { text: buildTableBorder(widths, "┌", "┬", "┐"), kind: "table" },
+    { text: formatTableRow(header, widths), kind: "table" },
+    { text: buildTableBorder(widths, "├", "┼", "┤"), kind: "table" },
+  ];
+
+  bodyRows.forEach((row, index) => {
+    lines.push({ text: formatTableRow(row, widths), kind: "table" });
+    lines.push({
+      text: buildTableBorder(
+        widths,
+        index === bodyRows.length - 1 ? "└" : "├",
+        index === bodyRows.length - 1 ? "┴" : "┼",
+        index === bodyRows.length - 1 ? "┘" : "┤",
+      ),
+      kind: "table",
+    });
+  });
+
+  return lines;
+}
+
+function isCodeFenceLine(line: string) {
+  return line.trim().startsWith("```");
+}
+
+function codeFenceLanguage(line: string) {
+  const match = line.trim().match(/^```([^\s`]+)?\s*$/);
+  return match?.[1]?.trim() || "";
+}
+
+function codeFenceToLines(language: string, lines: ReadonlyArray<string>): AnnotatedLine[] {
+  const header = language.length > 0 ? `code · ${language}` : "code";
+  return [
+    { text: "╭──────────────────────────────────────────────────────────────────────────────", kind: "codeFenceSeparator" },
+    { text: header, kind: "codeFenceHeader" },
+    ...lines.map((line) => ({ text: line, kind: "codeFenceBody" as const })),
+    { text: "╰──────────────────────────────────────────────────────────────────────────────", kind: "codeFenceSeparator" },
+  ];
+}
+
+function renderMarkdownTextToLines(text: string, fallbackKind: LineKind): AnnotatedLine[] {
+  const sourceLines = text.split("\n");
+  const rendered: AnnotatedLine[] = [];
+
+  for (let index = 0; index < sourceLines.length; index += 1) {
+    if (isCodeFenceLine(sourceLines[index] ?? "")) {
+      let closingIndex = index + 1;
+      while (closingIndex < sourceLines.length && !isCodeFenceLine(sourceLines[closingIndex] ?? "")) {
+        closingIndex += 1;
+      }
+
+      if (closingIndex < sourceLines.length) {
+        rendered.push(
+          ...codeFenceToLines(
+            codeFenceLanguage(sourceLines[index] ?? ""),
+            sourceLines.slice(index + 1, closingIndex),
+          ),
+        );
+        index = closingIndex;
+        continue;
+      }
+    }
+
+    const headerCells = splitMarkdownTableRow(sourceLines[index] ?? "");
+    if (
+      headerCells
+      && index + 1 < sourceLines.length
+      && isMarkdownTableDividerLine(sourceLines[index + 1] ?? "", headerCells.length)
+    ) {
+      const rows: string[][] = [headerCells];
+      let lookahead = index + 2;
+      while (lookahead < sourceLines.length) {
+        const rowCells = splitMarkdownTableRow(sourceLines[lookahead] ?? "");
+        if (!rowCells || rowCells.length !== headerCells.length) {
+          break;
+        }
+        rows.push(rowCells);
+        lookahead += 1;
+      }
+
+      rendered.push(...tableBlockToLines(rows));
+      index = lookahead - 1;
+      continue;
+    }
+
+    rendered.push({ text: sourceLines[index] ?? "", kind: fallbackKind });
+  }
+
+  return rendered;
+}
+
 function prefixWrappedLines(
   text: string,
   kind: LineKind,
@@ -356,9 +503,7 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
       });
 
     case "assistant-text":
-      return [
-        ...wrapLines(block.text, "body"),
-      ];
+      return renderMarkdownTextToLines(block.text, "body");
 
     case "tool-call": {
       const statusIcon = block.status === "running" ? "⟳" : block.status === "done" ? "✓" : block.status === "declined" ? "✗" : "✗";
@@ -485,7 +630,7 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
       return [
         { text: "", kind: "planSeparator" },
         { text: block.title ?? "Proposed plan", kind: "planHeader", extraClasses: ["cm-line-proposedPlanHeader"] },
-        ...wrapLines(block.body, "proposedPlanBody"),
+        ...renderMarkdownTextToLines(block.body, "proposedPlanBody"),
         { text: "", kind: "planSeparator" },
       ];
 
