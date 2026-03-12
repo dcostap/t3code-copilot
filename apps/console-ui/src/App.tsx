@@ -21,6 +21,7 @@ import {
 } from "./pendingUserInput";
 import { TranscriptRenderer, type TranscriptRendererHandle, threadToTranscriptBlocks } from "./transcript";
 import { useConsoleData } from "./consoleData/useConsoleData";
+import { useConsoleWorkspaceSessions } from "./consoleSessions";
 import { resolveWsHttpOrigin } from "./wsTransport";
 
 interface AppPaletteCommand extends CommandPaletteCommand {
@@ -29,6 +30,25 @@ interface AppPaletteCommand extends CommandPaletteCommand {
 
 export function App() {
   const consoleData = useConsoleData();
+  const workspace = useConsoleWorkspaceSessions({
+    threads: consoleData.threads,
+    projects: consoleData.snapshot?.projects ?? [],
+    preferredThreadId: consoleData.activeThreadId,
+  });
+  const activeSession = workspace.activeSession;
+  const getPendingUserInputs = consoleData.getPendingUserInputs;
+  const getProjectForThread = consoleData.getProjectForThread;
+  const getThreadEvents = consoleData.getThreadEvents;
+  const isThreadTurnRunning = consoleData.isThreadTurnRunning;
+  const canSubmitPromptForThread = consoleData.canSubmitPromptForThread;
+  const createThread = consoleData.createThread;
+  const submitPrompt = consoleData.submitPrompt;
+  const respondToUserInput = consoleData.respondToUserInput;
+  const setInteractionMode = consoleData.setInteractionMode;
+  const interruptTurn = consoleData.interruptTurn;
+  const stopSession = consoleData.stopSession;
+  const createSessionFromHistory = workspace.createSessionFromHistory;
+  const activateSession = workspace.activateSession;
   const [nowIso, setNowIso] = useState(() => new Date().toISOString());
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -45,7 +65,21 @@ export function App() {
   const transcriptRef = useRef<TranscriptRendererHandle | null>(null);
   const composerAttachmentsRef = useRef(composerAttachments);
   composerAttachmentsRef.current = composerAttachments;
-  const activePendingUserInput = consoleData.pendingUserInputs[0] ?? null;
+  const activeThreadId = workspace.activeThreadId ?? consoleData.activeThreadId;
+  const activeThread = activeSession
+    ? workspace.activeThread
+    : (activeThreadId
+        ? (consoleData.threads.find((thread) => thread.id === activeThreadId) ?? consoleData.thread)
+        : consoleData.thread);
+  const activeProject = activeSession
+    ? workspace.activeProject
+    : (activeThreadId ? getProjectForThread(activeThreadId) : consoleData.project);
+  const activePendingUserInputs = useMemo(
+    () => (activeThreadId ? getPendingUserInputs(activeThreadId) : []),
+    [activeThreadId, getPendingUserInputs],
+  );
+  const activePendingUserInput = activePendingUserInputs[0] ?? null;
+  const activeThreadTurnRunning = activeThreadId ? isThreadTurnRunning(activeThreadId) : false;
   const activePendingQuestionIndex = activePendingUserInput
     ? (pendingUserInputQuestionIndexByRequestId[activePendingUserInput.requestId] ?? 0)
     : 0;
@@ -61,7 +95,7 @@ export function App() {
     : null;
 
   useEffect(() => {
-    if (!consoleData.isTurnRunning) {
+    if (!activeThreadTurnRunning) {
       setNowIso(new Date().toISOString());
       return;
     }
@@ -74,10 +108,10 @@ export function App() {
     return () => {
       window.clearInterval(interval);
     };
-  }, [consoleData.isTurnRunning]);
+  }, [activeThreadTurnRunning]);
 
   useEffect(() => {
-    const openRequestIds = new Set(consoleData.pendingUserInputs.map((entry) => entry.requestId));
+    const openRequestIds = new Set(activePendingUserInputs.map((entry) => entry.requestId));
     setPendingUserInputAnswersByRequestId((existing) =>
       Object.fromEntries(
         Object.entries(existing).filter(([requestId]) => openRequestIds.has(requestId)),
@@ -88,7 +122,14 @@ export function App() {
         Object.entries(existing).filter(([requestId]) => openRequestIds.has(requestId)),
       ),
     );
-  }, [consoleData.pendingUserInputs]);
+  }, [activePendingUserInputs]);
+
+  useEffect(() => {
+    if (!workspace.activeThreadId || consoleData.activeThreadId === workspace.activeThreadId) {
+      return;
+    }
+    consoleData.setActiveThreadId(workspace.activeThreadId);
+  }, [consoleData, workspace.activeThreadId]);
 
   const handleSubmit = useCallback(
     async (value: string) => {
@@ -125,7 +166,10 @@ export function App() {
             return;
           }
 
-          await consoleData.respondToUserInput(activePendingUserInput.requestId, nextAnswers);
+          if (!activeThreadId) {
+            throw new Error("No orchestration thread is available.");
+          }
+          await respondToUserInput(activeThreadId, activePendingUserInput.requestId, nextAnswers);
           setPendingUserInputAnswersByRequestId((existing) => ({
             ...existing,
             [activePendingUserInput.requestId]: nextAnswers,
@@ -138,7 +182,11 @@ export function App() {
           return;
         }
 
-        await consoleData.submitPrompt({
+        if (!activeThreadId) {
+          throw new Error("No orchestration thread is available.");
+        }
+        await submitPrompt({
+          threadId: activeThreadId,
           prompt: value,
           attachments: await Promise.all(attachmentSnapshot.map(toUploadImageAttachment)),
         });
@@ -160,39 +208,92 @@ export function App() {
       activePendingQuestion,
       activePendingQuestionIndex,
       activePendingUserInput,
+      activeThreadId,
       composerAttachments,
-      consoleData,
+      respondToUserInput,
+      submitPrompt,
     ],
   );
   const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
   const blocks = useMemo(() => {
-    if (consoleData.thread) {
-      return threadToTranscriptBlocks(consoleData.thread, {
+    if (activeThread) {
+      return threadToTranscriptBlocks(activeThread, {
         resolveAttachmentPreviewUrl: (attachmentId) =>
           `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
-        orchestrationEvents: consoleData.threadEvents,
+        orchestrationEvents: getThreadEvents(activeThread.id),
         now: nowIso,
       });
+    }
+    if (activeSession) {
+      return [{ type: "status" as const, text: "Loading session history..." }];
     }
     if (consoleData.error) {
       return [{ type: "status" as const, text: `Connection error: ${consoleData.error}` }];
     }
     return [{ type: "status" as const, text: "Waiting for orchestration snapshot..." }];
-  }, [attachmentPreviewBaseUrl, consoleData.error, consoleData.thread, consoleData.threadEvents, nowIso]);
+  }, [activeSession, activeThread, attachmentPreviewBaseUrl, consoleData.error, getThreadEvents, nowIso]);
+  const handleCreateSession = useCallback(async () => {
+    const sessionCwd =
+      activeSession?.cwd ?? activeThread?.worktreePath ?? activeProject?.workspaceRoot ?? null;
+    const projectId = activeSession?.projectId ?? activeProject?.id ?? null;
+    if (!sessionCwd || !projectId) {
+      setSubmitError("No workspace is available for a new session.");
+      return;
+    }
+    const sessionWorktreePath =
+      activeThread?.worktreePath ??
+      (activeProject && sessionCwd !== activeProject.workspaceRoot ? sessionCwd : null);
+
+    try {
+      const createdAt = new Date().toISOString();
+      const result = await createThread({
+        projectId,
+        title: "New thread",
+        ...(activeThread?.model ? { model: activeThread.model } : {}),
+        interactionMode: activeThread?.interactionMode ?? "default",
+        branch: activeThread?.branch ?? null,
+        worktreePath: sessionWorktreePath,
+        createdAt,
+      });
+      createSessionFromHistory({
+        threadId: result.threadId,
+        cwd: sessionCwd,
+        projectId,
+        createdAt,
+        pending: true,
+      });
+      setSubmitError(null);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Failed to create a new session.");
+    }
+  }, [activeProject, activeSession, activeThread, createSessionFromHistory, createThread]);
   const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
     const commands: AppPaletteCommand[] = [];
-    const activeThread = consoleData.thread;
+    const currentSession = activeSession;
     const canDispatchBackendCommands = consoleData.connectionState === "connected";
 
-    for (const thread of consoleData.threads) {
+    for (const session of workspace.sessions) {
       commands.push({
-        id: `thread:${thread.id}`,
-        label: thread.id === activeThread?.id ? `Current Thread: ${thread.title}` : `Switch Thread: ${thread.title}`,
-        description: `${thread.model} · ${thread.runtimeMode} · ${thread.interactionMode}`,
-        keywords: ["thread", thread.model, thread.runtimeMode, thread.interactionMode],
+        id: `session:${session.id}`,
+        label:
+          session.id === currentSession?.id
+            ? `Current Session: ${session.title}`
+            : `Switch Session: ${session.title}`,
+        description: `${session.cwd} · ${session.histories.length} histories`,
+        keywords: ["session", session.title, session.cwd],
         run: () => {
-          consoleData.setActiveThreadId(thread.id);
+          activateSession(session.id);
         },
+      });
+    }
+
+    if (canDispatchBackendCommands && (currentSession || activeProject)) {
+      commands.push({
+        id: "session:new",
+        label: "New Session",
+        description: "Create a new session tab with a fresh thread in the current workspace.",
+        keywords: ["session", "new", "tab", "workspace"],
+        run: () => handleCreateSession(),
       });
     }
 
@@ -203,36 +304,36 @@ export function App() {
           label: "Set Interaction: Default",
           description: "Dispatch thread.interaction-mode.set to default mode.",
           keywords: ["interaction", "default"],
-          run: () => consoleData.setInteractionMode("default"),
+          run: () => setInteractionMode(activeThread.id, "default"),
         },
         {
           id: `interaction:${activeThread.id}:plan`,
           label: "Set Interaction: Plan",
           description: "Dispatch thread.interaction-mode.set to plan mode.",
           keywords: ["interaction", "plan"],
-          run: () => consoleData.setInteractionMode("plan"),
+          run: () => setInteractionMode(activeThread.id, "plan"),
         },
         {
           id: `session:${activeThread.id}:stop`,
           label: "Stop Session",
           description: "Dispatch thread.session.stop for the active thread.",
           keywords: ["session", "stop", "disconnect"],
-          run: () => consoleData.stopSession(),
+          run: () => stopSession(activeThread.id),
         },
       );
 
-      if (consoleData.isTurnRunning && !consoleData.isInterruptingTurn && !consoleData.isStoppingSession) {
+      if (activeThreadTurnRunning && !consoleData.isInterruptingTurn && !consoleData.isStoppingSession) {
         commands.push({
           id: `turn:${activeThread.id}:interrupt`,
           label: "Interrupt Turn",
           description: "Dispatch thread.turn.interrupt for the active thread.",
           keywords: ["interrupt", "cancel", "stop turn"],
-          run: () => consoleData.interruptTurn(),
+          run: () => interruptTurn(activeThread.id),
         });
       }
     }
 
-    for (const pendingUserInput of consoleData.pendingUserInputs) {
+    for (const pendingUserInput of activePendingUserInputs) {
       if (!canDispatchBackendCommands) {
         continue;
       }
@@ -249,9 +350,11 @@ export function App() {
             description: option.description,
             keywords: ["user input", question.header, question.question, option.label],
             run: () =>
-              consoleData.respondToUserInput(pendingUserInput.requestId, {
-                [question.id]: option.label,
-              }),
+              activeThread
+                ? respondToUserInput(activeThread.id, pendingUserInput.requestId, {
+                    [question.id]: option.label,
+                  })
+                : Promise.resolve(),
           });
         }
       } else {
@@ -270,7 +373,24 @@ export function App() {
     }
 
     return commands;
-  }, [consoleData]);
+  }, [
+    activateSession,
+    activePendingUserInputs,
+    activeProject,
+    activeSession,
+    activeThread,
+    activeThreadTurnRunning,
+    consoleData.connectionState,
+    consoleData.isInterruptingTurn,
+    consoleData.isStoppingSession,
+    consoleData.respondingUserInputRequestIds,
+    handleCreateSession,
+    interruptTurn,
+    respondToUserInput,
+    setInteractionMode,
+    stopSession,
+    workspace.sessions,
+  ]);
   const filteredCommands = useMemo(
     () => filterCommandPaletteCommands(paletteCommands, paletteQuery),
     [paletteCommands, paletteQuery],
@@ -342,7 +462,7 @@ export function App() {
       }
       return [];
     });
-  }, [consoleData.thread?.id]);
+  }, [workspace.activeThreadId]);
 
   useEffect(() => {
     return () => {
@@ -440,12 +560,12 @@ export function App() {
 
   const footerText = useMemo(() => {
     const source = `live ${consoleData.connectionState}`;
-    const provider = consoleData.thread?.session?.providerName ?? consoleData.thread?.model ?? "no-thread";
-    const title = consoleData.thread?.title ?? "No thread loaded";
-    const cwd = consoleData.project?.workspaceRoot ?? "no project";
-    const runtime = consoleData.thread?.runtimeMode ?? "full-access";
+    const provider = activeThread?.session?.providerName ?? activeThread?.model ?? "no-thread";
+    const title = activeThread?.title ?? "No thread loaded";
+    const cwd = workspace.activeSession?.cwd ?? activeProject?.workspaceRoot ?? "no project";
+    const runtime = activeThread?.runtimeMode ?? "full-access";
     const errorText = submitError ?? consoleData.error;
-    const phase = consoleData.isTurnRunning
+    const phase = activeThreadTurnRunning
       ? "running"
       : consoleData.isPromptSubmitting
         ? "submitting"
@@ -453,16 +573,17 @@ export function App() {
     const base = `${source} · ${phase} · ${provider} · ${runtime} · ${title} · ${cwd}`;
     return errorText ? `${base} · ${errorText}` : base;
   }, [
+    activeProject?.workspaceRoot,
+    activeThread?.model,
+    activeThread?.runtimeMode,
+    activeThread?.session?.providerName,
+    activeThread?.title,
     consoleData.connectionState,
     consoleData.error,
     consoleData.isPromptSubmitting,
-    consoleData.isTurnRunning,
-    consoleData.project?.workspaceRoot,
-    consoleData.thread?.model,
-    consoleData.thread?.runtimeMode,
-    consoleData.thread?.session?.providerName,
-    consoleData.thread?.title,
+    activeThreadTurnRunning,
     submitError,
+    workspace.activeSession?.cwd,
   ]);
 
   return (
@@ -470,13 +591,42 @@ export function App() {
       <div className="bg-image" />
       <div className="bg-gradient" />
       <div className="console-shell">
+        <div className="session-tabs" role="tablist" aria-label="Workspace sessions">
+          {workspace.sessions.map((session) => (
+            <button
+              key={session.id}
+              type="button"
+              role="tab"
+              aria-selected={session.id === activeSession?.id}
+              className={
+                session.id === activeSession?.id
+                  ? "session-tab session-tab--active"
+                  : "session-tab"
+              }
+              onClick={() => activateSession(session.id)}
+              title={session.cwd}
+            >
+              <span className="session-tab__title">{session.title}</span>
+              <span className="session-tab__meta">{session.histories.length}</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            className="session-tab session-tab--create"
+            onClick={() => void handleCreateSession()}
+            disabled={!activeProject}
+            title={activeProject ? "New session" : "No workspace available"}
+          >
+            +
+          </button>
+        </div>
         <main className="conversation-scroll">
           <div className="transcript-shell">
             <TranscriptRenderer
               ref={transcriptRef}
               blocks={blocks}
               composerAttachments={composerAttachments}
-              interactionMode={consoleData.thread?.interactionMode ?? "default"}
+              interactionMode={activeThread?.interactionMode ?? "default"}
               {...(activePendingUserInput && activePendingQuestion
                 ? {
                     pendingUserInputHighlight: {
@@ -491,8 +641,8 @@ export function App() {
               onAddImageFiles={handleAddImageFiles}
               onDraftChange={setComposerDraft}
               onRemoveImage={handleRemoveImage}
-              onSubmit={handleSubmit}
-              submitDisabled={!consoleData.canSubmitPrompt}
+            onSubmit={handleSubmit}
+              submitDisabled={!canSubmitPromptForThread(activeThreadId)}
             />
           </div>
         </main>
