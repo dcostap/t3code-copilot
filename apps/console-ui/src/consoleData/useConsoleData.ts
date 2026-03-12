@@ -9,6 +9,7 @@ import {
   type ProviderInteractionMode,
   type ProviderKind,
   type ServerConfig,
+  type ThreadId,
   type UploadChatImageAttachment,
   type UserInputQuestion,
   type WsWelcomePayload,
@@ -28,6 +29,9 @@ interface ConsoleSearchConfig {
   readonly threadId: string | null;
 }
 
+const EMPTY_THREADS: ReadonlyArray<OrchestrationThread> = [];
+const EMPTY_PENDING_USER_INPUTS: ReadonlyArray<ConsolePendingUserInput> = [];
+
 export interface ConsolePendingUserInput {
   readonly requestId: string;
   readonly createdAt: string;
@@ -43,7 +47,6 @@ export interface ConsoleDataState {
   readonly activeThreadId: string | null;
   readonly thread: OrchestrationThread | null;
   readonly project: OrchestrationProject | null;
-  readonly threadEvents: ReadonlyArray<OrchestrationEvent>;
   readonly pendingUserInputs: ReadonlyArray<ConsolePendingUserInput>;
   readonly isTurnRunning: boolean;
   readonly isPromptSubmitting: boolean;
@@ -53,14 +56,29 @@ export interface ConsoleDataState {
   readonly isStoppingSession: boolean;
   readonly error: string | null;
   setActiveThreadId(threadId: string): void;
+  createThread(input?: {
+    projectId: OrchestrationProject["id"];
+    title?: string;
+    model?: string;
+    interactionMode?: ProviderInteractionMode;
+    branch?: string | null;
+    worktreePath?: string | null;
+    createdAt?: string;
+  }): Promise<{ threadId: ThreadId }>;
+  getThreadEvents(threadId: string | null): ReadonlyArray<OrchestrationEvent>;
+  getPendingUserInputs(threadId: string | null): ReadonlyArray<ConsolePendingUserInput>;
+  getProjectForThread(threadId: string | null): OrchestrationProject | null;
+  isThreadTurnRunning(threadId: string | null): boolean;
+  canSubmitPromptForThread(threadId: string | null): boolean;
   submitPrompt(input: {
+    threadId: string;
     prompt: string;
     attachments?: ReadonlyArray<UploadChatImageAttachment>;
   }): Promise<void>;
-  respondToUserInput(requestId: string, answers: Record<string, unknown>): Promise<void>;
-  setInteractionMode(interactionMode: ProviderInteractionMode): Promise<void>;
-  interruptTurn(): Promise<void>;
-  stopSession(): Promise<void>;
+  respondToUserInput(threadId: string, requestId: string, answers: Record<string, unknown>): Promise<void>;
+  setInteractionMode(threadId: string, interactionMode: ProviderInteractionMode): Promise<void>;
+  interruptTurn(threadId: string): Promise<void>;
+  stopSession(threadId: string): Promise<void>;
 }
 
 function readSearchConfig(): ConsoleSearchConfig {
@@ -260,6 +278,23 @@ function isTurnRunning(thread: OrchestrationThread | null) {
 
 function canDispatchLiveCommand(connectionState: ConsoleConnectionState) {
   return connectionState === "connected";
+}
+
+function findThreadById(
+  threads: ReadonlyArray<OrchestrationThread>,
+  threadId: string,
+) {
+  return threads.find((thread) => thread.id === threadId) ?? null;
+}
+
+function findProjectById(
+  snapshot: OrchestrationReadModel | null,
+  projectId: OrchestrationProject["id"] | null,
+) {
+  if (!snapshot || !projectId) {
+    return null;
+  }
+  return snapshot.projects.find((entry: OrchestrationProject) => entry.id === projectId) ?? null;
 }
 
 function mergeOrchestrationEvents(
@@ -486,7 +521,7 @@ export function useConsoleData(): ConsoleDataState {
     };
   }, [backend, searchConfig.threadId]);
 
-  const threads = snapshot?.threads ?? [];
+  const threads = useMemo(() => snapshot?.threads ?? EMPTY_THREADS, [snapshot]);
 
   const thread = useMemo(() => {
     if (!snapshot) return null;
@@ -538,18 +573,27 @@ export function useConsoleData(): ConsoleDataState {
     if (!snapshot || !thread) return null;
     return snapshot.projects.find((entry: OrchestrationProject) => entry.id === thread.projectId) ?? null;
   }, [snapshot, thread]);
-  const threadEvents = useMemo(
-    () =>
-      thread
+  const getThreadEvents = useCallback(
+    (threadId: string | null) =>
+      threadId
         ? orchestrationEvents.filter(
-            (event) => event.aggregateKind === "thread" && event.aggregateId === thread.id,
+            (event) => event.aggregateKind === "thread" && event.aggregateId === threadId,
           )
         : [],
-    [orchestrationEvents, thread],
+    [orchestrationEvents],
   );
 
   const pendingUserInputs = useMemo(() => derivePendingUserInputs(thread), [thread]);
+  const getPendingUserInputs = useCallback(
+    (threadId: string | null) =>
+      threadId ? derivePendingUserInputs(findThreadById(threads, threadId)) : EMPTY_PENDING_USER_INPUTS,
+    [threads],
+  );
   const turnRunning = useMemo(() => isTurnRunning(thread), [thread]);
+  const isThreadTurnRunning = useCallback(
+    (threadId: string | null) => isTurnRunning(threadId ? findThreadById(threads, threadId) : null),
+    [threads],
+  );
   const canSubmitPrompt = useMemo(() => {
     if (!thread) return false;
     if (isPromptSubmitting) return false;
@@ -571,6 +615,32 @@ export function useConsoleData(): ConsoleDataState {
     thread,
     turnRunning,
   ]);
+  const canSubmitPromptForThread = useCallback(
+    (threadId: string | null) => {
+      const nextThread = threadId ? findThreadById(threads, threadId) : null;
+      if (!nextThread) return false;
+      if (isPromptSubmitting) return false;
+      const nextPendingUserInputs = derivePendingUserInputs(nextThread);
+      const activePendingUserInput = nextPendingUserInputs[0];
+      if (
+        activePendingUserInput &&
+        respondingUserInputRequestIds.includes(activePendingUserInput.requestId)
+      ) {
+        return false;
+      }
+      if (nextPendingUserInputs.length === 0 && isTurnRunning(nextThread)) return false;
+      if (!canDispatchLiveCommand(connectionState)) return false;
+      return true;
+    },
+    [connectionState, isPromptSubmitting, respondingUserInputRequestIds, threads],
+  );
+  const getProjectForThread = useCallback(
+    (threadId: string | null) => {
+      const nextThread = threadId ? findThreadById(threads, threadId) : null;
+      return findProjectById(snapshot, nextThread?.projectId ?? null);
+    },
+    [snapshot, threads],
+  );
 
   const assertLiveCommandReady = useCallback(() => {
     if (!canDispatchLiveCommand(connectionState)) {
@@ -578,15 +648,61 @@ export function useConsoleData(): ConsoleDataState {
     }
   }, [connectionState]);
 
+  const createThread = useCallback(
+    async (input?: {
+      projectId: OrchestrationProject["id"];
+      title?: string;
+      model?: string;
+      interactionMode?: ProviderInteractionMode;
+      branch?: string | null;
+      worktreePath?: string | null;
+      createdAt?: string;
+    }): Promise<{ threadId: ThreadId }> => {
+      const projectId = input?.projectId ?? null;
+      if (!projectId) {
+        throw new Error("No orchestration project is available.");
+      }
+      assertLiveCommandReady();
+      const project = findProjectById(snapshot, projectId);
+      const sameProjectThread = thread?.projectId === projectId ? thread : null;
+
+      const createdAt = input?.createdAt ?? new Date().toISOString();
+      const threadId = makeId("thread");
+      await backend.dispatchCommand({
+        type: "thread.create",
+        commandId: makeCommandId(),
+        threadId: threadId as ThreadId,
+        projectId,
+        title: input?.title?.trim() || "New thread",
+        model:
+          input?.model?.trim() ||
+          sameProjectThread?.model ||
+          project?.defaultModel ||
+          snapshot?.projects[0]?.defaultModel ||
+          "gpt-5-codex",
+        runtimeMode: "full-access",
+        interactionMode: input?.interactionMode ?? sameProjectThread?.interactionMode ?? "default",
+        branch: input?.branch ?? sameProjectThread?.branch ?? null,
+        worktreePath: input?.worktreePath ?? sameProjectThread?.worktreePath ?? null,
+        createdAt,
+      });
+
+      return { threadId: threadId as ThreadId };
+    },
+    [assertLiveCommandReady, backend, snapshot, thread],
+  );
+
   const submitPrompt = useCallback(
     async (input: {
+      threadId: string;
       prompt: string;
       attachments?: ReadonlyArray<UploadChatImageAttachment>;
     }) => {
       const trimmed = input.prompt.trim();
       const attachments = [...(input.attachments ?? [])];
       if (trimmed.length === 0 && attachments.length === 0) return;
-      if (!thread) {
+      const targetThread = findThreadById(threads, input.threadId);
+      if (!targetThread) {
         throw new Error("No orchestration thread is available.");
       }
       assertLiveCommandReady();
@@ -594,7 +710,7 @@ export function useConsoleData(): ConsoleDataState {
         return;
       }
 
-      const pendingUserInput = pendingUserInputs[0];
+      const pendingUserInput = derivePendingUserInputs(targetThread)[0];
       if (pendingUserInput) {
         if (attachments.length > 0) {
           throw new Error("Image attachments are not supported while a user-input request is pending.");
@@ -618,7 +734,7 @@ export function useConsoleData(): ConsoleDataState {
           await backend.dispatchCommand({
             type: "thread.user-input.respond",
             commandId: makeCommandId(),
-            threadId: thread.id,
+            threadId: targetThread.id,
             requestId: pendingUserInput.requestId as ApprovalRequestId,
             answers,
             createdAt: new Date().toISOString(),
@@ -632,18 +748,18 @@ export function useConsoleData(): ConsoleDataState {
         }
       }
 
-      if (turnRunning) {
+      if (isTurnRunning(targetThread)) {
         throw new Error("A turn is already running.");
       }
 
       promptSubmittingRef.current = true;
       setIsPromptSubmitting(true);
       try {
-        const provider = providerFromThread(thread);
+        const provider = providerFromThread(targetThread);
         await backend.dispatchCommand({
           type: "thread.turn.start",
           commandId: makeCommandId(),
-          threadId: thread.id,
+          threadId: targetThread.id,
           message: {
             messageId: makeId("message") as MessageId,
             role: "user",
@@ -651,10 +767,10 @@ export function useConsoleData(): ConsoleDataState {
             attachments,
           },
           ...(provider ? { provider } : {}),
-          model: thread.model,
+          model: targetThread.model,
           assistantDeliveryMode: "streaming",
           runtimeMode: "full-access",
-          interactionMode: thread.interactionMode,
+          interactionMode: targetThread.interactionMode,
           createdAt: new Date().toISOString(),
         });
       } finally {
@@ -662,12 +778,13 @@ export function useConsoleData(): ConsoleDataState {
         setIsPromptSubmitting(false);
       }
     },
-    [assertLiveCommandReady, backend, pendingUserInputs, thread, turnRunning],
+    [assertLiveCommandReady, backend, threads],
   );
 
   const respondToUserInput = useCallback(
-    async (requestId: string, answers: Record<string, unknown>) => {
-      if (!thread) {
+    async (threadId: string, requestId: string, answers: Record<string, unknown>) => {
+      const targetThread = findThreadById(threads, threadId);
+      if (!targetThread) {
         throw new Error("No orchestration thread is available.");
       }
       assertLiveCommandReady();
@@ -683,7 +800,7 @@ export function useConsoleData(): ConsoleDataState {
         await backend.dispatchCommand({
           type: "thread.user-input.respond",
           commandId: makeCommandId(),
-          threadId: thread.id,
+          threadId: targetThread.id,
           requestId: requestId as ApprovalRequestId,
           answers,
           createdAt: new Date().toISOString(),
@@ -695,27 +812,29 @@ export function useConsoleData(): ConsoleDataState {
         );
       }
     },
-    [assertLiveCommandReady, backend, thread],
+    [assertLiveCommandReady, backend, threads],
   );
 
   const setInteractionMode = useCallback(
-    async (interactionMode: ProviderInteractionMode) => {
-      if (!thread || thread.interactionMode === interactionMode) return;
+    async (threadId: string, interactionMode: ProviderInteractionMode) => {
+      const targetThread = findThreadById(threads, threadId);
+      if (!targetThread || targetThread.interactionMode === interactionMode) return;
       assertLiveCommandReady();
 
       await backend.dispatchCommand({
         type: "thread.interaction-mode.set",
         commandId: makeCommandId(),
-        threadId: thread.id,
+        threadId: targetThread.id,
         interactionMode,
         createdAt: new Date().toISOString(),
       });
     },
-    [assertLiveCommandReady, backend, thread],
+    [assertLiveCommandReady, backend, threads],
   );
 
-  const interruptTurn = useCallback(async () => {
-    if (!thread) {
+  const interruptTurn = useCallback(async (threadId: string) => {
+    const targetThread = findThreadById(threads, threadId);
+    if (!targetThread) {
       throw new Error("No orchestration thread is available.");
     }
     assertLiveCommandReady();
@@ -729,17 +848,18 @@ export function useConsoleData(): ConsoleDataState {
       await backend.dispatchCommand({
         type: "thread.turn.interrupt",
         commandId: makeCommandId(),
-        threadId: thread.id,
+        threadId: targetThread.id,
         createdAt: new Date().toISOString(),
       });
     } finally {
       interruptInFlightRef.current = false;
       setIsInterruptingTurn(false);
     }
-  }, [assertLiveCommandReady, backend, thread]);
+  }, [assertLiveCommandReady, backend, threads]);
 
-  const stopSession = useCallback(async () => {
-    if (!thread) {
+  const stopSession = useCallback(async (threadId: string) => {
+    const targetThread = findThreadById(threads, threadId);
+    if (!targetThread) {
       throw new Error("No orchestration thread is available.");
     }
     assertLiveCommandReady();
@@ -753,14 +873,14 @@ export function useConsoleData(): ConsoleDataState {
       await backend.dispatchCommand({
         type: "thread.session.stop",
         commandId: makeCommandId(),
-        threadId: thread.id,
+        threadId: targetThread.id,
         createdAt: new Date().toISOString(),
       });
     } finally {
       stopSessionInFlightRef.current = false;
       setIsStoppingSession(false);
     }
-  }, [assertLiveCommandReady, backend, thread]);
+  }, [assertLiveCommandReady, backend, threads]);
 
   return {
     connectionState,
@@ -771,7 +891,6 @@ export function useConsoleData(): ConsoleDataState {
     activeThreadId: thread?.id ?? null,
     thread,
     project,
-    threadEvents,
     pendingUserInputs,
     isTurnRunning: turnRunning,
     isPromptSubmitting,
@@ -781,6 +900,12 @@ export function useConsoleData(): ConsoleDataState {
     isStoppingSession,
     error,
     setActiveThreadId,
+    createThread,
+    getThreadEvents,
+    getPendingUserInputs,
+    getProjectForThread,
+    isThreadTurnRunning,
+    canSubmitPromptForThread,
     submitPrompt,
     respondToUserInput,
     setInteractionMode,
