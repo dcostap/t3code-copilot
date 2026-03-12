@@ -50,8 +50,6 @@ function decodeAndWarnOnFailure<T>(
 }
 
 export class LiveConsoleBackend implements ConsoleBackend {
-  readonly mode = "live" as const;
-
   private transport: WsTransport | null = null;
   private readonly listeners = new Set<(event: ConsoleBackendEvent) => void>();
   private unsubscribeConnection: (() => void) | null = null;

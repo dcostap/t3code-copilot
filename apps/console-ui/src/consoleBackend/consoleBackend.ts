@@ -11,7 +11,6 @@ import type {
   WsWelcomePayload,
 } from "@t3tools/contracts";
 
-export type ConsoleBackendMode = "demo" | "live";
 export type ConsoleBackendConnectionState = "connecting" | "connected" | "disconnected" | "error";
 
 export type ConsoleBackendEvent =
@@ -36,7 +35,6 @@ export type ConsoleBackendEvent =
     };
 
 export interface ConsoleBackend {
-  readonly mode: ConsoleBackendMode;
   connect(): void;
   disconnect(): void;
   dispose(): void;

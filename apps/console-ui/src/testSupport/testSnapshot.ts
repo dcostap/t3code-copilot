@@ -8,24 +8,24 @@ import {
 } from "@t3tools/contracts";
 import type { OrchestrationReadModel } from "@t3tools/contracts";
 
-const PROJECT_ID = ProjectId.makeUnsafe("project-console-demo");
-const THREAD_ID = ThreadId.makeUnsafe("thread-console-demo");
-const TURN_1 = TurnId.makeUnsafe("turn-console-demo-1");
-const TURN_2 = TurnId.makeUnsafe("turn-console-demo-2");
-const TURN_3 = TurnId.makeUnsafe("turn-console-demo-3");
+const PROJECT_ID = ProjectId.makeUnsafe("project-console-test");
+const THREAD_ID = ThreadId.makeUnsafe("thread-console-test");
+const TURN_1 = TurnId.makeUnsafe("turn-console-test-1");
+const TURN_2 = TurnId.makeUnsafe("turn-console-test-2");
+const TURN_3 = TurnId.makeUnsafe("turn-console-test-3");
 const START_AT = Date.parse("2026-03-10T09:00:00.000Z");
 
 function isoAt(offsetSeconds: number) {
   return new Date(START_AT + offsetSeconds * 1_000).toISOString();
 }
 
-export function buildDemoSnapshot(): OrchestrationReadModel {
+export function buildTestSnapshot(): OrchestrationReadModel {
   return {
     snapshotSequence: 1,
     projects: [
       {
         id: PROJECT_ID,
-        title: "Console UI Demo",
+        title: "Console UI Test",
         workspaceRoot: "C:\\Projects\\t3code-copilot",
         defaultModel: "gpt-5",
         scripts: [],
@@ -38,7 +38,7 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
       {
         id: THREAD_ID,
         projectId: PROJECT_ID,
-        title: "Agent Transcript Demo",
+        title: "Agent Transcript Test",
         model: "gpt-5",
         runtimeMode: "full-access",
         interactionMode: "default",
@@ -111,7 +111,7 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
             attachments: [
               {
                 type: "image",
-                id: "attach-console-demo-1",
+                id: "attach-console-test-1",
                 name: "layout-glitch.png",
                 mimeType: "image/png",
                 sizeBytes: 84211,
@@ -128,7 +128,7 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
             text: [
               "Yes. The screenshot confirms the composer should live in the same transcript flow as the rest of the conversation.",
               "",
-              "This demo thread is contract-shaped data, so you can test the transcript UI locally without connecting a model.",
+              "This fixture thread is contract-shaped data so transcript rendering can be tested without a provider session.",
             ].join("\n"),
             attachments: [],
             turnId: TURN_3,
@@ -139,14 +139,14 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
         ],
         proposedPlans: [
           {
-            id: "plan-console-demo-1",
+            id: "plan-console-test-1",
             turnId: TURN_2,
             planMarkdown: [
               "## Console UI migration",
               "",
               "- Bind the prototype to `OrchestrationReadModel`.",
               "- Render tool activity, plans, approvals, and diff checkpoints as transcript blocks.",
-              "- Keep a demo source for local UI iteration without a provider session.",
+              "- Keep a local fixture for transcript iteration without a provider session.",
             ].join("\n"),
             createdAt: isoAt(56),
             updatedAt: isoAt(57),
@@ -154,7 +154,7 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
         ],
         activities: [
           {
-            id: EventId.makeUnsafe("activity-console-demo-1"),
+            id: EventId.makeUnsafe("activity-console-test-1"),
             tone: "info",
             kind: "task.progress",
             summary: "Reasoning update",
@@ -166,7 +166,7 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
             createdAt: isoAt(8),
           },
           {
-            id: EventId.makeUnsafe("activity-console-demo-2"),
+            id: EventId.makeUnsafe("activity-console-test-2"),
             tone: "tool",
             kind: "tool.started",
             summary: "Search workspace started",
@@ -183,7 +183,7 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
             createdAt: isoAt(10),
           },
           {
-            id: EventId.makeUnsafe("activity-console-demo-3"),
+            id: EventId.makeUnsafe("activity-console-test-3"),
             tone: "tool",
             kind: "tool.completed",
             summary: "Search workspace complete",
@@ -201,37 +201,7 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
             createdAt: isoAt(12),
           },
           {
-            id: EventId.makeUnsafe("activity-console-demo-4"),
-            tone: "approval",
-            kind: "approval.requested",
-            summary: "File-change approval requested",
-            payload: {
-              requestId: "approval-console-demo-1",
-              requestKind: "file-change",
-              requestType: "apply_patch_approval",
-              detail: "Patch apps/console-ui/src/App.tsx and apps/console-ui/src/index.css",
-            },
-            turnId: TURN_1,
-            sequence: 4,
-            createdAt: isoAt(15),
-          },
-          {
-            id: EventId.makeUnsafe("activity-console-demo-5"),
-            tone: "approval",
-            kind: "approval.resolved",
-            summary: "Approval resolved",
-            payload: {
-              requestId: "approval-console-demo-1",
-              requestKind: "file-change",
-              requestType: "apply_patch_approval",
-              decision: "approved",
-            },
-            turnId: TURN_1,
-            sequence: 5,
-            createdAt: isoAt(18),
-          },
-          {
-            id: EventId.makeUnsafe("activity-console-demo-6"),
+            id: EventId.makeUnsafe("activity-console-test-6"),
             tone: "info",
             kind: "turn.plan.updated",
             summary: "Plan updated",
@@ -240,15 +210,15 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
               plan: [
                 { step: "Replace fake transcript input with contract-shaped data", status: "completed" },
                 { step: "Adapt orchestration thread state into transcript blocks", status: "completed" },
-                { step: "Keep demo and live data sources behind one console adapter", status: "inProgress" },
+                { step: "Keep live data and local fixtures behind one console adapter", status: "inProgress" },
               ],
             },
             turnId: TURN_2,
-            sequence: 6,
+            sequence: 4,
             createdAt: isoAt(55),
           },
           {
-            id: EventId.makeUnsafe("activity-console-demo-7"),
+            id: EventId.makeUnsafe("activity-console-test-7"),
             tone: "tool",
             kind: "tool.completed",
             summary: "Run checks complete",
@@ -269,34 +239,34 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
               },
             },
             turnId: TURN_2,
-            sequence: 7,
+            sequence: 5,
             createdAt: isoAt(62),
           },
           {
-            id: EventId.makeUnsafe("activity-console-demo-8"),
+            id: EventId.makeUnsafe("activity-console-test-8"),
             tone: "info",
             kind: "user-input.resolved",
             summary: "User input resolved",
             payload: {
-              requestId: "user-input-console-demo-1",
+              requestId: "user-input-console-test-1",
               answers: {
-                source_mode: "Demo",
+                source_mode: "Fixture",
               },
             },
             turnId: TURN_3,
-            sequence: 8,
+            sequence: 6,
             createdAt: isoAt(102),
           },
           {
-            id: EventId.makeUnsafe("activity-console-demo-9"),
+            id: EventId.makeUnsafe("activity-console-test-9"),
             tone: "info",
             kind: "runtime.warning",
             summary: "Runtime warning",
             payload: {
-              message: "Demo mode is active. No provider session is required.",
+              message: "Fixture mode is active. No provider session is required.",
             },
             turnId: TURN_3,
-            sequence: 9,
+            sequence: 7,
             createdAt: isoAt(104),
           },
         ],
@@ -304,7 +274,7 @@ export function buildDemoSnapshot(): OrchestrationReadModel {
           {
             turnId: TURN_1,
             checkpointTurnCount: 1,
-            checkpointRef: CheckpointRef.makeUnsafe("provider-diff:console-demo-1"),
+            checkpointRef: CheckpointRef.makeUnsafe("provider-diff:console-test-1"),
             status: "ready",
             files: [
               {

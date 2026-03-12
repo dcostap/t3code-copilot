@@ -127,14 +127,6 @@ export interface FileDiffBlock {
   readonly lines?: ReadonlyArray<{ text: string; kind: "added" | "removed" | "context" }>;
 }
 
-export interface ApprovalRequestBlock {
-  readonly type: "approval-request";
-  readonly requestId: string;
-  readonly requestKind: "command" | "file-read" | "file-change";
-  readonly detail?: string;
-  readonly resolved?: "accepted" | "declined";
-}
-
 export interface UserInputRequestBlock {
   readonly type: "user-input-request";
   readonly requestId: string;
@@ -201,7 +193,6 @@ export type TranscriptBlock =
   | CommandExecBlock
   | WorkGroupBlock
   | FileDiffBlock
-  | ApprovalRequestBlock
   | UserInputRequestBlock
   | PlanBlock
   | ProposedPlanBlock
@@ -420,19 +411,6 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
           const kind: LineKind = dl.kind === "added" ? "diffAdded" : dl.kind === "removed" ? "diffRemoved" : "diffContext";
           lines.push({ text: `${prefix} ${dl.text}`, kind });
         }
-      }
-      return lines;
-    }
-
-    case "approval-request": {
-      const state = block.resolved ?? "pending";
-      const icon = state === "accepted" ? "✓" : state === "declined" ? "✗" : "?";
-      const kindLabel = block.requestKind.replace(/-/g, " ");
-      const lines: AnnotatedLine[] = [
-        { text: `[${icon}] Approval needed: ${kindLabel}`, kind: "approvalPrompt" },
-      ];
-      if (block.detail) {
-        lines.push({ text: `    ${block.detail}`, kind: "approvalPrompt" });
       }
       return lines;
     }

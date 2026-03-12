@@ -1,12 +1,12 @@
 import { CheckpointRef, EventId, MessageId, TurnId } from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 
-import { buildDemoSnapshot } from "../consoleData/demoSnapshot";
+import { buildTestSnapshot } from "../testSupport/testSnapshot";
 import { threadToTranscriptBlocks } from "./orchestrationTranscript";
 
 describe("threadToTranscriptBlocks", () => {
   it("keeps activity ordering stable with sequence under bursty timestamps", () => {
-    const snapshot = buildDemoSnapshot();
+    const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
 
@@ -47,7 +47,7 @@ describe("threadToTranscriptBlocks", () => {
   });
 
   it("keeps image attachments out of user message text and resolves preview urls", () => {
-    const snapshot = buildDemoSnapshot();
+    const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
 
@@ -99,7 +99,7 @@ describe("threadToTranscriptBlocks", () => {
   });
 
   it("groups contiguous work activity into one work-group block", () => {
-    const snapshot = buildDemoSnapshot();
+    const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
 
@@ -163,7 +163,7 @@ describe("threadToTranscriptBlocks", () => {
   });
 
   it("keeps resolved user-input request blocks in the transcript in answered state", () => {
-    const snapshot = buildDemoSnapshot();
+    const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
 
@@ -232,7 +232,7 @@ describe("threadToTranscriptBlocks", () => {
   });
 
   it("maps turn.plan.updated activities to structured plan-update blocks", () => {
-    const snapshot = buildDemoSnapshot();
+    const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
 
@@ -276,7 +276,7 @@ describe("threadToTranscriptBlocks", () => {
   });
 
   it("maps proposed plans to distinct proposed-plan blocks", () => {
-    const snapshot = buildDemoSnapshot();
+    const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
 
@@ -306,7 +306,7 @@ describe("threadToTranscriptBlocks", () => {
   });
 
   it("maps assistant checkpoints to checkpoint-summary blocks", () => {
-    const snapshot = buildDemoSnapshot();
+    const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
 
@@ -381,7 +381,7 @@ describe("threadToTranscriptBlocks", () => {
   });
 
   it("appends a transient working-state block while the turn is running", () => {
-    const snapshot = buildDemoSnapshot();
+    const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
 
@@ -420,7 +420,7 @@ describe("threadToTranscriptBlocks", () => {
   });
 
   it("splits assistant output around inline user-input requests using orchestration events", () => {
-    const snapshot = buildDemoSnapshot();
+    const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
     const turnId = TurnId.makeUnsafe("turn-inline-user-input");
