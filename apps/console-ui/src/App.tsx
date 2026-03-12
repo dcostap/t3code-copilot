@@ -182,8 +182,7 @@ export function App() {
   const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
     const commands: AppPaletteCommand[] = [];
     const activeThread = consoleData.thread;
-    const canDispatchBackendCommands =
-      consoleData.mode === "demo" || consoleData.connectionState === "connected";
+    const canDispatchBackendCommands = consoleData.connectionState === "connected";
 
     for (const thread of consoleData.threads) {
       commands.push({
@@ -199,20 +198,6 @@ export function App() {
 
     if (activeThread && canDispatchBackendCommands) {
       commands.push(
-        {
-          id: `runtime:${activeThread.id}:full-access`,
-          label: "Set Runtime: Full Access",
-          description: "Dispatch thread.runtime-mode.set for full access execution.",
-          keywords: ["runtime", "permissions", "full access"],
-          run: () => consoleData.setRuntimeMode("full-access"),
-        },
-        {
-          id: `runtime:${activeThread.id}:approval-required`,
-          label: "Set Runtime: Approval Required",
-          description: "Dispatch thread.runtime-mode.set for approval-required execution.",
-          keywords: ["runtime", "permissions", "approval"],
-          run: () => consoleData.setRuntimeMode("approval-required"),
-        },
         {
           id: `interaction:${activeThread.id}:default`,
           label: "Set Interaction: Default",
@@ -245,31 +230,6 @@ export function App() {
           run: () => consoleData.interruptTurn(),
         });
       }
-    }
-
-    for (const approval of consoleData.pendingApprovals) {
-      if (!canDispatchBackendCommands) {
-        continue;
-      }
-      if (consoleData.respondingApprovalRequestIds.includes(approval.requestId)) {
-        continue;
-      }
-      commands.push(
-        {
-          id: `approval:${approval.requestId}:accept`,
-          label: `Approve ${approval.requestKind}`,
-          description: approval.detail ?? "Dispatch thread.approval.respond with accept.",
-          keywords: ["approval", "accept", approval.requestKind],
-          run: () => consoleData.respondToApproval(approval.requestId, "accept"),
-        },
-        {
-          id: `approval:${approval.requestId}:decline`,
-          label: `Decline ${approval.requestKind}`,
-          description: approval.detail ?? "Dispatch thread.approval.respond with decline.",
-          keywords: ["approval", "decline", approval.requestKind],
-          run: () => consoleData.respondToApproval(approval.requestId, "decline"),
-        },
-      );
     }
 
     for (const pendingUserInput of consoleData.pendingUserInputs) {
@@ -479,7 +439,7 @@ export function App() {
   }, [closePalette, paletteOpen]);
 
   const footerText = useMemo(() => {
-    const source = consoleData.mode === "demo" ? "demo snapshot" : `live ${consoleData.connectionState}`;
+    const source = `live ${consoleData.connectionState}`;
     const provider = consoleData.thread?.session?.providerName ?? consoleData.thread?.model ?? "no-thread";
     const title = consoleData.thread?.title ?? "No thread loaded";
     const cwd = consoleData.project?.workspaceRoot ?? "no project";
@@ -497,7 +457,6 @@ export function App() {
     consoleData.error,
     consoleData.isPromptSubmitting,
     consoleData.isTurnRunning,
-    consoleData.mode,
     consoleData.project?.workspaceRoot,
     consoleData.thread?.model,
     consoleData.thread?.runtimeMode,

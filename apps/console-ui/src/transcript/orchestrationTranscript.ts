@@ -108,38 +108,6 @@ function resolveActivityStatus(
   return activityKindToBlockStatus(activityKind);
 }
 
-function decisionToApprovalState(value: unknown): "accepted" | "declined" | undefined {
-  if (value === "approved" || value === "accept" || value === "accepted" || value === "allow") {
-    return "accepted";
-  }
-  if (value === "declined" || value === "denied" || value === "reject" || value === "rejected") {
-    return "declined";
-  }
-  return undefined;
-}
-
-function requestKindFromPayload(payload: Record<string, unknown> | null): "command" | "file-read" | "file-change" | null {
-  if (
-    payload?.requestKind === "command" ||
-    payload?.requestKind === "file-read" ||
-    payload?.requestKind === "file-change"
-  ) {
-    return payload.requestKind;
-  }
-  switch (payload?.requestType) {
-    case "command_execution_approval":
-    case "exec_command_approval":
-      return "command";
-    case "file_read_approval":
-      return "file-read";
-    case "file_change_approval":
-    case "apply_patch_approval":
-      return "file-change";
-    default:
-      return null;
-  }
-}
-
 function normalizeCommand(value: unknown): string | null {
   const direct = asString(value);
   if (direct) return direct;
@@ -511,37 +479,9 @@ function activityToBlocks(
   const payload = asRecord(activity.payload);
 
   switch (activity.kind) {
-    case "approval.requested": {
-      const requestKind = requestKindFromPayload(payload);
-      if (!requestKind) {
-        return [{ type: "status", text: activity.summary }];
-      }
-      return [
-        {
-          type: "approval-request",
-          requestId: asString(payload?.requestId) ?? activity.id,
-          requestKind,
-          ...(asString(payload?.detail) ? { detail: asString(payload?.detail)! } : {}),
-        },
-      ];
-    }
-
-    case "approval.resolved": {
-      const requestKind = requestKindFromPayload(payload);
-      if (!requestKind) {
-        return [{ type: "status", text: activity.summary }];
-      }
-      const resolved = decisionToApprovalState(payload?.decision);
-      return [
-        {
-          type: "approval-request",
-          requestId: asString(payload?.requestId) ?? activity.id,
-          requestKind,
-          ...(resolved ? { resolved } : {}),
-          ...(asString(payload?.detail) ? { detail: asString(payload?.detail)! } : {}),
-        },
-      ];
-    }
+    case "approval.requested":
+    case "approval.resolved":
+      return [];
 
     case "user-input.requested": {
       const requestId = asString(payload?.requestId);

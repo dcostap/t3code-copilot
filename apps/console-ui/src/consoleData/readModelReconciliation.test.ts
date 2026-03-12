@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { CommandId, EventId, type OrchestrationEvent } from "@t3tools/contracts";
 
-import { buildDemoSnapshot } from "./demoSnapshot";
+import { buildTestSnapshot } from "../testSupport/testSnapshot";
 import { reconcileReadModelWithEvents } from "./readModelReconciliation";
 
 describe("reconcileReadModelWithEvents", () => {
   it("applies newer interaction-mode events to the snapshot", () => {
-    const snapshot = buildDemoSnapshot();
+    const snapshot = buildTestSnapshot();
     const event = {
       sequence: snapshot.snapshotSequence + 1,
       eventId: EventId.makeUnsafe("event:1"),
@@ -32,7 +32,7 @@ describe("reconcileReadModelWithEvents", () => {
   });
 
   it("does not reapply events already reflected in the snapshot", () => {
-    const snapshot = buildDemoSnapshot();
+    const snapshot = buildTestSnapshot();
     const event = {
       sequence: snapshot.snapshotSequence,
       eventId: EventId.makeUnsafe("event:1"),

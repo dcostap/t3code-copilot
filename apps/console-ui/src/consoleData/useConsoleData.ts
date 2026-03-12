@@ -6,10 +6,8 @@ import {
   type OrchestrationReadModel,
   type OrchestrationThread,
   type OrchestrationEvent,
-  type ProviderApprovalDecision,
   type ProviderInteractionMode,
   type ProviderKind,
-  type RuntimeMode,
   type ServerConfig,
   type UploadChatImageAttachment,
   type UserInputQuestion,
@@ -18,28 +16,16 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  DemoConsoleBackend,
   LiveConsoleBackend,
   type ConsoleBackend,
   type ConsoleBackendConnectionState,
 } from "../consoleBackend";
 import { reconcileReadModelWithEvents } from "./readModelReconciliation";
 
-export type ConsoleSourceMode = "demo" | "live";
-export type ConsoleConnectionState =
-  | "demo"
-  | ConsoleBackendConnectionState;
+export type ConsoleConnectionState = ConsoleBackendConnectionState;
 
 interface ConsoleSearchConfig {
-  readonly mode: ConsoleSourceMode;
   readonly threadId: string | null;
-}
-
-export interface ConsolePendingApproval {
-  readonly requestId: string;
-  readonly requestKind: "command" | "file-read" | "file-change";
-  readonly createdAt: string;
-  readonly detail?: string;
 }
 
 export interface ConsolePendingUserInput {
@@ -49,7 +35,6 @@ export interface ConsolePendingUserInput {
 }
 
 export interface ConsoleDataState {
-  readonly mode: ConsoleSourceMode;
   readonly connectionState: ConsoleConnectionState;
   readonly snapshot: OrchestrationReadModel | null;
   readonly serverConfig: ServerConfig | null;
@@ -59,12 +44,10 @@ export interface ConsoleDataState {
   readonly thread: OrchestrationThread | null;
   readonly project: OrchestrationProject | null;
   readonly threadEvents: ReadonlyArray<OrchestrationEvent>;
-  readonly pendingApprovals: ReadonlyArray<ConsolePendingApproval>;
   readonly pendingUserInputs: ReadonlyArray<ConsolePendingUserInput>;
   readonly isTurnRunning: boolean;
   readonly isPromptSubmitting: boolean;
   readonly canSubmitPrompt: boolean;
-  readonly respondingApprovalRequestIds: ReadonlyArray<string>;
   readonly respondingUserInputRequestIds: ReadonlyArray<string>;
   readonly isInterruptingTurn: boolean;
   readonly isStoppingSession: boolean;
@@ -74,9 +57,7 @@ export interface ConsoleDataState {
     prompt: string;
     attachments?: ReadonlyArray<UploadChatImageAttachment>;
   }): Promise<void>;
-  respondToApproval(requestId: string, decision: ProviderApprovalDecision): Promise<void>;
   respondToUserInput(requestId: string, answers: Record<string, unknown>): Promise<void>;
-  setRuntimeMode(runtimeMode: RuntimeMode): Promise<void>;
   setInteractionMode(interactionMode: ProviderInteractionMode): Promise<void>;
   interruptTurn(): Promise<void>;
   stopSession(): Promise<void>;
@@ -84,12 +65,7 @@ export interface ConsoleDataState {
 
 function readSearchConfig(): ConsoleSearchConfig {
   const search = new URLSearchParams(window.location.search);
-  const modeQuery = search.get("source");
-  const envMode = import.meta.env.VITE_CONSOLE_UI_SOURCE as string | undefined;
-  const mode = modeQuery === "live" || envMode === "live" ? "live" : "demo";
-
   return {
-    mode,
     threadId: search.get("threadId"),
   };
 }
@@ -131,28 +107,6 @@ function compareActivitiesByOrder(
     return -1;
   }
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
-}
-
-function requestKindFromPayload(payload: Record<string, unknown> | null): ConsolePendingApproval["requestKind"] | null {
-  if (
-    payload?.requestKind === "command" ||
-    payload?.requestKind === "file-read" ||
-    payload?.requestKind === "file-change"
-  ) {
-    return payload.requestKind;
-  }
-  switch (payload?.requestType) {
-    case "command_execution_approval":
-    case "exec_command_approval":
-      return "command";
-    case "file_read_approval":
-      return "file-read";
-    case "file_change_approval":
-    case "apply_patch_approval":
-      return "file-change";
-    default:
-      return null;
-  }
 }
 
 function parseUserInputQuestions(
@@ -198,46 +152,6 @@ function parseUserInputQuestions(
   return parsed.length > 0 ? parsed : null;
 }
 
-function derivePendingApprovals(thread: OrchestrationThread | null): ConsolePendingApproval[] {
-  if (!thread) return [];
-  const openByRequestId = new Map<string, ConsolePendingApproval>();
-  const ordered = [...thread.activities].toSorted(compareActivitiesByOrder);
-
-  for (const activity of ordered) {
-    const payload = asRecord(activity.payload);
-    const requestId = asString(payload?.requestId);
-    if (!requestId) continue;
-
-    if (activity.kind === "approval.requested") {
-      const requestKind = requestKindFromPayload(payload);
-      if (!requestKind) continue;
-      openByRequestId.set(requestId, {
-        requestId,
-        requestKind,
-        createdAt: activity.createdAt,
-        ...(asString(payload?.detail) ? { detail: asString(payload?.detail)! } : {}),
-      });
-      continue;
-    }
-
-    if (activity.kind === "approval.resolved") {
-      openByRequestId.delete(requestId);
-      continue;
-    }
-
-    if (
-      activity.kind === "provider.approval.respond.failed" &&
-      asString(payload?.detail)?.includes("Unknown pending permission request")
-    ) {
-      openByRequestId.delete(requestId);
-    }
-  }
-
-  return [...openByRequestId.values()].toSorted((left, right) =>
-    left.createdAt.localeCompare(right.createdAt),
-  );
-}
-
 function derivePendingUserInputs(thread: OrchestrationThread | null): ConsolePendingUserInput[] {
   if (!thread) return [];
   const openByRequestId = new Map<string, ConsolePendingUserInput>();
@@ -275,6 +189,37 @@ function derivePendingUserInputs(thread: OrchestrationThread | null): ConsolePen
   return [...openByRequestId.values()].toSorted((left, right) =>
     left.createdAt.localeCompare(right.createdAt),
   );
+}
+
+function derivePendingApprovalRequestIds(thread: OrchestrationThread | null): string[] {
+  if (!thread) return [];
+  const openByRequestId = new Set<string>();
+  const ordered = [...thread.activities].toSorted(compareActivitiesByOrder);
+
+  for (const activity of ordered) {
+    const payload = asRecord(activity.payload);
+    const requestId = asString(payload?.requestId);
+    if (!requestId) continue;
+
+    if (activity.kind === "approval.requested") {
+      openByRequestId.add(requestId);
+      continue;
+    }
+
+    if (activity.kind === "approval.resolved") {
+      openByRequestId.delete(requestId);
+      continue;
+    }
+
+    if (
+      activity.kind === "provider.approval.respond.failed" &&
+      asString(payload?.detail)?.includes("Unknown pending permission request")
+    ) {
+      openByRequestId.delete(requestId);
+    }
+  }
+
+  return [...openByRequestId];
 }
 
 function buildPromptAnswers(
@@ -338,10 +283,7 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
 
 export function useConsoleData(): ConsoleDataState {
   const searchConfig = useMemo(readSearchConfig, []);
-  const backend = useMemo<ConsoleBackend>(
-    () => (searchConfig.mode === "demo" ? new DemoConsoleBackend() : new LiveConsoleBackend()),
-    [searchConfig.mode],
-  );
+  const backend = useMemo<ConsoleBackend>(() => new LiveConsoleBackend(), []);
   const latestEventSequenceRef = useRef(0);
   const orchestrationEventsRef = useRef<ReadonlyArray<OrchestrationEvent>>([]);
   const queuedSyncRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -351,7 +293,7 @@ export function useConsoleData(): ConsoleDataState {
   const serverConfigSyncInFlightRef = useRef(false);
   const pendingServerConfigSyncRef = useRef(false);
   const promptSubmittingRef = useRef(false);
-  const respondingApprovalRequestIdsRef = useRef(new Set<string>());
+  const autoApprovedRequestIdsRef = useRef(new Set<string>());
   const respondingUserInputRequestIdsRef = useRef(new Set<string>());
   const interruptInFlightRef = useRef(false);
   const stopSessionInFlightRef = useRef(false);
@@ -361,11 +303,8 @@ export function useConsoleData(): ConsoleDataState {
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const [welcome, setWelcome] = useState<WsWelcomePayload | null>(null);
   const [activeThreadId, setActiveThreadIdState] = useState<string | null>(searchConfig.threadId);
-  const [connectionState, setConnectionState] = useState<ConsoleConnectionState>(
-    searchConfig.mode === "demo" ? "demo" : "connecting",
-  );
+  const [connectionState, setConnectionState] = useState<ConsoleConnectionState>("connecting");
   const [isPromptSubmitting, setIsPromptSubmitting] = useState(false);
-  const [respondingApprovalRequestIds, setRespondingApprovalRequestIds] = useState<string[]>([]);
   const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<string[]>([]);
   const [isInterruptingTurn, setIsInterruptingTurn] = useState(false);
   const [isStoppingSession, setIsStoppingSession] = useState(false);
@@ -383,14 +322,13 @@ export function useConsoleData(): ConsoleDataState {
     serverConfigSyncInFlightRef.current = false;
     pendingServerConfigSyncRef.current = false;
     promptSubmittingRef.current = false;
-    respondingApprovalRequestIdsRef.current.clear();
+    autoApprovedRequestIdsRef.current.clear();
     respondingUserInputRequestIdsRef.current.clear();
     interruptInFlightRef.current = false;
     stopSessionInFlightRef.current = false;
     orchestrationEventsRef.current = [];
     setOrchestrationEvents([]);
     setIsPromptSubmitting(false);
-    setRespondingApprovalRequestIds([]);
     setRespondingUserInputRequestIds([]);
     setIsInterruptingTurn(false);
     setIsStoppingSession(false);
@@ -398,12 +336,10 @@ export function useConsoleData(): ConsoleDataState {
     const flushSnapshotSync = async (): Promise<void> => {
       const nextSnapshot = await backend.getSnapshot();
       if (disposed) return;
-      if (searchConfig.mode === "live") {
-        latestEventSequenceRef.current = Math.max(
-          latestEventSequenceRef.current,
-          nextSnapshot.snapshotSequence,
-        );
-      }
+      latestEventSequenceRef.current = Math.max(
+        latestEventSequenceRef.current,
+        nextSnapshot.snapshotSequence,
+      );
       setSnapshot(reconcileReadModelWithEvents(nextSnapshot, orchestrationEventsRef.current));
       setActiveThreadIdState((current) =>
         current ??
@@ -534,13 +470,6 @@ export function useConsoleData(): ConsoleDataState {
 
     backend.connect();
 
-    if (searchConfig.mode === "demo") {
-      setConnectionState("demo");
-      void syncSnapshot();
-      void syncEvents(0);
-      void syncServerConfig();
-    }
-
     return () => {
       disposed = true;
       syncInFlightRef.current = false;
@@ -555,7 +484,7 @@ export function useConsoleData(): ConsoleDataState {
       backend.disconnect();
       backend.dispose();
     };
-  }, [backend, searchConfig.mode, searchConfig.threadId]);
+  }, [backend, searchConfig.threadId]);
 
   const threads = snapshot?.threads ?? [];
 
@@ -577,6 +506,34 @@ export function useConsoleData(): ConsoleDataState {
     setActiveThreadIdState(thread.id);
   }, [snapshot, thread]);
 
+  useEffect(() => {
+    if (!thread || !canDispatchLiveCommand(connectionState)) {
+      return;
+    }
+
+    for (const requestId of derivePendingApprovalRequestIds(thread)) {
+      if (autoApprovedRequestIdsRef.current.has(requestId)) {
+        continue;
+      }
+
+      autoApprovedRequestIdsRef.current.add(requestId);
+      void backend.dispatchCommand({
+        type: "thread.approval.respond",
+        commandId: makeCommandId(),
+        threadId: thread.id,
+        requestId: requestId as ApprovalRequestId,
+        decision: "acceptForSession",
+        createdAt: new Date().toISOString(),
+      }).catch((nextError) => {
+        setError(
+          nextError instanceof Error
+            ? `Automatic approval handling failed: ${nextError.message}`
+            : "Automatic approval handling failed.",
+        );
+      });
+    }
+  }, [backend, connectionState, thread]);
+
   const project = useMemo(() => {
     if (!snapshot || !thread) return null;
     return snapshot.projects.find((entry: OrchestrationProject) => entry.id === thread.projectId) ?? null;
@@ -591,7 +548,6 @@ export function useConsoleData(): ConsoleDataState {
     [orchestrationEvents, thread],
   );
 
-  const pendingApprovals = useMemo(() => derivePendingApprovals(thread), [thread]);
   const pendingUserInputs = useMemo(() => derivePendingUserInputs(thread), [thread]);
   const turnRunning = useMemo(() => isTurnRunning(thread), [thread]);
   const canSubmitPrompt = useMemo(() => {
@@ -605,23 +561,22 @@ export function useConsoleData(): ConsoleDataState {
       return false;
     }
     if (pendingUserInputs.length === 0 && turnRunning) return false;
-    if (searchConfig.mode === "live" && !canDispatchLiveCommand(connectionState)) return false;
+    if (!canDispatchLiveCommand(connectionState)) return false;
     return true;
   }, [
     connectionState,
     isPromptSubmitting,
     pendingUserInputs,
     respondingUserInputRequestIds,
-    searchConfig.mode,
     thread,
     turnRunning,
   ]);
 
   const assertLiveCommandReady = useCallback(() => {
-    if (searchConfig.mode === "live" && !canDispatchLiveCommand(connectionState)) {
+    if (!canDispatchLiveCommand(connectionState)) {
       throw new Error("Live backend is not connected.");
     }
-  }, [connectionState, searchConfig.mode]);
+  }, [connectionState]);
 
   const submitPrompt = useCallback(
     async (input: {
@@ -698,7 +653,7 @@ export function useConsoleData(): ConsoleDataState {
           ...(provider ? { provider } : {}),
           model: thread.model,
           assistantDeliveryMode: "streaming",
-          runtimeMode: thread.runtimeMode,
+          runtimeMode: "full-access",
           interactionMode: thread.interactionMode,
           createdAt: new Date().toISOString(),
         });
@@ -708,37 +663,6 @@ export function useConsoleData(): ConsoleDataState {
       }
     },
     [assertLiveCommandReady, backend, pendingUserInputs, thread, turnRunning],
-  );
-
-  const respondToApproval = useCallback(
-    async (requestId: string, decision: ProviderApprovalDecision) => {
-      if (!thread) {
-        throw new Error("No orchestration thread is available.");
-      }
-      assertLiveCommandReady();
-      if (respondingApprovalRequestIdsRef.current.has(requestId)) {
-        return;
-      }
-
-      respondingApprovalRequestIdsRef.current.add(requestId);
-      setRespondingApprovalRequestIds((existing) =>
-        existing.includes(requestId) ? existing : [...existing, requestId],
-      );
-      try {
-        await backend.dispatchCommand({
-          type: "thread.approval.respond",
-          commandId: makeCommandId(),
-          threadId: thread.id,
-          requestId: requestId as ApprovalRequestId,
-          decision,
-          createdAt: new Date().toISOString(),
-        });
-      } finally {
-        respondingApprovalRequestIdsRef.current.delete(requestId);
-        setRespondingApprovalRequestIds((existing) => existing.filter((id) => id !== requestId));
-      }
-    },
-    [assertLiveCommandReady, backend, thread],
   );
 
   const respondToUserInput = useCallback(
@@ -770,22 +694,6 @@ export function useConsoleData(): ConsoleDataState {
           existing.filter((id) => id !== requestId),
         );
       }
-    },
-    [assertLiveCommandReady, backend, thread],
-  );
-
-  const setRuntimeMode = useCallback(
-    async (runtimeMode: RuntimeMode) => {
-      if (!thread || thread.runtimeMode === runtimeMode) return;
-      assertLiveCommandReady();
-
-      await backend.dispatchCommand({
-        type: "thread.runtime-mode.set",
-        commandId: makeCommandId(),
-        threadId: thread.id,
-        runtimeMode,
-        createdAt: new Date().toISOString(),
-      });
     },
     [assertLiveCommandReady, backend, thread],
   );
@@ -855,7 +763,6 @@ export function useConsoleData(): ConsoleDataState {
   }, [assertLiveCommandReady, backend, thread]);
 
   return {
-    mode: searchConfig.mode,
     connectionState,
     snapshot,
     serverConfig,
@@ -865,21 +772,17 @@ export function useConsoleData(): ConsoleDataState {
     thread,
     project,
     threadEvents,
-    pendingApprovals,
     pendingUserInputs,
     isTurnRunning: turnRunning,
     isPromptSubmitting,
     canSubmitPrompt,
-    respondingApprovalRequestIds,
     respondingUserInputRequestIds,
     isInterruptingTurn,
     isStoppingSession,
     error,
     setActiveThreadId,
     submitPrompt,
-    respondToApproval,
     respondToUserInput,
-    setRuntimeMode,
     setInteractionMode,
     interruptTurn,
     stopSession,
