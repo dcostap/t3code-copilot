@@ -36,9 +36,16 @@ interface PositionedLine {
   readonly extraClasses?: ReadonlyArray<string>;
 }
 
+interface PositionedMark {
+  readonly from: number;
+  readonly to: number;
+  readonly className: string;
+}
+
 interface TranscriptDocumentModel {
   readonly text: string;
   readonly lines: ReadonlyArray<PositionedLine>;
+  readonly marks: ReadonlyArray<PositionedMark>;
   readonly widgets: ReadonlyArray<PositionedWidget>;
   readonly separatorStart: number;
   readonly promptStart: number;
@@ -301,6 +308,7 @@ function buildTranscriptDocument(
   let separatorStart = -1;
   let promptStart = -1;
   const positioned: PositionedLine[] = [];
+  const marks: PositionedMark[] = [];
   const widgets: PositionedWidget[] = [];
 
   allLines.forEach((line, index) => {
@@ -310,6 +318,18 @@ function buildTranscriptDocument(
       kind: line.kind,
       ...(line.extraClasses ? { extraClasses: line.extraClasses } : {}),
     });
+    if (line.highlightSpans) {
+      for (const span of line.highlightSpans) {
+        if (span.from >= span.to) {
+          continue;
+        }
+        marks.push({
+          from: from + span.from,
+          to: from + span.to,
+          className: span.className,
+        });
+      }
+    }
     const lineEnd = from + line.text.length;
     text += line.text;
 
@@ -340,6 +360,7 @@ function buildTranscriptDocument(
   return {
     text,
     lines: positioned,
+    marks,
     widgets,
     separatorStart: separatorStart === -1 ? promptStart === -1 ? text.length : promptStart : separatorStart,
     promptStart: promptStart === -1 ? text.length : promptStart,
@@ -348,6 +369,7 @@ function buildTranscriptDocument(
 
 function buildDecorations(
   lines: ReadonlyArray<PositionedLine>,
+  marks: ReadonlyArray<PositionedMark>,
   widgets: ReadonlyArray<PositionedWidget>,
   promptStart: number,
 ) {
@@ -355,6 +377,11 @@ function buildDecorations(
     Decoration.line({
       class: [`cm-line-${line.kind}`, ...(line.extraClasses ?? [])].join(" "),
     }).range(line.from),
+  );
+  ranges.push(
+    ...marks.map((mark) =>
+      Decoration.mark({ class: `cm-codeToken ${mark.className}` }).range(mark.from, mark.to),
+    ),
   );
   ranges.push(
     ...widgets.map(({ position, side, widget }) =>
@@ -369,10 +396,13 @@ function buildDecorationSignature(docModel: TranscriptDocumentModel) {
   const lineSignature = docModel.lines
     .map((line) => `${line.from}:${line.kind}:${(line.extraClasses ?? []).join(",")}`)
     .join("|");
+  const markSignature = docModel.marks
+    .map((mark) => `${mark.from}:${mark.to}:${mark.className}`)
+    .join("|");
   const widgetSignature = docModel.widgets
     .map((widget) => `${widget.position}:${widget.side}:${widget.signature}`)
     .join("|");
-  return `${docModel.promptStart}::${lineSignature}::${widgetSignature}`;
+  return `${docModel.promptStart}::${lineSignature}::${markSignature}::${widgetSignature}`;
 }
 
 function buildEditorTheme() {
@@ -427,6 +457,25 @@ function buildEditorTheme() {
         color: "#c7d0d8",
         backgroundColor: "rgba(22, 29, 36, 0.82)",
       },
+      ".cm-codeToken.tok-keyword": { color: "#d39bff" },
+      ".cm-codeToken.tok-comment": { color: "#6e7d8b", fontStyle: "italic" },
+      ".cm-codeToken.tok-string": { color: "#a8d38f" },
+      ".cm-codeToken.tok-number": { color: "#f0c57a" },
+      ".cm-codeToken.tok-bool": { color: "#f0c57a" },
+      ".cm-codeToken.tok-null": { color: "#f0c57a" },
+      ".cm-codeToken.tok-variableName": { color: "#d7dde4" },
+      ".cm-codeToken.tok-definition": { color: "#7dc4ff" },
+      ".cm-codeToken.tok-propertyName": { color: "#8fd6ff" },
+      ".cm-codeToken.tok-typeName": { color: "#79c8b6" },
+      ".cm-codeToken.tok-className": { color: "#79c8b6" },
+      ".cm-codeToken.tok-function": { color: "#7dc4ff" },
+      ".cm-codeToken.tok-operator": { color: "#d0d7df" },
+      ".cm-codeToken.tok-punctuation": { color: "#8b96a1" },
+      ".cm-codeToken.tok-meta": { color: "#8aa5c2" },
+      ".cm-codeToken.tok-tagName": { color: "#f0957a" },
+      ".cm-codeToken.tok-attributeName": { color: "#e7c26f" },
+      ".cm-codeToken.tok-attributeValue": { color: "#a8d38f" },
+      ".cm-codeToken.tok-special.tok-string": { color: "#9adf8f" },
       ".cm-line-list": { color: "#c7ccd1" },
       ".cm-line-userPromptSeparator": {
         position: "relative",
@@ -1158,6 +1207,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             EditorView.decorations.of(
               buildDecorations(
                 initialDocModel.lines,
+                initialDocModel.marks,
                 initialDocModel.widgets,
                 initialDocModel.promptStart,
               ),
@@ -1291,7 +1341,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         effects: [
           decorationsCompartment.reconfigure(
             EditorView.decorations.of(
-              buildDecorations(docModel.lines, docModel.widgets, docModel.promptStart),
+              buildDecorations(docModel.lines, docModel.marks, docModel.widgets, docModel.promptStart),
             ),
           ),
           setPromptStartEffect.of(docModel.promptStart),
