@@ -18,6 +18,20 @@ Implications:
 - No approve, decline, or cancel surfaces should be built for this UI.
 - Runtime-mode switching is out of scope for the new console UI.
 
+## Thread And Provider Invariant
+
+In the new console UI, one thread equals one provider session lineage.
+
+Implications:
+
+- A thread should have one provider identity for its lifetime.
+- The new console should not expose in-thread provider switching.
+- If the user wants to change provider, the UI should create a new thread instead of mutating the existing thread.
+- This keeps transcript continuity honest, because switching providers does not preserve the prior provider's live conversation state.
+- The effective agent `cwd` still comes from the thread:
+  - `thread.worktreePath` when present
+  - otherwise the owning project's `workspaceRoot`
+
 ## Principles
 
 - Preserve semantics, not old layout.
