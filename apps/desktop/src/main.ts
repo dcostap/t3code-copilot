@@ -1347,6 +1347,20 @@ function getIconOption(): { icon: string } | Record<string, never> {
 }
 
 function createWindow(): BrowserWindow {
+  const titleBarOptions =
+    process.platform === "darwin"
+      ? {
+          titleBarStyle: "hiddenInset" as const,
+          trafficLightPosition: { x: 16, y: 18 },
+        }
+      : {
+          titleBarStyle: "hidden" as const,
+          titleBarOverlay: {
+            color: "#111419",
+            symbolColor: "#cfd4d9",
+            height: 44,
+          },
+        };
   const window = new BrowserWindow({
     width: 1100,
     height: 780,
@@ -1356,8 +1370,7 @@ function createWindow(): BrowserWindow {
     autoHideMenuBar: true,
     ...getIconOption(),
     title: APP_DISPLAY_NAME,
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 16, y: 18 },
+    ...titleBarOptions,
     webPreferences: {
       preload: Path.join(__dirname, "preload.js"),
       contextIsolation: true,

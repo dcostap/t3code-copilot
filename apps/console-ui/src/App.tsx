@@ -28,7 +28,15 @@ interface AppPaletteCommand extends CommandPaletteCommand {
   run(): Promise<void> | void;
 }
 
+function isDesktopBridgeAvailable() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  return typeof window.desktopBridge !== "undefined";
+}
+
 export function App() {
+  const isDesktop = useMemo(isDesktopBridgeAvailable, []);
   const consoleData = useConsoleData();
   const workspace = useConsoleWorkspaceSessions({
     threads: consoleData.threads,
@@ -813,8 +821,12 @@ export function App() {
     <>
       <div className="bg-image" />
       <div className="bg-gradient" />
-      <div className="console-shell">
-        <div className="session-tabs" role="tablist" aria-label="Workspace sessions">
+      <div className={isDesktop ? "console-shell console-shell--desktop" : "console-shell"}>
+        <div
+          className={isDesktop ? "session-tabs session-tabs--desktop" : "session-tabs"}
+          role="tablist"
+          aria-label="Workspace sessions"
+        >
           {workspace.sessions.map((session) => (
             <button
               key={session.id}
