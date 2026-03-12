@@ -486,6 +486,32 @@ function buildEditorTheme() {
       ".cm-line-proposedPlanBody": {
         color: "#bcc4cb",
       },
+      ".cm-line-checkpointSeparator": {
+        position: "relative",
+        minHeight: "10px",
+      },
+      ".cm-line-checkpointSeparator::before": {
+        content: '""',
+        position: "absolute",
+        left: "0",
+        right: "0",
+        top: "50%",
+        borderTop: "1px solid rgba(108, 118, 128, 0.30)",
+        transform: "translateY(-50%)",
+      },
+      ".cm-line-checkpointHeader": {
+        color: "#a9b2bb",
+        letterSpacing: "0.08em",
+        fontSize: "12px",
+        textTransform: "uppercase",
+        paddingTop: "2px",
+      },
+      ".cm-line-checkpointSummary": {
+        color: "#c2c9cf",
+      },
+      ".cm-line-checkpointFile": {
+        color: "#9098a1",
+      },
       ".cm-line-promptInput": { color: "#d6dbe0" },
       ".cm-line-attachmentPanel": {
         paddingLeft: "2ch",

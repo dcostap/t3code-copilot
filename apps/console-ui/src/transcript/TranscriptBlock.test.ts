@@ -182,4 +182,35 @@ describe("blockToLines", () => {
       { text: "", kind: "planSeparator" },
     ]);
   });
+
+  it("renders checkpoint summaries as a compact summary plus file list", () => {
+    expect(
+      blockToLines({
+        type: "checkpoint-summary",
+        status: "ready",
+        checkpointTurnCount: 3,
+        files: [
+          {
+            path: "apps/console-ui/src/App.tsx",
+            kind: "modified",
+            additions: 18,
+            deletions: 10,
+          },
+          {
+            path: "apps/console-ui/src/index.css",
+            kind: "modified",
+            additions: 22,
+            deletions: 9,
+          },
+        ],
+      }),
+    ).toEqual([
+      { text: "", kind: "checkpointSeparator" },
+      { text: "Checkpoint captured · #3", kind: "checkpointHeader" },
+      { text: "2 files changed (+40 -19)", kind: "checkpointSummary" },
+      { text: "  apps/console-ui/src/App.tsx  (+18 -10)", kind: "checkpointFile" },
+      { text: "  apps/console-ui/src/index.css  (+22 -9)", kind: "checkpointFile" },
+      { text: "", kind: "checkpointSeparator" },
+    ]);
+  });
 });

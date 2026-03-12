@@ -1,4 +1,4 @@
-import { EventId, MessageId, TurnId } from "@t3tools/contracts";
+import { CheckpointRef, EventId, MessageId, TurnId } from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 
 import { buildDemoSnapshot } from "../consoleData/demoSnapshot";
@@ -301,6 +301,81 @@ describe("threadToTranscriptBlocks", () => {
         type: "proposed-plan",
         title: "Console UI migration",
         body: "- Bind the prototype to the orchestration read model.\n- Keep transcript rendering text-first.",
+      },
+    ]);
+  });
+
+  it("maps assistant checkpoints to checkpoint-summary blocks", () => {
+    const snapshot = buildDemoSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      activities: [],
+      proposedPlans: [],
+      messages: [
+        {
+          id: MessageId.makeUnsafe("assistant-checkpoint-message"),
+          role: "assistant",
+          text: "I traced it to the split scroll model.",
+          attachments: [],
+          turnId: TurnId.makeUnsafe("turn-checkpoint"),
+          streaming: false,
+          createdAt: "2026-03-11T09:00:00.000Z",
+          updatedAt: "2026-03-11T09:00:01.000Z",
+        },
+      ],
+      checkpoints: [
+        {
+          turnId: TurnId.makeUnsafe("turn-checkpoint"),
+          checkpointTurnCount: 2,
+          checkpointRef: CheckpointRef.makeUnsafe("provider-diff:test"),
+          status: "ready",
+          files: [
+            {
+              path: "apps/console-ui/src/App.tsx",
+              kind: "modified",
+              additions: 18,
+              deletions: 10,
+            },
+            {
+              path: "apps/console-ui/src/index.css",
+              kind: "modified",
+              additions: 22,
+              deletions: 9,
+            },
+          ],
+          assistantMessageId: MessageId.makeUnsafe("assistant-checkpoint-message"),
+          completedAt: "2026-03-11T09:00:02.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "I traced it to the split scroll model.",
+        streaming: false,
+      },
+      {
+        type: "checkpoint-summary",
+        status: "ready",
+        checkpointTurnCount: 2,
+        files: [
+          {
+            path: "apps/console-ui/src/App.tsx",
+            kind: "modified",
+            additions: 18,
+            deletions: 10,
+          },
+          {
+            path: "apps/console-ui/src/index.css",
+            kind: "modified",
+            additions: 22,
+            deletions: 9,
+          },
+        ],
       },
     ]);
   });
