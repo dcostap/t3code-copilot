@@ -54,6 +54,10 @@ body {
   padding: 8px 0 0;
 }
 
+.console-shell--desktop {
+  padding-top: 0;
+}
+
 .session-tabs {
   display: flex;
   gap: 8px;
@@ -69,6 +73,13 @@ body {
   display: none;
 }
 
+.session-tabs--desktop {
+  min-height: 46px;
+  padding: 8px 140px 8px 12px;
+  background: linear-gradient(to bottom, rgba(17, 20, 25, 0.98), rgba(17, 20, 25, 0.74));
+  -webkit-app-region: drag;
+}
+
 .session-tab {
   display: inline-flex;
   align-items: center;
@@ -82,6 +93,7 @@ body {
   color: #7e868f;
   font: inherit;
   cursor: pointer;
+  -webkit-app-region: no-drag;
 }
 
 .session-tab:hover {
@@ -100,6 +112,10 @@ body {
   width: 32px;
   min-width: 32px;
   padding: 0;
+}
+
+.console-shell--desktop .conversation-scroll {
+  padding-top: 2px;
 }
 
 .session-tab--create:disabled {
