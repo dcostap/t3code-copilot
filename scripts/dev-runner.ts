@@ -13,6 +13,8 @@ const BASE_SERVER_PORT = 3773;
 const BASE_WEB_PORT = 5733;
 const MAX_HASH_OFFSET = 3000;
 const MAX_PORT = 65535;
+const DESKTOP_SURFACES = ["web", "console"] as const;
+type DesktopSurface = (typeof DESKTOP_SURFACES)[number];
 
 export const DEFAULT_DEV_STATE_DIR = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(homedir(), ".t3", "dev"),
@@ -30,7 +32,7 @@ const MODE_ARGS = {
   ],
   "dev:server": ["run", "dev", "--filter=t3"],
   "dev:web": ["run", "dev", "--filter=@t3tools/web"],
-  "dev:desktop": ["run", "dev", "--filter=@t3tools/desktop", "--filter=@t3tools/web", "--parallel"],
+  "dev:desktop": ["run", "dev", "--filter=@t3tools/desktop", "--parallel"],
 } as const satisfies Record<string, ReadonlyArray<string>>;
 
 type DevMode = keyof typeof MODE_ARGS;
@@ -335,6 +337,7 @@ export function resolveModePortOffsets<R = NetService>({
 
 interface DevRunnerCliInput {
   readonly mode: DevMode;
+  readonly surface: Option.Option<DesktopSurface>;
   readonly stateDir: string | undefined;
   readonly authToken: string | undefined;
   readonly noBrowser: boolean | undefined;
@@ -378,6 +381,14 @@ const resolveOptionalBooleanOverride = (
 
 export function runDevRunnerWithInput(input: DevRunnerCliInput) {
   return Effect.gen(function* () {
+    if (input.mode === "dev:desktop" && Option.isNone(input.surface)) {
+      return yield* new DevRunnerError({
+        message: "Desktop development requires --surface=web or --surface=console.",
+      });
+    }
+
+    const desktopSurface = Option.getOrUndefined(input.surface);
+
     const { portOffset, devInstance } = yield* OffsetConfig.asEffect().pipe(
       Effect.mapError(
         (cause) =>
@@ -444,9 +455,16 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
       return;
     }
 
+    const surfaceFilters =
+      input.mode === "dev:desktop"
+        ? [
+            `--filter=${desktopSurface === "console" ? "@t3tools/console-ui" : "@t3tools/web"}`,
+          ]
+        : [];
+
     const child = yield* ChildProcess.make(
       "turbo",
-      [...MODE_ARGS[input.mode], ...input.turboArgs],
+      [...MODE_ARGS[input.mode], ...surfaceFilters, ...input.turboArgs],
       {
         stdin: "inherit",
         stdout: "inherit",
@@ -484,6 +502,10 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
 const devRunnerCli = Command.make("dev-runner", {
   mode: Argument.choice("mode", DEV_RUNNER_MODES).pipe(
     Argument.withDescription("Development mode to run."),
+  ),
+  surface: Flag.choice("surface", DESKTOP_SURFACES).pipe(
+    Flag.withDescription("Desktop renderer surface. Required for dev:desktop."),
+    Flag.optional,
   ),
   stateDir: Flag.string("state-dir").pipe(
     Flag.withDescription("State directory path (forwards to T3CODE_STATE_DIR)."),
