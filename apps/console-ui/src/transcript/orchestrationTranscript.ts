@@ -16,6 +16,7 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
 interface TranscriptBlockOptions {
   readonly resolveAttachmentPreviewUrl?: (attachmentId: string) => string;
   readonly orchestrationEvents?: ReadonlyArray<OrchestrationEvent>;
+  readonly now?: string;
 }
 
 interface ActivityBlockOptions {
@@ -923,6 +924,20 @@ export function threadToTranscriptBlocks(
 
   if (pendingWorkItems.length > 0) {
     flushWorkItems();
+  }
+
+  if (thread.latestTurn?.state === "running" || thread.session?.status === "running") {
+    const startedAt =
+      thread.latestTurn?.startedAt
+      ?? thread.latestTurn?.requestedAt
+      ?? thread.session?.updatedAt
+      ?? thread.updatedAt;
+    const now = options.now ?? new Date().toISOString();
+    blocks.push({
+      type: "working-state",
+      startedAt,
+      now,
+    });
   }
 
   return blocks;

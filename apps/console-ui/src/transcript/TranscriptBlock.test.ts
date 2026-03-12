@@ -213,4 +213,19 @@ describe("blockToLines", () => {
       { text: "", kind: "checkpointSeparator" },
     ]);
   });
+
+  it("renders a working-state block with elapsed time", () => {
+    expect(
+      blockToLines({
+        type: "working-state",
+        startedAt: "2026-03-12T09:00:00.000Z",
+        now: "2026-03-12T09:00:04.200Z",
+      }),
+    ).toEqual([
+      { text: "", kind: "workingSeparator" },
+      { text: "Working", kind: "workingHeader" },
+      { text: "running for 4.2s", kind: "workingFooter" },
+      { text: "", kind: "workingSeparator" },
+    ]);
+  });
 });

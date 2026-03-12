@@ -512,6 +512,31 @@ function buildEditorTheme() {
       ".cm-line-checkpointFile": {
         color: "#9098a1",
       },
+      ".cm-line-workingSeparator": {
+        position: "relative",
+        minHeight: "10px",
+      },
+      ".cm-line-workingSeparator::before": {
+        content: '""',
+        position: "absolute",
+        left: "0",
+        right: "0",
+        top: "50%",
+        borderTop: "1px solid rgba(95, 103, 111, 0.28)",
+        transform: "translateY(-50%)",
+      },
+      ".cm-line-workingHeader": {
+        color: "#aeb5bc",
+        letterSpacing: "0.08em",
+        fontSize: "12px",
+        textTransform: "uppercase",
+        paddingTop: "2px",
+      },
+      ".cm-line-workingFooter": {
+        color: "#6f7780",
+        fontSize: "12px",
+        paddingTop: "2px",
+      },
       ".cm-line-promptInput": { color: "#d6dbe0" },
       ".cm-line-attachmentPanel": {
         paddingLeft: "2ch",
