@@ -23,11 +23,12 @@ import {
   type PermissionRequestResult,
   type SessionEvent,
 } from "@github/copilot-sdk";
-import { Effect, Layer, Queue, Stream } from "effect";
+import { Effect, Layer, Queue, Schema, Stream } from "effect";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
+  type ProviderAdapterError,
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
@@ -55,6 +56,7 @@ import type {
 const PROVIDER = "copilot" as const;
 const USER_INPUT_QUESTION_ID = "answer";
 const USER_INPUT_QUESTION_HEADER = "Question";
+const COPILOT_SDK_TIMEOUT_MS = 20_000;
 
 export interface CopilotAdapterLiveOptions {
   readonly nativeEventLogger?: EventNdjsonLogger;
@@ -199,7 +201,57 @@ function mapSupportedModelsById(models: ReadonlyArray<ModelInfo>) {
   return new Map(models.map((model) => [model.id, model]));
 }
 
-function getCopilotReasoningEffort(modelOptions: unknown) {
+function withPromiseTimeout<T, E extends ProviderAdapterError>(
+  promiseFactory: () => Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => E,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(onTimeout());
+    }, timeoutMs);
+
+    promiseFactory()
+      .then((value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(value);
+      })
+      .catch((error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(error);
+      });
+  });
+}
+
+function isKnownProviderError(cause: unknown): cause is ProviderAdapterError {
+  return Schema.is(ProviderAdapterProcessError)(cause)
+    || Schema.is(ProviderAdapterRequestError)(cause)
+    || Schema.is(ProviderAdapterValidationError)(cause)
+    || Schema.is(ProviderAdapterSessionNotFoundError)(cause);
+}
+
+function tryCopilotSdkPromise<A, E extends ProviderAdapterError>(input: {
+  readonly try: () => Promise<A>;
+  readonly timeoutError: () => E;
+  readonly catch: (cause: unknown) => E;
+}) {
+  return Effect.tryPromise({
+    try: () =>
+      withPromiseTimeout(input.try, COPILOT_SDK_TIMEOUT_MS, input.timeoutError),
+    catch: (cause) => (isKnownProviderError(cause) ? cause : input.catch(cause)),
+  });
+}
+
+function getCopilotReasoningEffort(
+  modelOptions: unknown,
+) {
   const record = asRecord(modelOptions);
   const copilot = asRecord(record?.copilot);
   const reasoningEffort = normalizeString(copilot?.reasoningEffort);
@@ -1047,8 +1099,14 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
           return;
         }
 
-        yield* Effect.tryPromise({
+        yield* tryCopilotSdkPromise({
           try: () => input.client.start(),
+          timeoutError: () =>
+            new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+              detail: `Timed out after ${COPILOT_SDK_TIMEOUT_MS}ms while starting GitHub Copilot client.`,
+            }),
           catch: (cause) =>
             new ProviderAdapterProcessError({
               provider: PROVIDER,
@@ -1059,8 +1117,14 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
         });
 
         const supportedModels = mapSupportedModelsById(
-          yield* Effect.tryPromise({
+          yield* tryCopilotSdkPromise({
             try: () => input.client.listModels(),
+            timeoutError: () =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                detail: `Timed out after ${COPILOT_SDK_TIMEOUT_MS}ms while loading GitHub Copilot model metadata.`,
+              }),
             catch: (cause) =>
               new ProviderAdapterProcessError({
                 provider: PROVIDER,
@@ -1118,7 +1182,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
         readonly reasoningEffort: CodexReasoningEffort | undefined;
       },
     ) =>
-      Effect.tryPromise({
+      tryCopilotSdkPromise({
         try: async () => {
           const sessionId = record.session.sessionId;
           const previousSession = record.session;
@@ -1151,6 +1215,12 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
             handleSessionEvent(record, event);
           });
         },
+        timeoutError: () =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session.reconfigure",
+            detail: `Timed out after ${COPILOT_SDK_TIMEOUT_MS}ms while reconfiguring GitHub Copilot session.`,
+          }),
         catch: (cause) =>
           new ProviderAdapterRequestError({
             provider: PROVIDER,
@@ -1309,7 +1379,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
           reasoningEffort,
         });
 
-        const session = yield* Effect.tryPromise({
+        const session = yield* tryCopilotSdkPromise({
           try: async () => {
             if (resumeSessionId) {
               return client.resumeSession(resumeSessionId, {
@@ -1332,6 +1402,12 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
               streaming: true,
             });
           },
+          timeoutError: () =>
+            new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+              detail: `Timed out after ${COPILOT_SDK_TIMEOUT_MS}ms while starting GitHub Copilot session.`,
+            }),
           catch: (cause) =>
             new ProviderAdapterProcessError({
               provider: PROVIDER,
@@ -1450,12 +1526,18 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
         record.currentTurnId = turnId;
         record.currentProviderTurnId = undefined;
 
-        yield* Effect.tryPromise({
+        yield* tryCopilotSdkPromise({
           try: () =>
             record.session.send({
               prompt: input.input ?? "",
               ...(attachments.length > 0 ? { attachments } : {}),
               mode: "immediate",
+            }),
+          timeoutError: () =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session.send",
+              detail: `Timed out after ${COPILOT_SDK_TIMEOUT_MS}ms while sending GitHub Copilot turn.`,
             }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
@@ -1489,8 +1571,14 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
     const interruptTurn: CopilotAdapterShape["interruptTurn"] = (threadId) =>
       Effect.gen(function* () {
         const record = yield* getSessionRecord(threadId);
-        yield* Effect.tryPromise({
+        yield* tryCopilotSdkPromise({
           try: () => record.session.abort(),
+          timeoutError: () =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session.abort",
+              detail: `Timed out after ${COPILOT_SDK_TIMEOUT_MS}ms while interrupting GitHub Copilot turn.`,
+            }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
               provider: PROVIDER,
@@ -1566,10 +1654,16 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
     const stopSession: CopilotAdapterShape["stopSession"] = (threadId) =>
       Effect.gen(function* () {
         const record = yield* getSessionRecord(threadId);
-        yield* Effect.tryPromise({
+        yield* tryCopilotSdkPromise({
           try: async () => {
             await stopRecord(record);
           },
+          timeoutError: () =>
+            new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId,
+              detail: `Timed out after ${COPILOT_SDK_TIMEOUT_MS}ms while stopping GitHub Copilot session.`,
+            }),
           catch: (cause) =>
             new ProviderAdapterProcessError({
               provider: PROVIDER,
@@ -1606,11 +1700,17 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
     const readThread: CopilotAdapterShape["readThread"] = (threadId) =>
       Effect.gen(function* () {
         const record = yield* getSessionRecord(threadId);
-        return yield* Effect.tryPromise({
+        return yield* tryCopilotSdkPromise({
           try: async () => {
             const messages = await record.session.getMessages();
             return mapHistoryToTurns(threadId, messages);
           },
+          timeoutError: () =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session.getMessages",
+              detail: `Timed out after ${COPILOT_SDK_TIMEOUT_MS}ms while reading GitHub Copilot thread history.`,
+            }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
               provider: PROVIDER,

@@ -22,6 +22,39 @@ function dedupePaths(paths: ReadonlyArray<string | undefined>): string[] {
   return resolved;
 }
 
+function resolveCopilotCliFromPathEnv(input: {
+  platform?: string;
+  pathEnv?: string;
+  pathExtEnv?: string;
+  exists?: (path: string) => boolean;
+}): string | undefined {
+  const platform = input.platform ?? process.platform;
+  const pathEnv = input.pathEnv ?? process.env.PATH;
+  if (!pathEnv) return undefined;
+
+  const exists = input.exists ?? existsSync;
+  const directories = pathEnv.split(platform === "win32" ? ";" : ":").filter(Boolean);
+  const candidateNames =
+    platform === "win32"
+      ? [
+          "copilot.exe",
+          "copilot.cmd",
+          "copilot.bat",
+        ]
+      : ["copilot"];
+
+  for (const directory of directories) {
+    for (const candidateName of candidateNames) {
+      const candidatePath = join(directory, candidateName);
+      if (exists(candidatePath)) {
+        return candidatePath;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function resolveSdkEntrypoint(): string | undefined {
   try {
     return require.resolve("@github/copilot-sdk");
@@ -131,10 +164,24 @@ export function resolveBundledCopilotCliPathFrom(input: {
   const binaryCandidates = nodeModulesRoots.flatMap((root) =>
     platformPackages.map((packageName) => join(root, GITHUB_SCOPE_DIR, packageName, binaryName)),
   );
-  const npmLoaderCandidates = nodeModulesRoots.map((root) =>
-    join(root, GITHUB_SCOPE_DIR, "copilot", COPILOT_NPM_LOADER),
+  for (const candidate of dedupePaths(binaryCandidates)) {
+    if (exists(candidate)) {
+      return candidate;
+    }
+  }
+
+  const pathBinary = resolveCopilotCliFromPathEnv({
+    platform,
+    exists,
+  });
+  if (pathBinary) {
+    return pathBinary;
+  }
+
+  const npmLoaderCandidates = dedupePaths(
+    nodeModulesRoots.map((root) => join(root, GITHUB_SCOPE_DIR, "copilot", COPILOT_NPM_LOADER)),
   );
-  for (const candidate of dedupePaths([...binaryCandidates, ...npmLoaderCandidates])) {
+  for (const candidate of npmLoaderCandidates) {
     if (exists(candidate)) {
       return candidate;
     }
