@@ -72,6 +72,7 @@ export interface ConsoleDataState {
   canSubmitPromptForThread(threadId: string | null): boolean;
   submitPrompt(input: {
     threadId: string;
+    provider?: ProviderKind;
     prompt: string;
     attachments?: ReadonlyArray<UploadChatImageAttachment>;
   }): Promise<void>;
@@ -695,6 +696,7 @@ export function useConsoleData(): ConsoleDataState {
   const submitPrompt = useCallback(
     async (input: {
       threadId: string;
+      provider?: ProviderKind;
       prompt: string;
       attachments?: ReadonlyArray<UploadChatImageAttachment>;
     }) => {
@@ -755,7 +757,7 @@ export function useConsoleData(): ConsoleDataState {
       promptSubmittingRef.current = true;
       setIsPromptSubmitting(true);
       try {
-        const provider = providerFromThread(targetThread);
+        const provider = input.provider ?? providerFromThread(targetThread);
         await backend.dispatchCommand({
           type: "thread.turn.start",
           commandId: makeCommandId(),
