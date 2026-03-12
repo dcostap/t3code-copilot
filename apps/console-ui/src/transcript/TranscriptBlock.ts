@@ -17,6 +17,13 @@ export type LineKind =
   | "workGroupSeparator"
   | "workGroupHeader"
   | "workGroupFooter"
+  | "planSeparator"
+  | "planHeader"
+  | "planExplanation"
+  | "planStepPending"
+  | "planStepInProgress"
+  | "planStepCompleted"
+  | "proposedPlanBody"
   | "promptInput"
   | "promptSeparator"
   | "toolCall"
@@ -30,8 +37,7 @@ export type LineKind =
   | "status"
   | "approvalPrompt"
   | "commandExec"
-  | "commandOutput"
-  | "planText";
+  | "commandOutput";
 
 export interface AnnotatedLine {
   readonly text: string;
@@ -139,8 +145,18 @@ export interface UserInputRequestBlock {
 }
 
 export interface PlanBlock {
-  readonly type: "plan";
-  readonly markdown: string;
+  readonly type: "plan-update";
+  readonly explanation?: string;
+  readonly steps: ReadonlyArray<{
+    readonly step: string;
+    readonly status: "pending" | "inProgress" | "completed";
+  }>;
+}
+
+export interface ProposedPlanBlock {
+  readonly type: "proposed-plan";
+  readonly title?: string;
+  readonly body: string;
 }
 
 export interface DividerBlock {
@@ -163,6 +179,7 @@ export type TranscriptBlock =
   | ApprovalRequestBlock
   | UserInputRequestBlock
   | PlanBlock
+  | ProposedPlanBlock
   | DividerBlock
   | StatusBlock;
 
@@ -274,6 +291,28 @@ function workItemToLines(
 }
 
 const DIVIDER_TEXT = "────────────────────────────────────────────────────────────────────────────────";
+
+function planStepKind(status: "pending" | "inProgress" | "completed"): LineKind {
+  switch (status) {
+    case "completed":
+      return "planStepCompleted";
+    case "inProgress":
+      return "planStepInProgress";
+    default:
+      return "planStepPending";
+  }
+}
+
+function planStepPrefix(status: "pending" | "inProgress" | "completed") {
+  switch (status) {
+    case "completed":
+      return "[x]";
+    case "inProgress":
+      return "[~]";
+    default:
+      return "[ ]";
+  }
+}
 
 export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
   switch (block.type) {
@@ -408,11 +447,25 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
       return lines;
     }
 
-    case "plan":
+    case "plan-update":
       return [
-        { text: "", kind: "meta" },
-        ...wrapLines(block.markdown, "planText"),
-        { text: "", kind: "meta" },
+        { text: "", kind: "planSeparator" },
+        { text: "Plan update", kind: "planHeader" },
+        ...(block.explanation ? wrapLines(block.explanation, "planExplanation") : []),
+        ...(block.explanation && block.steps.length > 0 ? [{ text: "", kind: "meta" as const }] : []),
+        ...block.steps.map((step) => ({
+          text: `${planStepPrefix(step.status)} ${step.step}`,
+          kind: planStepKind(step.status),
+        })),
+        { text: "", kind: "planSeparator" },
+      ];
+
+    case "proposed-plan":
+      return [
+        { text: "", kind: "planSeparator" },
+        { text: block.title ?? "Proposed plan", kind: "planHeader", extraClasses: ["cm-line-proposedPlanHeader"] },
+        ...wrapLines(block.body, "proposedPlanBody"),
+        { text: "", kind: "planSeparator" },
       ];
 
     case "divider":
