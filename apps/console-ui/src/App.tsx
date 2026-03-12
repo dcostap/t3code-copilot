@@ -1,3 +1,4 @@
+import { DEFAULT_MODEL_BY_PROVIDER, type ProviderKind } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CommandPalette } from "./CommandPalette";
@@ -33,6 +34,13 @@ function isDesktopBridgeAvailable() {
     return false;
   }
   return typeof window.desktopBridge !== "undefined";
+}
+
+function resolveProviderFromThread(providerName: string | null | undefined): ProviderKind | null {
+  if (providerName === "codex" || providerName === "copilot") {
+    return providerName;
+  }
+  return null;
 }
 
 export function App() {
@@ -79,6 +87,12 @@ export function App() {
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
   const activePane = workspace.activePane;
   const activePaneId = activePane?.id ?? null;
+  const activeHistory = useMemo(() => {
+    if (!activeSession || !activePane?.historyId) {
+      return null;
+    }
+    return activeSession.histories.find((history) => history.id === activePane.historyId) ?? null;
+  }, [activePane?.historyId, activeSession]);
   const activeThreadId = workspace.activeThreadId ?? consoleData.activeThreadId;
   const activeThread = activeSession
     ? workspace.activeThread
@@ -146,6 +160,17 @@ export function App() {
       ),
     );
   }, [activePendingUserInputs, activeSession, getPendingUserInputs]);
+
+  const resolveModelForProvider = useCallback((preferredProvider: ProviderKind, projectId: string) => {
+    const matchingProviderThread = [...consoleData.threads]
+      .filter((thread) =>
+        thread.projectId === projectId &&
+        resolveProviderFromThread(thread.session?.providerName) === preferredProvider,
+      )
+      .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+
+    return matchingProviderThread?.model ?? DEFAULT_MODEL_BY_PROVIDER[preferredProvider];
+  }, [consoleData.threads]);
 
   useEffect(() => {
     if (!workspace.activeThreadId || consoleData.activeThreadId === workspace.activeThreadId) {
@@ -245,6 +270,7 @@ export function App() {
     async (
       paneId: string,
       threadId: string | null,
+      preferredProvider: ProviderKind | null,
       pendingUserInput: typeof activePendingUserInput,
       activeQuestion: typeof activePendingQuestion,
       activeQuestionIndex: number,
@@ -305,6 +331,7 @@ export function App() {
         }
         await submitPrompt({
           threadId,
+          ...(preferredProvider ? { provider: preferredProvider } : {}),
           prompt: value,
           attachments: await Promise.all(attachmentSnapshot.map(toUploadImageAttachment)),
         });
@@ -346,7 +373,7 @@ export function App() {
     }
     return [{ type: "status" as const, text: "Waiting for orchestration snapshot..." }];
   }, [activeSession, activeThread, attachmentPreviewBaseUrl, consoleData.error, getThreadEvents, nowIso]);
-  const handleCreateSession = useCallback(async () => {
+  const handleCreateSession = useCallback(async (preferredProvider: ProviderKind) => {
     const sessionCwd =
       activeSession?.cwd ?? activeThread?.worktreePath ?? activeProject?.workspaceRoot ?? null;
     const projectId = activeSession?.projectId ?? activeProject?.id ?? null;
@@ -363,7 +390,7 @@ export function App() {
       const result = await createThread({
         projectId,
         title: "New thread",
-        ...(activeThread?.model ? { model: activeThread.model } : {}),
+        model: resolveModelForProvider(preferredProvider, projectId),
         interactionMode: activeThread?.interactionMode ?? "default",
         branch: activeThread?.branch ?? null,
         worktreePath: sessionWorktreePath,
@@ -371,6 +398,7 @@ export function App() {
       });
       createSessionFromHistory({
         threadId: result.threadId,
+        preferredProvider,
         cwd: sessionCwd,
         projectId,
         createdAt,
@@ -380,8 +408,8 @@ export function App() {
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "Failed to create a new session.");
     }
-  }, [activeProject, activeSession, activeThread, createSessionFromHistory, createThread]);
-  const handleSplitActivePane = useCallback(async () => {
+  }, [activeProject, activeSession, activeThread, createSessionFromHistory, createThread, resolveModelForProvider]);
+  const handleSplitActivePane = useCallback(async (preferredProvider: ProviderKind) => {
     if (!activeSession) {
       setSubmitError("No active session is available to split.");
       return;
@@ -402,7 +430,7 @@ export function App() {
       const result = await createThread({
         projectId,
         title: "New thread",
-        ...(activeThread?.model ? { model: activeThread.model } : {}),
+        model: resolveModelForProvider(preferredProvider, projectId),
         interactionMode: activeThread?.interactionMode ?? "default",
         branch: activeThread?.branch ?? null,
         worktreePath: sessionWorktreePath,
@@ -410,6 +438,7 @@ export function App() {
       });
       workspace.splitActivePane({
         threadId: result.threadId,
+        preferredProvider,
         cwd: sessionCwd,
         projectId,
         createdAt,
@@ -419,7 +448,7 @@ export function App() {
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "Failed to split the active pane.");
     }
-  }, [activeProject, activeSession, activeThread, createThread, workspace]);
+  }, [activeProject, activeSession, activeThread, createThread, resolveModelForProvider, workspace]);
   const paneViews = useMemo(() => {
     if (!activeSession) {
       return [];
@@ -504,23 +533,41 @@ export function App() {
     }
 
     if (canDispatchBackendCommands && (currentSession || activeProject)) {
-      commands.push({
-        id: "session:new",
-        label: "New Session",
-        description: "Create a new session tab with a fresh thread in the current workspace.",
-        keywords: ["session", "new", "tab", "workspace"],
-        run: () => handleCreateSession(),
-      });
+      commands.push(
+        {
+          id: "session:new:codex",
+          label: "New Session: Codex",
+          description: "Create a new session tab with a fresh Codex thread in the current workspace.",
+          keywords: ["session", "new", "tab", "workspace", "codex"],
+          run: () => handleCreateSession("codex"),
+        },
+        {
+          id: "session:new:copilot",
+          label: "New Session: Copilot",
+          description: "Create a new session tab with a fresh Copilot thread in the current workspace.",
+          keywords: ["session", "new", "tab", "workspace", "copilot"],
+          run: () => handleCreateSession("copilot"),
+        },
+      );
     }
 
     if (canDispatchBackendCommands && currentSession && currentSession.panes.length < 2) {
-      commands.push({
-        id: `session:${currentSession.id}:split`,
-        label: "Split Active Pane",
-        description: "Create a second pane in the current session with a fresh thread.",
-        keywords: ["split", "pane", "parallel", "session"],
-        run: () => handleSplitActivePane(),
-      });
+      commands.push(
+        {
+          id: `session:${currentSession.id}:split:codex`,
+          label: "Split Active Pane: Codex",
+          description: "Create a second pane in the current session with a fresh Codex thread.",
+          keywords: ["split", "pane", "parallel", "session", "codex"],
+          run: () => handleSplitActivePane("codex"),
+        },
+        {
+          id: `session:${currentSession.id}:split:copilot`,
+          label: "Split Active Pane: Copilot",
+          description: "Create a second pane in the current session with a fresh Copilot thread.",
+          keywords: ["split", "pane", "parallel", "session", "copilot"],
+          run: () => handleSplitActivePane("copilot"),
+        },
+      );
     }
 
     if (currentSession && currentSession.panes.length > 1) {
@@ -848,7 +895,7 @@ export function App() {
           <button
             type="button"
             className="session-tab session-tab--create"
-            onClick={() => void handleCreateSession()}
+            onClick={() => void handleCreateSession("codex")}
             disabled={!activeProject}
             title={activeProject ? "New session" : "No workspace available"}
           >
@@ -871,7 +918,10 @@ export function App() {
                   <div className="conversation-pane__header">
                     <span className="conversation-pane__label">Pane {paneView.index + 1}</span>
                     <span className="conversation-pane__meta">
-                      {paneView.thread?.title ?? (paneView.history?.pending ? "Loading thread..." : "History unavailable")}
+                      {paneView.thread?.title ??
+                        `${paneView.history?.preferredProvider === "copilot" ? "Copilot" : "Codex"} · ${
+                          paneView.history?.pending ? "Loading thread..." : "History unavailable"
+                        }`}
                     </span>
                   </div>
                   <div className="transcript-shell">
@@ -900,6 +950,7 @@ export function App() {
                         handleSubmit(
                           paneView.pane.id,
                           paneView.threadId,
+                          paneView.history?.preferredProvider ?? null,
                           paneView.pendingUserInput,
                           paneView.pendingQuestion,
                           paneView.pendingQuestionIndex,
@@ -939,6 +990,7 @@ export function App() {
                   handleSubmit(
                     activePaneId ?? "bootstrap",
                     activeThreadId,
+                    activeHistory?.preferredProvider ?? null,
                     activePendingUserInput,
                     activePendingQuestion,
                     activePendingQuestionIndex,

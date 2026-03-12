@@ -27,6 +27,7 @@ function makeThread(input: {
   createdAt: string;
   projectId?: OrchestrationProject["id"];
   worktreePath?: string | null;
+  providerName?: "codex" | "copilot" | null;
 }): OrchestrationThread {
   return {
     id: input.id as OrchestrationThread["id"],
@@ -45,7 +46,17 @@ function makeThread(input: {
     proposedPlans: [],
     activities: [],
     checkpoints: [],
-    session: null,
+    session: input.providerName
+      ? {
+          threadId: input.id as OrchestrationThread["id"],
+          status: "ready",
+          providerName: input.providerName,
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: input.createdAt,
+        }
+      : null,
   };
 }
 
@@ -80,6 +91,24 @@ describe("reconcileWorkspaceState", () => {
     expect(state.sessions[0]?.cwd).toBe(project.workspaceRoot);
     expect(state.sessions[0]?.projectId).toBe(project.id);
     expect(state.sessions[0]?.histories.map((history) => history.threadId)).toEqual([thread.id]);
+    expect(state.sessions[0]?.histories[0]?.preferredProvider).toBe("codex");
+  });
+
+  it("preserves the live provider when seeding a first session", () => {
+    const thread = makeThread({
+      id: "thread:copilot",
+      createdAt: "2026-03-12T10:00:00.000Z",
+      providerName: "copilot",
+    });
+
+    const state = reconcileWorkspaceState({
+      state: { sessions: [], activeSessionId: null },
+      threads: [thread],
+      projects: [project],
+      preferredThreadId: thread.id,
+    });
+
+    expect(state.sessions[0]?.histories[0]?.preferredProvider).toBe("copilot");
   });
 
   it("does not merge unrelated same-cwd threads into an existing session", () => {
@@ -94,6 +123,7 @@ describe("reconcileWorkspaceState", () => {
     const seededSession = createSessionFromHistoryRef(
       {
         threadId: firstThread.id,
+        preferredProvider: "codex",
         cwd: project.workspaceRoot,
         projectId: project.id,
         createdAt: firstThread.createdAt,
@@ -116,6 +146,7 @@ describe("reconcileWorkspaceState", () => {
     const staleSession = createSessionFromHistoryRef(
       {
         threadId: "thread:missing" as OrchestrationThread["id"],
+        preferredProvider: "codex",
         cwd: project.workspaceRoot,
         projectId: project.id,
         createdAt: "2026-03-12T10:00:00.000Z",
@@ -144,6 +175,7 @@ describe("reconcileWorkspaceState", () => {
     const pendingSession = createSessionFromHistoryRef(
       {
         threadId: "thread:pending" as OrchestrationThread["id"],
+        preferredProvider: "codex",
         cwd: project.workspaceRoot,
         projectId: project.id,
         createdAt: new Date().toISOString(),
@@ -175,6 +207,7 @@ describe("reconcileWorkspaceState", () => {
     const firstSession = createSessionFromHistoryRef(
       {
         threadId: firstThread.id,
+        preferredProvider: "codex",
         cwd: project.workspaceRoot,
         projectId: project.id,
         createdAt: firstThread.createdAt,
@@ -184,6 +217,7 @@ describe("reconcileWorkspaceState", () => {
     const secondSession = createSessionFromHistoryRef(
       {
         threadId: secondThread.id,
+        preferredProvider: "copilot",
         cwd: project.workspaceRoot,
         projectId: project.id,
         createdAt: secondThread.createdAt,
@@ -212,6 +246,7 @@ describe("reconcileWorkspaceState", () => {
     const seededSession = createSessionFromHistoryRef(
       {
         threadId: thread.id,
+        preferredProvider: "codex",
         cwd: project.workspaceRoot,
         projectId: project.id,
         createdAt: thread.createdAt,
@@ -241,6 +276,7 @@ describe("session pane operations", () => {
     const session = createSessionFromHistoryRef(
       {
         threadId: thread.id,
+        preferredProvider: "codex",
         cwd: project.workspaceRoot,
         projectId: project.id,
         createdAt: thread.createdAt,
@@ -250,6 +286,7 @@ describe("session pane operations", () => {
 
     const split = splitSessionWithHistoryRef(session, {
       threadId: "thread:2" as OrchestrationThread["id"],
+      preferredProvider: "copilot",
       cwd: project.workspaceRoot,
       createdAt: "2026-03-12T10:05:00.000Z",
       pending: true,
@@ -261,6 +298,7 @@ describe("session pane operations", () => {
       thread.id,
       "thread:2",
     ]);
+    expect(split.histories[1]?.preferredProvider).toBe("copilot");
   });
 
   it("activates a different pane without mutating histories", () => {
@@ -272,6 +310,7 @@ describe("session pane operations", () => {
       createSessionFromHistoryRef(
         {
           threadId: thread.id,
+          preferredProvider: "codex",
           cwd: project.workspaceRoot,
           projectId: project.id,
           createdAt: thread.createdAt,
@@ -280,6 +319,7 @@ describe("session pane operations", () => {
       ),
       {
         threadId: "thread:2" as OrchestrationThread["id"],
+        preferredProvider: "codex",
         cwd: project.workspaceRoot,
         createdAt: "2026-03-12T10:05:00.000Z",
       },
@@ -300,6 +340,7 @@ describe("session pane operations", () => {
       createSessionFromHistoryRef(
         {
           threadId: thread.id,
+          preferredProvider: "codex",
           cwd: project.workspaceRoot,
           projectId: project.id,
           createdAt: thread.createdAt,
@@ -308,6 +349,7 @@ describe("session pane operations", () => {
       ),
       {
         threadId: "thread:2" as OrchestrationThread["id"],
+        preferredProvider: "copilot",
         cwd: project.workspaceRoot,
         createdAt: "2026-03-12T10:05:00.000Z",
       },

@@ -1,4 +1,4 @@
-import type { OrchestrationProject, OrchestrationThread } from "@t3tools/contracts";
+import type { OrchestrationProject, OrchestrationThread, ProviderKind } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 const STORAGE_KEY = "t3code:console-workspace-sessions:v2";
@@ -7,6 +7,7 @@ const PENDING_HISTORY_MAX_AGE_MS = 60_000;
 export interface ConsoleHistoryRef {
   readonly id: string;
   readonly threadId: OrchestrationThread["id"];
+  readonly preferredProvider: ProviderKind;
   readonly cwd: string;
   readonly createdAt: string;
   readonly archivedAt: string | null;
@@ -46,6 +47,7 @@ export interface ConsoleWorkspaceModel {
   activatePane(paneId: string): void;
   splitActivePane(input: {
     threadId: OrchestrationThread["id"];
+    preferredProvider: ProviderKind;
     cwd: string;
     projectId: OrchestrationProject["id"];
     createdAt: string;
@@ -54,6 +56,7 @@ export interface ConsoleWorkspaceModel {
   closePane(paneId: string): void;
   createSessionFromHistory(input: {
     threadId: OrchestrationThread["id"];
+    preferredProvider: ProviderKind;
     cwd: string;
     projectId: OrchestrationProject["id"];
     createdAt: string;
@@ -130,8 +133,14 @@ function findThreadById(
   return threads.find((thread) => thread.id === threadId) ?? null;
 }
 
+function preferredProviderFromThread(thread: OrchestrationThread | null): ProviderKind {
+  const providerName = thread?.session?.providerName;
+  return providerName === "copilot" ? "copilot" : "codex";
+}
+
 function createHistoryRef(input: {
   threadId: OrchestrationThread["id"];
+  preferredProvider: ProviderKind;
   cwd: string;
   createdAt: string;
   pending?: boolean;
@@ -139,6 +148,7 @@ function createHistoryRef(input: {
   return {
     id: makeId("history"),
     threadId: input.threadId,
+    preferredProvider: input.preferredProvider,
     cwd: input.cwd,
     createdAt: input.createdAt,
     archivedAt: null,
@@ -149,6 +159,7 @@ function createHistoryRef(input: {
 export function createSessionFromHistoryRef(
   input: {
     threadId: OrchestrationThread["id"];
+    preferredProvider: ProviderKind;
     cwd: string;
     projectId: OrchestrationProject["id"];
     createdAt: string;
@@ -208,6 +219,7 @@ export function splitSessionWithHistoryRef(
   session: ConsoleWorkspaceSession,
   historyInput: {
     threadId: OrchestrationThread["id"];
+    preferredProvider: ProviderKind;
     cwd: string;
     createdAt: string;
     pending?: boolean;
@@ -295,7 +307,17 @@ function reconcilePersistedSessionShape(
     return null;
   }
 
-  const histories = session.histories;
+  const histories = session.histories.map<ConsoleHistoryRef>((history) => {
+    if (history.preferredProvider === "codex" || history.preferredProvider === "copilot") {
+      return history;
+    }
+
+    const preferredProvider = preferredProviderFromThread(threadsById.get(history.threadId) ?? null);
+    return {
+      ...history,
+      preferredProvider,
+    };
+  });
   const availableHistoryIds = new Set(
     histories
       .filter((history) => isHistoryAvailable(history, threadsById))
@@ -359,15 +381,32 @@ function reconcileSessionWithThreads(
   }
 
   const nowMs = Date.now();
-  const histories = normalizedSession.histories.map((history) => {
+  const histories = normalizedSession.histories.map<ConsoleHistoryRef>((history) => {
     const thread = threadsById.get(history.threadId);
     if (!history.pending) {
+      const providerName = thread?.session?.providerName;
+      if (
+        thread &&
+        (providerName === "codex" || providerName === "copilot") &&
+        history.preferredProvider !== providerName
+      ) {
+        return { ...history, preferredProvider: providerName };
+      }
       return history;
     }
     if (!thread && isPendingHistoryStillFresh(history, nowMs)) {
       return history;
     }
-    return history.pending ? { ...history, pending: false } : history;
+    const providerName = thread?.session?.providerName;
+    const preferredProvider =
+      providerName === "codex" || providerName === "copilot"
+        ? providerName
+        : history.preferredProvider;
+    return {
+      ...history,
+      pending: false,
+      preferredProvider,
+    };
   });
   const historiesChanged = histories.some((history, index) => history !== normalizedSession.histories[index]);
   if (!historiesChanged) {
@@ -406,6 +445,7 @@ export function reconcileWorkspaceState(input: {
       const seeded = createSessionFromHistoryRef(
         {
           threadId: preferredThread.id,
+          preferredProvider: preferredProviderFromThread(preferredThread),
           cwd,
           projectId: preferredThread.projectId,
           createdAt: preferredThread.createdAt,
@@ -534,6 +574,7 @@ export function useConsoleWorkspaceSessions(input: {
 
   const splitActivePane = useCallback((history: {
     threadId: OrchestrationThread["id"];
+    preferredProvider: ProviderKind;
     cwd: string;
     projectId: OrchestrationProject["id"];
     createdAt: string;
@@ -564,6 +605,7 @@ export function useConsoleWorkspaceSessions(input: {
 
   const createSessionFromHistory = useCallback((history: {
     threadId: OrchestrationThread["id"];
+    preferredProvider: ProviderKind;
     cwd: string;
     projectId: OrchestrationProject["id"];
     createdAt: string;
