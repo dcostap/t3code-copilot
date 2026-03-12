@@ -287,6 +287,22 @@ function stripDisplayedPlanMarkdown(planMarkdown: string): string {
   return sourceLines.join("\n");
 }
 
+function checkpointToBlock(
+  checkpoint: OrchestrationThread["checkpoints"][number],
+): TranscriptBlock {
+  return {
+    type: "checkpoint-summary",
+    status: checkpoint.status,
+    checkpointTurnCount: checkpoint.checkpointTurnCount,
+    files: checkpoint.files.map((file) => ({
+      path: file.path,
+      kind: file.kind,
+      additions: file.additions,
+      deletions: file.deletions,
+    })),
+  };
+}
+
 function userInputBlock(payload: Record<string, unknown> | null): UserInputRequestBlock | null {
   const requestId = asString(payload?.requestId);
   const questions = Array.isArray(payload?.questions) ? payload.questions : [];
@@ -794,19 +810,17 @@ export function threadToTranscriptBlocks(
       if (assistantEntries) {
         entries.push(...assistantEntries);
       } else if (checkpoint) {
-        blocks.push(
-          ...checkpoint.files.map((file) => ({
-            type: "file-diff" as const,
-            path: file.path,
-            additions: file.additions,
-            deletions: file.deletions,
-          })),
-        );
         entries.push({
           id: `message:${message.id}`,
           createdAt: message.createdAt,
           source: "message",
           blocks,
+        });
+        entries.push({
+          id: `checkpoint:${checkpoint.turnId}:${message.id}`,
+          createdAt: checkpoint.completedAt,
+          source: "message",
+          blocks: [checkpointToBlock(checkpoint)],
         });
         continue;
       } else {
@@ -820,17 +834,12 @@ export function threadToTranscriptBlocks(
       }
 
       if (checkpoint) {
-        const checkpointEntries = checkpoint.files.map((file, index) => ({
-          id: `checkpoint:${checkpoint.turnId}:${message.id}:${index}`,
+        const checkpointEntries = [{
+          id: `checkpoint:${checkpoint.turnId}:${message.id}`,
           createdAt: checkpoint.completedAt,
           source: "message" as const,
-          blocks: [{
-            type: "file-diff" as const,
-            path: file.path,
-            additions: file.additions,
-            deletions: file.deletions,
-          }],
-        }));
+          blocks: [checkpointToBlock(checkpoint)],
+        }];
         entries.push(...checkpointEntries);
       }
       continue;

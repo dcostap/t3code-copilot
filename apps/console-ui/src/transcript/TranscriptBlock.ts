@@ -24,6 +24,10 @@ export type LineKind =
   | "planStepInProgress"
   | "planStepCompleted"
   | "proposedPlanBody"
+  | "checkpointSeparator"
+  | "checkpointHeader"
+  | "checkpointSummary"
+  | "checkpointFile"
   | "promptInput"
   | "promptSeparator"
   | "toolCall"
@@ -159,6 +163,18 @@ export interface ProposedPlanBlock {
   readonly body: string;
 }
 
+export interface CheckpointSummaryBlock {
+  readonly type: "checkpoint-summary";
+  readonly status: "ready" | "missing" | "error";
+  readonly checkpointTurnCount: number;
+  readonly files: ReadonlyArray<{
+    readonly path: string;
+    readonly kind: string;
+    readonly additions: number;
+    readonly deletions: number;
+  }>;
+}
+
 export interface DividerBlock {
   readonly type: "divider";
 }
@@ -180,6 +196,7 @@ export type TranscriptBlock =
   | UserInputRequestBlock
   | PlanBlock
   | ProposedPlanBlock
+  | CheckpointSummaryBlock
   | DividerBlock
   | StatusBlock;
 
@@ -312,6 +329,22 @@ function planStepPrefix(status: "pending" | "inProgress" | "completed") {
     default:
       return "[ ]";
   }
+}
+
+function formatSignedCount(value: number) {
+  return `${value >= 0 ? "+" : ""}${value}`;
+}
+
+function summarizeCheckpointFiles(
+  files: ReadonlyArray<CheckpointSummaryBlock["files"][number]>,
+) {
+  return files.reduce(
+    (summary, file) => ({
+      additions: summary.additions + file.additions,
+      deletions: summary.deletions + file.deletions,
+    }),
+    { additions: 0, deletions: 0 },
+  );
 }
 
 export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
@@ -467,6 +500,38 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
         ...wrapLines(block.body, "proposedPlanBody"),
         { text: "", kind: "planSeparator" },
       ];
+
+    case "checkpoint-summary": {
+      const totals = summarizeCheckpointFiles(block.files);
+      const fileCountLabel = `${block.files.length} file${block.files.length === 1 ? "" : "s"} changed`;
+      const statusLabel =
+        block.status === "ready"
+          ? "Checkpoint captured"
+          : block.status === "missing"
+            ? "Checkpoint unavailable"
+            : "Checkpoint error";
+      const summaryText =
+        block.status === "ready"
+          ? `${fileCountLabel} (${formatSignedCount(totals.additions)} ${formatSignedCount(-totals.deletions)})`
+          : fileCountLabel;
+
+      return [
+        { text: "", kind: "checkpointSeparator" },
+        {
+          text: `${statusLabel} · #${block.checkpointTurnCount}`,
+          kind: "checkpointHeader",
+        },
+        {
+          text: summaryText,
+          kind: "checkpointSummary",
+        },
+        ...block.files.map((file) => ({
+          text: `  ${file.path}  (${formatSignedCount(file.additions)} ${formatSignedCount(-file.deletions)})`,
+          kind: "checkpointFile" as const,
+        })),
+        { text: "", kind: "checkpointSeparator" },
+      ];
+    }
 
     case "divider":
       return [
