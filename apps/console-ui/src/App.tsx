@@ -49,22 +49,28 @@ export function App() {
   const stopSession = consoleData.stopSession;
   const createSessionFromHistory = workspace.createSessionFromHistory;
   const activateSession = workspace.activateSession;
+  const activatePane = workspace.activatePane;
+  const closePane = workspace.closePane;
   const [nowIso, setNowIso] = useState(() => new Date().toISOString());
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
-  const [composerAttachments, setComposerAttachments] = useState<ComposerImageAttachment[]>([]);
-  const [composerDraft, setComposerDraft] = useState("");
+  const [composerAttachmentsByPaneId, setComposerAttachmentsByPaneId] = useState<
+    Record<string, ReadonlyArray<ComposerImageAttachment>>
+  >({});
+  const [composerDraftByPaneId, setComposerDraftByPaneId] = useState<Record<string, string>>({});
   const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<
     Record<string, Record<string, string>>
   >({});
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] = useState<
     Record<string, number>
   >({});
-  const transcriptRef = useRef<TranscriptRendererHandle | null>(null);
-  const composerAttachmentsRef = useRef(composerAttachments);
-  composerAttachmentsRef.current = composerAttachments;
+  const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
+  const composerAttachmentsRef = useRef(composerAttachmentsByPaneId);
+  composerAttachmentsRef.current = composerAttachmentsByPaneId;
+  const activePane = workspace.activePane;
+  const activePaneId = activePane?.id ?? null;
   const activeThreadId = workspace.activeThreadId ?? consoleData.activeThreadId;
   const activeThread = activeSession
     ? workspace.activeThread
@@ -74,6 +80,8 @@ export function App() {
   const activeProject = activeSession
     ? workspace.activeProject
     : (activeThreadId ? getProjectForThread(activeThreadId) : consoleData.project);
+  const composerDraft = activePaneId ? (composerDraftByPaneId[activePaneId] ?? "") : "";
+  const composerAttachments = activePaneId ? [...(composerAttachmentsByPaneId[activePaneId] ?? [])] : [];
   const activePendingUserInputs = useMemo(
     () => (activeThreadId ? getPendingUserInputs(activeThreadId) : []),
     [activeThreadId, getPendingUserInputs],
@@ -111,7 +119,14 @@ export function App() {
   }, [activeThreadTurnRunning]);
 
   useEffect(() => {
-    const openRequestIds = new Set(activePendingUserInputs.map((entry) => entry.requestId));
+    const openRequestIds = new Set(
+      (activeSession
+        ? activeSession.panes.flatMap((pane) => {
+            const history = activeSession.histories.find((candidate) => candidate.id === pane.historyId);
+            return history ? getPendingUserInputs(history.threadId) : [];
+          })
+        : activePendingUserInputs).map((entry) => entry.requestId),
+    );
     setPendingUserInputAnswersByRequestId((existing) =>
       Object.fromEntries(
         Object.entries(existing).filter(([requestId]) => openRequestIds.has(requestId)),
@@ -122,7 +137,7 @@ export function App() {
         Object.entries(existing).filter(([requestId]) => openRequestIds.has(requestId)),
       ),
     );
-  }, [activePendingUserInputs]);
+  }, [activePendingUserInputs, activeSession, getPendingUserInputs]);
 
   useEffect(() => {
     if (!workspace.activeThreadId || consoleData.activeThreadId === workspace.activeThreadId) {
@@ -131,85 +146,176 @@ export function App() {
     consoleData.setActiveThreadId(workspace.activeThreadId);
   }, [consoleData, workspace.activeThreadId]);
 
+  const focusActivePanePrompt = useCallback(() => {
+    if (!activePaneId) {
+      return;
+    }
+    paneRefs.current[activePaneId]?.focusPrompt();
+  }, [activePaneId]);
+
+  const activatePaneAndFocus = useCallback((paneId: string) => {
+    activatePane(paneId);
+    requestAnimationFrame(() => {
+      paneRefs.current[paneId]?.focusPrompt();
+    });
+  }, [activatePane]);
+
+  const setComposerDraftForPane = useCallback((paneId: string, value: string) => {
+    setComposerDraftByPaneId((existing) =>
+      existing[paneId] === value ? existing : { ...existing, [paneId]: value },
+    );
+  }, []);
+
+  const handleAddImageFilesForPane = useCallback(
+    (paneId: string, files: ReadonlyArray<File>) => {
+      if (files.length === 0) {
+        return;
+      }
+
+      const existingAttachments = [...(composerAttachmentsByPaneId[paneId] ?? [])];
+      const accepted: ComposerImageAttachment[] = [];
+      let nextCount = existingAttachments.length;
+      const dedupKeys = new Set(
+        existingAttachments.map((attachment) => composerImageDedupKey(attachment)),
+      );
+      let nextError: string | null = null;
+
+      for (const file of files) {
+        if (!file.type.startsWith("image/")) {
+          nextError = `Unsupported file type for '${file.name}'. Attach image files only.`;
+          continue;
+        }
+        if (file.size === 0 || file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
+          nextError = `'${file.name}' exceeds the ${IMAGE_ATTACHMENT_SIZE_LIMIT_LABEL} attachment limit.`;
+          continue;
+        }
+        if (nextCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+          nextError = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`;
+          break;
+        }
+
+        const attachment = createComposerImageAttachment(file);
+        const dedupKey = composerImageDedupKey(attachment);
+        if (dedupKeys.has(dedupKey)) {
+          revokeComposerImageAttachmentPreview(attachment);
+          continue;
+        }
+
+        accepted.push(attachment);
+        dedupKeys.add(dedupKey);
+        nextCount += 1;
+      }
+
+      if (accepted.length > 0) {
+        setComposerAttachmentsByPaneId((existing) => ({
+          ...existing,
+          [paneId]: [...(existing[paneId] ?? []), ...accepted],
+        }));
+      }
+      if (nextError || accepted.length > 0) {
+        setSubmitError(nextError);
+      }
+    },
+    [composerAttachmentsByPaneId],
+  );
+
+  const handleRemoveImageForPane = useCallback((paneId: string, attachmentId: string) => {
+    setComposerAttachmentsByPaneId((existing) => {
+      const current = existing[paneId] ?? [];
+      const removed = current.find((attachment) => attachment.id === attachmentId);
+      if (removed) {
+        revokeComposerImageAttachmentPreview(removed);
+      }
+      return {
+        ...existing,
+        [paneId]: current.filter((attachment) => attachment.id !== attachmentId),
+      };
+    });
+  }, []);
+
   const handleSubmit = useCallback(
-    async (value: string) => {
-      const attachmentSnapshot = [...composerAttachments];
+    async (
+      paneId: string,
+      threadId: string | null,
+      pendingUserInput: typeof activePendingUserInput,
+      activeQuestion: typeof activePendingQuestion,
+      activeQuestionIndex: number,
+      draftAnswers: Record<string, string>,
+      value: string,
+    ) => {
+      const attachmentSnapshot = [...(composerAttachmentsByPaneId[paneId] ?? [])];
       try {
-        if (activePendingUserInput) {
+        if (pendingUserInput) {
           if (attachmentSnapshot.length > 0) {
             throw new Error("Image attachments are not supported while a user-input request is pending.");
           }
-          if (!activePendingQuestion) {
+          if (!activeQuestion) {
             throw new Error("Pending user input is missing an active question.");
           }
 
-          const answer = resolvePendingUserInputAnswer(value, activePendingQuestion);
+          const answer = resolvePendingUserInputAnswer(value, activeQuestion);
           if (!answer) {
             throw new Error("Type an answer or enter an option number for the active user-input question.");
           }
 
           const nextAnswers = {
-            ...activePendingDraftAnswers,
-            [activePendingQuestion.id]: answer,
+            ...draftAnswers,
+            [activeQuestion.id]: answer,
           };
 
-          if (activePendingQuestionIndex < activePendingUserInput.questions.length - 1) {
+          if (activeQuestionIndex < pendingUserInput.questions.length - 1) {
             setPendingUserInputAnswersByRequestId((existing) => ({
               ...existing,
-              [activePendingUserInput.requestId]: nextAnswers,
+              [pendingUserInput.requestId]: nextAnswers,
             }));
             setPendingUserInputQuestionIndexByRequestId((existing) => ({
               ...existing,
-              [activePendingUserInput.requestId]: activePendingQuestionIndex + 1,
+              [pendingUserInput.requestId]: activeQuestionIndex + 1,
             }));
             setSubmitError(null);
             return;
           }
 
-          if (!activeThreadId) {
+          if (!threadId) {
             throw new Error("No orchestration thread is available.");
           }
-          await respondToUserInput(activeThreadId, activePendingUserInput.requestId, nextAnswers);
+          await respondToUserInput(threadId, pendingUserInput.requestId, nextAnswers);
           setPendingUserInputAnswersByRequestId((existing) => ({
             ...existing,
-            [activePendingUserInput.requestId]: nextAnswers,
+            [pendingUserInput.requestId]: nextAnswers,
           }));
           setPendingUserInputQuestionIndexByRequestId((existing) => ({
             ...existing,
-            [activePendingUserInput.requestId]: activePendingQuestionIndex,
+            [pendingUserInput.requestId]: activeQuestionIndex,
           }));
           setSubmitError(null);
           return;
         }
 
-        if (!activeThreadId) {
+        if (!threadId) {
           throw new Error("No orchestration thread is available.");
         }
         await submitPrompt({
-          threadId: activeThreadId,
+          threadId,
           prompt: value,
           attachments: await Promise.all(attachmentSnapshot.map(toUploadImageAttachment)),
         });
         for (const attachment of attachmentSnapshot) {
           revokeComposerImageAttachmentPreview(attachment);
         }
-        setComposerAttachments((existing) =>
-          existing.filter(
+        setComposerAttachmentsByPaneId((existing) => ({
+          ...existing,
+          [paneId]: (existing[paneId] ?? []).filter(
             (attachment) => !attachmentSnapshot.some((candidate) => candidate.id === attachment.id),
           ),
-        );
+        }));
         setSubmitError(null);
       } catch (error) {
         setSubmitError(error instanceof Error ? error.message : "Failed to submit prompt.");
       }
     },
     [
-      activePendingDraftAnswers,
-      activePendingQuestion,
-      activePendingQuestionIndex,
-      activePendingUserInput,
-      activeThreadId,
-      composerAttachments,
+      composerAttachmentsByPaneId,
       respondToUserInput,
       submitPrompt,
     ],
@@ -267,6 +373,108 @@ export function App() {
       setSubmitError(error instanceof Error ? error.message : "Failed to create a new session.");
     }
   }, [activeProject, activeSession, activeThread, createSessionFromHistory, createThread]);
+  const handleSplitActivePane = useCallback(async () => {
+    if (!activeSession) {
+      setSubmitError("No active session is available to split.");
+      return;
+    }
+    if (activeSession.panes.length >= 2) {
+      setSubmitError("This session is already split.");
+      return;
+    }
+
+    const sessionCwd = activeSession.cwd;
+    const projectId = activeSession.projectId;
+    const sessionWorktreePath =
+      activeThread?.worktreePath ??
+      (activeProject && sessionCwd !== activeProject.workspaceRoot ? sessionCwd : null);
+
+    try {
+      const createdAt = new Date().toISOString();
+      const result = await createThread({
+        projectId,
+        title: "New thread",
+        ...(activeThread?.model ? { model: activeThread.model } : {}),
+        interactionMode: activeThread?.interactionMode ?? "default",
+        branch: activeThread?.branch ?? null,
+        worktreePath: sessionWorktreePath,
+        createdAt,
+      });
+      workspace.splitActivePane({
+        threadId: result.threadId,
+        cwd: sessionCwd,
+        projectId,
+        createdAt,
+        pending: true,
+      });
+      setSubmitError(null);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Failed to split the active pane.");
+    }
+  }, [activeProject, activeSession, activeThread, createThread, workspace]);
+  const paneViews = useMemo(() => {
+    if (!activeSession) {
+      return [];
+    }
+
+    return activeSession.panes.map((pane, index) => {
+      const history = activeSession.histories.find((candidate) => candidate.id === pane.historyId) ?? null;
+      const threadId = history?.threadId ?? null;
+      const thread =
+        threadId ? (consoleData.threads.find((candidate) => candidate.id === threadId) ?? null) : null;
+      const pendingUserInputs = threadId ? getPendingUserInputs(threadId) : [];
+      const pendingUserInput = pendingUserInputs[0] ?? null;
+      const pendingQuestionIndex = pendingUserInput
+        ? (pendingUserInputQuestionIndexByRequestId[pendingUserInput.requestId] ?? 0)
+        : 0;
+      const pendingQuestion = pendingUserInput?.questions[pendingQuestionIndex] ?? null;
+      const draft = composerDraftByPaneId[pane.id] ?? "";
+      const pendingShortcut = pendingQuestion
+        ? resolvePendingUserInputShortcut(draft, pendingQuestion.options)
+        : null;
+      const blocks = thread
+        ? threadToTranscriptBlocks(thread, {
+            resolveAttachmentPreviewUrl: (attachmentId) =>
+              `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
+            orchestrationEvents: getThreadEvents(thread.id),
+            now: nowIso,
+          })
+        : [{
+            type: "status" as const,
+            text: history?.pending ? "Loading session history..." : "History unavailable in this session.",
+          }];
+
+      return {
+        pane,
+        history,
+        threadId,
+        thread,
+        isActive: pane.id === activeSession.activePaneId,
+        index,
+        blocks,
+        draft,
+        attachments: [...(composerAttachmentsByPaneId[pane.id] ?? [])],
+        pendingUserInput,
+        pendingQuestionIndex,
+        pendingQuestion,
+        draftAnswers: pendingUserInput
+          ? (pendingUserInputAnswersByRequestId[pendingUserInput.requestId] ?? {})
+          : {},
+        pendingShortcut,
+      };
+    });
+  }, [
+    activeSession,
+    attachmentPreviewBaseUrl,
+    composerAttachmentsByPaneId,
+    composerDraftByPaneId,
+    consoleData.threads,
+    getPendingUserInputs,
+    getThreadEvents,
+    nowIso,
+    pendingUserInputAnswersByRequestId,
+    pendingUserInputQuestionIndexByRequestId,
+  ]);
   const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
     const commands: AppPaletteCommand[] = [];
     const currentSession = activeSession;
@@ -296,6 +504,44 @@ export function App() {
         run: () => handleCreateSession(),
       });
     }
+
+    if (canDispatchBackendCommands && currentSession && currentSession.panes.length < 2) {
+      commands.push({
+        id: `session:${currentSession.id}:split`,
+        label: "Split Active Pane",
+        description: "Create a second pane in the current session with a fresh thread.",
+        keywords: ["split", "pane", "parallel", "session"],
+        run: () => handleSplitActivePane(),
+      });
+    }
+
+    if (currentSession && currentSession.panes.length > 1) {
+      currentSession.panes.forEach((pane, index) => {
+        commands.push({
+          id: `pane:${pane.id}:focus`,
+          label:
+            pane.id === currentSession.activePaneId
+              ? `Current Pane: ${index + 1}`
+              : `Focus Pane: ${index + 1}`,
+          description: "Focus this pane and route transcript actions to it.",
+          keywords: ["pane", "focus", `${index + 1}`],
+          run: () => {
+            activatePaneAndFocus(pane.id);
+          },
+        });
+      });
+      commands.push({
+        id: `pane:${currentSession.activePaneId}:close`,
+        label: "Close Active Pane",
+        description: "Remove the current split without deleting its history.",
+        keywords: ["pane", "close", "split"],
+        run: () => {
+              if (currentSession.activePaneId) {
+                closePane(currentSession.activePaneId);
+              }
+            },
+          });
+        }
 
     if (activeThread && canDispatchBackendCommands) {
       commands.push(
@@ -365,7 +611,7 @@ export function App() {
           keywords: ["user input", "prompt", "answer"],
           run: () => {
             requestAnimationFrame(() => {
-              transcriptRef.current?.focus();
+              focusActivePanePrompt();
             });
           },
         });
@@ -385,10 +631,14 @@ export function App() {
     consoleData.isStoppingSession,
     consoleData.respondingUserInputRequestIds,
     handleCreateSession,
+    handleSplitActivePane,
     interruptTurn,
+    activatePaneAndFocus,
+    focusActivePanePrompt,
     respondToUserInput,
     setInteractionMode,
     stopSession,
+    closePane,
     workspace.sessions,
   ]);
   const filteredCommands = useMemo(
@@ -396,85 +646,50 @@ export function App() {
     [paletteCommands, paletteQuery],
   );
 
-  const handleAddImageFiles = useCallback(
-    (files: ReadonlyArray<File>) => {
-      if (files.length === 0) {
-        return;
-      }
-
-      const accepted: ComposerImageAttachment[] = [];
-      let nextCount = composerAttachments.length;
-      const dedupKeys = new Set(
-        composerAttachments.map((attachment) => composerImageDedupKey(attachment)),
-      );
-      let nextError: string | null = null;
-
-      for (const file of files) {
-        if (!file.type.startsWith("image/")) {
-          nextError = `Unsupported file type for '${file.name}'. Attach image files only.`;
-          continue;
-        }
-        if (file.size === 0 || file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
-          nextError = `'${file.name}' exceeds the ${IMAGE_ATTACHMENT_SIZE_LIMIT_LABEL} attachment limit.`;
-          continue;
-        }
-        if (nextCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-          nextError = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`;
-          break;
-        }
-
-        const attachment = createComposerImageAttachment(file);
-        const dedupKey = composerImageDedupKey(attachment);
-        if (dedupKeys.has(dedupKey)) {
-          revokeComposerImageAttachmentPreview(attachment);
-          continue;
-        }
-
-        accepted.push(attachment);
-        dedupKeys.add(dedupKey);
-        nextCount += 1;
-      }
-
-      if (accepted.length > 0) {
-        setComposerAttachments((existing) => [...existing, ...accepted]);
-      }
-      if (nextError || accepted.length > 0) {
-        setSubmitError(nextError);
-      }
-    },
-    [composerAttachments],
-  );
-
-  const handleRemoveImage = useCallback((attachmentId: string) => {
-    setComposerAttachments((existing) => {
-      const removed = existing.find((attachment) => attachment.id === attachmentId);
-      if (removed) {
-        revokeComposerImageAttachmentPreview(removed);
-      }
-      return existing.filter((attachment) => attachment.id !== attachmentId);
-    });
-  }, []);
-
   useEffect(() => {
-    setComposerAttachments((existing) => {
-      for (const attachment of existing) {
-        revokeComposerImageAttachmentPreview(attachment);
+    const livePaneIds = new Set(
+      workspace.sessions.flatMap((session) => session.panes.map((pane) => pane.id)),
+    );
+    setComposerAttachmentsByPaneId((existing) => {
+      let changed = false;
+      const nextEntries = Object.entries(existing)
+        .filter(([paneId]) => livePaneIds.has(paneId))
+        .map(([paneId, attachments]) => {
+          if (livePaneIds.has(paneId)) {
+            return [paneId, attachments] as const;
+          }
+          changed = true;
+          attachments.forEach(revokeComposerImageAttachmentPreview);
+          return null;
+        })
+        .filter((entry): entry is readonly [string, ReadonlyArray<ComposerImageAttachment>] => entry !== null);
+      if (!changed && nextEntries.length === Object.keys(existing).length) {
+        return existing;
       }
-      return [];
+      Object.entries(existing).forEach(([paneId, attachments]) => {
+        if (!livePaneIds.has(paneId)) {
+          changed = true;
+          attachments.forEach(revokeComposerImageAttachmentPreview);
+        }
+      });
+      return Object.fromEntries(nextEntries);
     });
-  }, [workspace.activeThreadId]);
+    setComposerDraftByPaneId((existing) =>
+      Object.fromEntries(
+        Object.entries(existing).filter(([paneId]) => livePaneIds.has(paneId)),
+      ),
+    );
+  }, [workspace.sessions]);
 
   useEffect(() => {
     return () => {
-      for (const attachment of composerAttachmentsRef.current) {
-        revokeComposerImageAttachmentPreview(attachment);
-      }
+      Object.values(composerAttachmentsRef.current).flat().forEach(revokeComposerImageAttachmentPreview);
     };
   }, []);
 
   useEffect(() => {
     const focusTranscript = () => {
-      transcriptRef.current?.focus();
+      focusActivePanePrompt();
     };
 
     focusTranscript();
@@ -483,7 +698,7 @@ export function App() {
       setTimeout(focusTranscript, 0);
       setTimeout(focusTranscript, 40);
     });
-  }, []);
+  }, [focusActivePanePrompt]);
 
   useEffect(() => {
     if (selectedCommandIndex < filteredCommands.length) {
@@ -498,9 +713,9 @@ export function App() {
     setPaletteQuery("");
     setSelectedCommandIndex(0);
     requestAnimationFrame(() => {
-      transcriptRef.current?.focus();
+      focusActivePanePrompt();
     });
-  }, []);
+  }, [focusActivePanePrompt]);
 
   const runPaletteCommand = useCallback(async (command: CommandPaletteCommand) => {
     const executable = command as AppPaletteCommand;
@@ -542,13 +757,15 @@ export function App() {
 
       if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === "1") {
         event.preventDefault();
-        transcriptRef.current?.focusPrompt();
+        focusActivePanePrompt();
       } else if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === "4") {
         event.preventDefault();
-        transcriptRef.current?.focusHistory();
+        if (activePaneId) {
+          paneRefs.current[activePaneId]?.focusHistory();
+        }
       } else if (event.key === "Escape") {
         event.preventDefault();
-        transcriptRef.current?.focusPrompt();
+        focusActivePanePrompt();
       }
     };
 
@@ -556,13 +773,17 @@ export function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [closePalette, paletteOpen]);
+  }, [activePaneId, closePalette, focusActivePanePrompt, paletteOpen]);
 
   const footerText = useMemo(() => {
     const source = `live ${consoleData.connectionState}`;
     const provider = activeThread?.session?.providerName ?? activeThread?.model ?? "no-thread";
     const title = activeThread?.title ?? "No thread loaded";
     const cwd = workspace.activeSession?.cwd ?? activeProject?.workspaceRoot ?? "no project";
+    const paneLabel =
+      activeSession && activePane
+        ? `pane ${activeSession.panes.findIndex((pane) => pane.id === activePane.id) + 1}/${activeSession.panes.length}`
+        : "pane 1/1";
     const runtime = activeThread?.runtimeMode ?? "full-access";
     const errorText = submitError ?? consoleData.error;
     const phase = activeThreadTurnRunning
@@ -570,10 +791,12 @@ export function App() {
       : consoleData.isPromptSubmitting
         ? "submitting"
         : "idle";
-    const base = `${source} · ${phase} · ${provider} · ${runtime} · ${title} · ${cwd}`;
+    const base = `${source} · ${phase} · ${provider} · ${runtime} · ${paneLabel} · ${title} · ${cwd}`;
     return errorText ? `${base} · ${errorText}` : base;
   }, [
+    activePane,
     activeProject?.workspaceRoot,
+    activeSession,
     activeThread?.model,
     activeThread?.runtimeMode,
     activeThread?.session?.providerName,
@@ -620,31 +843,100 @@ export function App() {
             +
           </button>
         </div>
-        <main className="conversation-scroll">
-          <div className="transcript-shell">
-            <TranscriptRenderer
-              ref={transcriptRef}
-              blocks={blocks}
-              composerAttachments={composerAttachments}
-              interactionMode={activeThread?.interactionMode ?? "default"}
-              {...(activePendingUserInput && activePendingQuestion
-                ? {
-                    pendingUserInputHighlight: {
-                      requestId: activePendingUserInput.requestId,
-                      questionIndex: activePendingQuestionIndex,
-                      ...(activePendingShortcut
-                        ? { optionIndex: activePendingShortcut.optionIndex }
-                        : {}),
-                    },
+        <main className={paneViews.length > 1 ? "conversation-scroll conversation-scroll--split" : "conversation-scroll"}>
+          {paneViews.length > 0 ? (
+            <div className={paneViews.length > 1 ? "pane-grid pane-grid--split" : "pane-grid"}>
+              {paneViews.map((paneView) => (
+                <section
+                  key={paneView.pane.id}
+                  className={
+                    paneView.isActive
+                      ? "conversation-pane conversation-pane--active"
+                      : "conversation-pane"
                   }
-                : {})}
-              onAddImageFiles={handleAddImageFiles}
-              onDraftChange={setComposerDraft}
-              onRemoveImage={handleRemoveImage}
-            onSubmit={handleSubmit}
-              submitDisabled={!canSubmitPromptForThread(activeThreadId)}
-            />
-          </div>
+                  onMouseDownCapture={() => activatePane(paneView.pane.id)}
+                >
+                  <div className="conversation-pane__header">
+                    <span className="conversation-pane__label">Pane {paneView.index + 1}</span>
+                    <span className="conversation-pane__meta">
+                      {paneView.thread?.title ?? (paneView.history?.pending ? "Loading thread..." : "History unavailable")}
+                    </span>
+                  </div>
+                  <div className="transcript-shell">
+                    <TranscriptRenderer
+                      ref={(handle) => {
+                        paneRefs.current[paneView.pane.id] = handle;
+                      }}
+                      blocks={paneView.blocks}
+                      composerAttachments={paneView.attachments}
+                      interactionMode={paneView.thread?.interactionMode ?? "default"}
+                      {...(paneView.pendingUserInput && paneView.pendingQuestion
+                        ? {
+                            pendingUserInputHighlight: {
+                              requestId: paneView.pendingUserInput.requestId,
+                              questionIndex: paneView.pendingQuestionIndex,
+                              ...(paneView.pendingShortcut
+                                ? { optionIndex: paneView.pendingShortcut.optionIndex }
+                                : {}),
+                            },
+                          }
+                        : {})}
+                      onAddImageFiles={(files) => handleAddImageFilesForPane(paneView.pane.id, files)}
+                      onDraftChange={(value) => setComposerDraftForPane(paneView.pane.id, value)}
+                      onRemoveImage={(attachmentId) => handleRemoveImageForPane(paneView.pane.id, attachmentId)}
+                      onSubmit={(value) =>
+                        handleSubmit(
+                          paneView.pane.id,
+                          paneView.threadId,
+                          paneView.pendingUserInput,
+                          paneView.pendingQuestion,
+                          paneView.pendingQuestionIndex,
+                          paneView.draftAnswers,
+                          value,
+                        )}
+                      submitDisabled={!canSubmitPromptForThread(paneView.threadId)}
+                    />
+                  </div>
+                </section>
+              ))}
+            </div>
+          ) : (
+            <div className="transcript-shell">
+              <TranscriptRenderer
+                ref={(handle) => {
+                  paneRefs.current.bootstrap = handle;
+                }}
+                blocks={blocks}
+                composerAttachments={composerAttachments}
+                interactionMode={activeThread?.interactionMode ?? "default"}
+                {...(activePendingUserInput && activePendingQuestion
+                  ? {
+                      pendingUserInputHighlight: {
+                        requestId: activePendingUserInput.requestId,
+                        questionIndex: activePendingQuestionIndex,
+                        ...(activePendingShortcut
+                          ? { optionIndex: activePendingShortcut.optionIndex }
+                          : {}),
+                      },
+                    }
+                  : {})}
+                onAddImageFiles={(files) => activePaneId && handleAddImageFilesForPane(activePaneId, files)}
+                onDraftChange={(value) => activePaneId && setComposerDraftForPane(activePaneId, value)}
+                onRemoveImage={(attachmentId) => activePaneId && handleRemoveImageForPane(activePaneId, attachmentId)}
+                onSubmit={(value) =>
+                  handleSubmit(
+                    activePaneId ?? "bootstrap",
+                    activeThreadId,
+                    activePendingUserInput,
+                    activePendingQuestion,
+                    activePendingQuestionIndex,
+                    activePendingDraftAnswers,
+                    value,
+                  )}
+                submitDisabled={!canSubmitPromptForThread(activeThreadId)}
+              />
+            </div>
+          )}
         </main>
         <footer className="status-line">{footerText}</footer>
       </div>
