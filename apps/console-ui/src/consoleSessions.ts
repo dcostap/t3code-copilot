@@ -38,10 +38,20 @@ export interface ConsoleWorkspaceState {
 export interface ConsoleWorkspaceModel {
   readonly sessions: ReadonlyArray<ConsoleWorkspaceSession>;
   readonly activeSession: ConsoleWorkspaceSession | null;
+  readonly activePane: ConsolePane | null;
   readonly activeThreadId: string | null;
   readonly activeThread: OrchestrationThread | null;
   readonly activeProject: OrchestrationProject | null;
   activateSession(sessionId: string): void;
+  activatePane(paneId: string): void;
+  splitActivePane(input: {
+    threadId: OrchestrationThread["id"];
+    cwd: string;
+    projectId: OrchestrationProject["id"];
+    createdAt: string;
+    pending?: boolean;
+  }): void;
+  closePane(paneId: string): void;
   createSessionFromHistory(input: {
     threadId: OrchestrationThread["id"];
     cwd: string;
@@ -163,6 +173,100 @@ export function createSessionFromHistoryRef(
 
 function activePaneForSession(session: ConsoleWorkspaceSession): ConsolePane | null {
   return session.panes.find((pane) => pane.id === session.activePaneId) ?? session.panes[0] ?? null;
+}
+
+function updateSession(
+  existing: ReadonlyArray<ConsoleWorkspaceSession>,
+  sessionId: string,
+  updater: (session: ConsoleWorkspaceSession) => ConsoleWorkspaceSession,
+) {
+  let changed = false;
+  const sessions = existing.map((session) => {
+    if (session.id !== sessionId) {
+      return session;
+    }
+    const next = updater(session);
+    if (next !== session) {
+      changed = true;
+    }
+    return next;
+  });
+  return changed ? sessions : existing;
+}
+
+function withSessionUpdatedAt(
+  session: ConsoleWorkspaceSession,
+  input: Omit<ConsoleWorkspaceSession, "updatedAt">,
+): ConsoleWorkspaceSession {
+  return {
+    ...input,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export function splitSessionWithHistoryRef(
+  session: ConsoleWorkspaceSession,
+  historyInput: {
+    threadId: OrchestrationThread["id"];
+    cwd: string;
+    createdAt: string;
+    pending?: boolean;
+  },
+): ConsoleWorkspaceSession {
+  if (session.panes.length >= 2) {
+    return session;
+  }
+
+  const history = createHistoryRef(historyInput);
+  const nextPane: ConsolePane = { id: makeId("pane"), historyId: history.id };
+  const activePaneIndex = session.panes.findIndex((pane) => pane.id === session.activePaneId);
+  const insertAt = activePaneIndex >= 0 ? activePaneIndex + 1 : session.panes.length;
+  const panes = [...session.panes];
+  panes.splice(insertAt, 0, nextPane);
+
+  return withSessionUpdatedAt(session, {
+    ...session,
+    activePaneId: nextPane.id,
+    panes,
+    histories: [...session.histories, history],
+  });
+}
+
+export function activateSessionPane(
+  session: ConsoleWorkspaceSession,
+  paneId: string,
+): ConsoleWorkspaceSession {
+  if (session.activePaneId === paneId || !session.panes.some((pane) => pane.id === paneId)) {
+    return session;
+  }
+  return withSessionUpdatedAt(session, {
+    ...session,
+    activePaneId: paneId,
+  });
+}
+
+export function closeSessionPane(
+  session: ConsoleWorkspaceSession,
+  paneId: string,
+): ConsoleWorkspaceSession {
+  if (session.panes.length <= 1 || !session.panes.some((pane) => pane.id === paneId)) {
+    return session;
+  }
+
+  const panes = session.panes.filter((pane) => pane.id !== paneId);
+  const nextActivePaneId =
+    session.activePaneId === paneId
+      ? (panes[0]?.id ?? session.activePaneId)
+      : session.activePaneId;
+  if (panes.length === session.panes.length && nextActivePaneId === session.activePaneId) {
+    return session;
+  }
+
+  return withSessionUpdatedAt(session, {
+    ...session,
+    activePaneId: nextActivePaneId,
+    panes,
+  });
 }
 
 function isPendingHistoryStillFresh(history: ConsoleHistoryRef, nowMs: number) {
@@ -380,17 +484,20 @@ export function useConsoleWorkspaceSessions(input: {
     () => state.sessions.find((session) => session.id === state.activeSessionId) ?? null,
     [state.activeSessionId, state.sessions],
   );
+  const activePane = useMemo(
+    () => (activeSession ? activePaneForSession(activeSession) : null),
+    [activeSession],
+  );
 
   const activeThreadId = useMemo(() => {
-    if (!activeSession) {
+    if (!activeSession || !activePane) {
       return null;
     }
-    const activePane = activePaneForSession(activeSession);
-    if (!activePane?.historyId) {
+    if (!activePane.historyId) {
       return null;
     }
     return activeSession.histories.find((history) => history.id === activePane.historyId)?.threadId ?? null;
-  }, [activeSession]);
+  }, [activePane, activeSession]);
 
   const activeThread = useMemo(
     () => (activeThreadId ? findThreadById(input.threads, activeThreadId) : null),
@@ -413,6 +520,48 @@ export function useConsoleWorkspaceSessions(input: {
     );
   }, []);
 
+  const activatePane = useCallback((paneId: string) => {
+    setState((existing) => {
+      if (!existing.activeSessionId) {
+        return existing;
+      }
+      const sessions = updateSession(existing.sessions, existing.activeSessionId, (session) =>
+        activateSessionPane(session, paneId),
+      );
+      return sessions === existing.sessions ? existing : { ...existing, sessions };
+    });
+  }, []);
+
+  const splitActivePane = useCallback((history: {
+    threadId: OrchestrationThread["id"];
+    cwd: string;
+    projectId: OrchestrationProject["id"];
+    createdAt: string;
+    pending?: boolean;
+  }) => {
+    setState((existing) => {
+      if (!existing.activeSessionId) {
+        return existing;
+      }
+      const sessions = updateSession(existing.sessions, existing.activeSessionId, (session) =>
+        splitSessionWithHistoryRef(session, history),
+      );
+      return sessions === existing.sessions ? existing : { ...existing, sessions };
+    });
+  }, []);
+
+  const closePane = useCallback((paneId: string) => {
+    setState((existing) => {
+      if (!existing.activeSessionId) {
+        return existing;
+      }
+      const sessions = updateSession(existing.sessions, existing.activeSessionId, (session) =>
+        closeSessionPane(session, paneId),
+      );
+      return sessions === existing.sessions ? existing : { ...existing, sessions };
+    });
+  }, []);
+
   const createSessionFromHistory = useCallback((history: {
     threadId: OrchestrationThread["id"];
     cwd: string;
@@ -432,10 +581,14 @@ export function useConsoleWorkspaceSessions(input: {
   return {
     sessions: state.sessions,
     activeSession,
+    activePane,
     activeThreadId,
     activeThread,
     activeProject,
     activateSession,
+    activatePane,
+    splitActivePane,
+    closePane,
     createSessionFromHistory,
   };
 }

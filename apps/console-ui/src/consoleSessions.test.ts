@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import type { OrchestrationProject, OrchestrationThread } from "@t3tools/contracts";
 
-import { createSessionFromHistoryRef, reconcileWorkspaceState, resolveThreadCwd } from "./consoleSessions";
+import {
+  activateSessionPane,
+  closeSessionPane,
+  createSessionFromHistoryRef,
+  reconcileWorkspaceState,
+  resolveThreadCwd,
+  splitSessionWithHistoryRef,
+} from "./consoleSessions";
 
 const project: OrchestrationProject = {
   id: "project:1" as OrchestrationProject["id"],
@@ -222,5 +229,93 @@ describe("reconcileWorkspaceState", () => {
       projects: [project],
       preferredThreadId: thread.id,
     })).toBe(state);
+  });
+});
+
+describe("session pane operations", () => {
+  it("splits the active pane into a second pane with a new history", () => {
+    const thread = makeThread({
+      id: "thread:1",
+      createdAt: "2026-03-12T10:00:00.000Z",
+    });
+    const session = createSessionFromHistoryRef(
+      {
+        threadId: thread.id,
+        cwd: project.workspaceRoot,
+        projectId: project.id,
+        createdAt: thread.createdAt,
+      },
+      [],
+    );
+
+    const split = splitSessionWithHistoryRef(session, {
+      threadId: "thread:2" as OrchestrationThread["id"],
+      cwd: project.workspaceRoot,
+      createdAt: "2026-03-12T10:05:00.000Z",
+      pending: true,
+    });
+
+    expect(split.panes).toHaveLength(2);
+    expect(split.activePaneId).toBe(split.panes[1]?.id);
+    expect(split.histories.map((history) => history.threadId)).toEqual([
+      thread.id,
+      "thread:2",
+    ]);
+  });
+
+  it("activates a different pane without mutating histories", () => {
+    const thread = makeThread({
+      id: "thread:1",
+      createdAt: "2026-03-12T10:00:00.000Z",
+    });
+    const session = splitSessionWithHistoryRef(
+      createSessionFromHistoryRef(
+        {
+          threadId: thread.id,
+          cwd: project.workspaceRoot,
+          projectId: project.id,
+          createdAt: thread.createdAt,
+        },
+        [],
+      ),
+      {
+        threadId: "thread:2" as OrchestrationThread["id"],
+        cwd: project.workspaceRoot,
+        createdAt: "2026-03-12T10:05:00.000Z",
+      },
+    );
+
+    const activated = activateSessionPane(session, session.panes[0]?.id ?? "");
+
+    expect(activated.activePaneId).toBe(session.panes[0]?.id);
+    expect(activated.histories).toEqual(session.histories);
+  });
+
+  it("closes a pane without deleting its history", () => {
+    const thread = makeThread({
+      id: "thread:1",
+      createdAt: "2026-03-12T10:00:00.000Z",
+    });
+    const session = splitSessionWithHistoryRef(
+      createSessionFromHistoryRef(
+        {
+          threadId: thread.id,
+          cwd: project.workspaceRoot,
+          projectId: project.id,
+          createdAt: thread.createdAt,
+        },
+        [],
+      ),
+      {
+        threadId: "thread:2" as OrchestrationThread["id"],
+        cwd: project.workspaceRoot,
+        createdAt: "2026-03-12T10:05:00.000Z",
+      },
+    );
+
+    const closed = closeSessionPane(session, session.activePaneId);
+
+    expect(closed.panes).toHaveLength(1);
+    expect(closed.histories).toHaveLength(2);
   });
 });

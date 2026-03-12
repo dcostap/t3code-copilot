@@ -128,8 +128,74 @@ body {
   padding: 0 6px 0 0;
 }
 
+.conversation-scroll--split {
+  overflow: hidden;
+  padding-right: 0;
+}
+
+.pane-grid {
+  min-height: 100%;
+}
+
+.pane-grid--split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  height: 100%;
+  padding-right: 6px;
+}
+
+.conversation-pane {
+  min-width: 0;
+  min-height: 0;
+}
+
+.conversation-pane--active {
+  background: rgba(15, 19, 24, 0.28);
+}
+
+.conversation-pane--active .conversation-pane__header {
+  border-color: rgba(87, 150, 214, 0.3);
+  color: #d6dbe0;
+}
+
+.conversation-pane--active .transcript-shell {
+  border-color: rgba(87, 150, 214, 0.28);
+}
+
+.conversation-pane__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px 8px;
+  border-bottom: 1px solid rgba(95, 103, 111, 0.16);
+  color: #76808a;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.conversation-pane__label {
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.conversation-pane__meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .transcript-shell {
   padding: 0 6px;
+}
+
+.conversation-pane .transcript-shell {
+  height: calc(100% - 26px);
+  overflow: auto;
+  border: 1px solid rgba(95, 103, 111, 0.14);
+  background: rgba(11, 14, 18, 0.12);
 }
 
 .transcript-surface {
