@@ -6,6 +6,8 @@
  * metadata for line-level decoration.
  */
 
+import { highlightCodeFence } from "./codeFenceHighlight";
+
 // ── Line-level decoration kinds (reused from the prototype) ─────────
 
 export type LineKind =
@@ -54,6 +56,11 @@ export interface AnnotatedLine {
   readonly text: string;
   readonly kind: LineKind;
   readonly extraClasses?: ReadonlyArray<string>;
+  readonly highlightSpans?: ReadonlyArray<{
+    readonly from: number;
+    readonly to: number;
+    readonly className: string;
+  }>;
   readonly userInputRef?: {
     readonly requestId: string;
     readonly questionIndex: number;
@@ -294,11 +301,18 @@ function codeFenceLanguage(line: string) {
 }
 
 function codeFenceToLines(language: string, lines: ReadonlyArray<string>): AnnotatedLine[] {
+  const highlightSpansByLine = highlightCodeFence(language, lines);
   const header = language.length > 0 ? `code · ${language}` : "code";
   return [
     { text: "╭──────────────────────────────────────────────────────────────────────────────", kind: "codeFenceSeparator" },
     { text: header, kind: "codeFenceHeader" },
-    ...lines.map((line) => ({ text: line, kind: "codeFenceBody" as const })),
+    ...lines.map((line, index) => ({
+      text: line,
+      kind: "codeFenceBody" as const,
+      ...(highlightSpansByLine[index] && highlightSpansByLine[index].length > 0
+        ? { highlightSpans: highlightSpansByLine[index] }
+        : {}),
+    })),
     { text: "╰──────────────────────────────────────────────────────────────────────────────", kind: "codeFenceSeparator" },
   ];
 }

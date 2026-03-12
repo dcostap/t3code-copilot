@@ -191,6 +191,19 @@ describe("blockToLines", () => {
           + "```\n"
           + "After",
         streaming: false,
+      }).map((line) => {
+        const simplified: {
+          text: string;
+          kind: string;
+          highlightSpans?: typeof line.highlightSpans;
+        } = {
+          text: line.text,
+          kind: line.kind,
+        };
+        if (line.highlightSpans) {
+          simplified.highlightSpans = line.highlightSpans;
+        }
+        return simplified;
       }),
     ).toEqual([
       { text: "Before", kind: "body" },
@@ -199,8 +212,20 @@ describe("blockToLines", () => {
         kind: "codeFenceSeparator",
       },
       { text: "code · ts", kind: "codeFenceHeader" },
-      { text: "const x = 1;", kind: "codeFenceBody" },
-      { text: "console.log(x);", kind: "codeFenceBody" },
+      {
+        text: "const x = 1;",
+        kind: "codeFenceBody",
+        highlightSpans: expect.arrayContaining([
+          expect.objectContaining({ className: expect.stringContaining("tok-keyword") }),
+        ]),
+      },
+      {
+        text: "console.log(x);",
+        kind: "codeFenceBody",
+        highlightSpans: expect.arrayContaining([
+          expect.objectContaining({ className: expect.stringContaining("tok-variableName") }),
+        ]),
+      },
       {
         text: "╰──────────────────────────────────────────────────────────────────────────────",
         kind: "codeFenceSeparator",
