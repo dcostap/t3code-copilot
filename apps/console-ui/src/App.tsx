@@ -1,4 +1,4 @@
-import { DEFAULT_MODEL_BY_PROVIDER, type ProviderKind } from "@t3tools/contracts";
+import { DEFAULT_MODEL_BY_PROVIDER, MODEL_OPTIONS_BY_PROVIDER, type ProviderKind } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CommandPalette } from "./CommandPalette";
@@ -60,6 +60,7 @@ export function App() {
   const createThread = consoleData.createThread;
   const submitPrompt = consoleData.submitPrompt;
   const respondToUserInput = consoleData.respondToUserInput;
+  const setThreadModel = consoleData.setThreadModel;
   const setInteractionMode = consoleData.setInteractionMode;
   const interruptTurn = consoleData.interruptTurn;
   const stopSession = consoleData.stopSession;
@@ -123,6 +124,10 @@ export function App() {
   const activePendingShortcut = activePendingQuestion
     ? resolvePendingUserInputShortcut(composerDraft, activePendingQuestion.options)
     : null;
+  const activeProvider =
+    activeHistory?.preferredProvider ??
+    resolveProviderFromThread(activeThread?.session?.providerName) ??
+    null;
 
   useEffect(() => {
     if (!activeThreadTurnRunning) {
@@ -162,15 +167,29 @@ export function App() {
   }, [activePendingUserInputs, activeSession, getPendingUserInputs]);
 
   const resolveModelForProvider = useCallback((preferredProvider: ProviderKind, projectId: string) => {
+    const providerStatus = consoleData.serverConfig?.providers.find(
+      (provider) => provider.provider === preferredProvider,
+    );
+    const availableModelIds = new Set((providerStatus?.models ?? []).map((model) => model.id));
+    const isAvailableModel = (model: string | null | undefined) =>
+      typeof model === "string" &&
+      model.length > 0 &&
+      (availableModelIds.size === 0 || availableModelIds.has(model));
+
     const matchingProviderThread = [...consoleData.threads]
       .filter((thread) =>
         thread.projectId === projectId &&
-        resolveProviderFromThread(thread.session?.providerName) === preferredProvider,
+        resolveProviderFromThread(thread.session?.providerName) === preferredProvider &&
+        isAvailableModel(thread.model),
       )
       .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
 
-    return matchingProviderThread?.model ?? DEFAULT_MODEL_BY_PROVIDER[preferredProvider];
-  }, [consoleData.threads]);
+    return (
+      matchingProviderThread?.model ??
+      providerStatus?.models?.[0]?.id ??
+      DEFAULT_MODEL_BY_PROVIDER[preferredProvider]
+    );
+  }, [consoleData.serverConfig?.providers, consoleData.threads]);
 
   useEffect(() => {
     if (!workspace.activeThreadId || consoleData.activeThreadId === workspace.activeThreadId) {
@@ -599,6 +618,21 @@ export function App() {
         }
 
     if (activeThread && canDispatchBackendCommands) {
+      if (activeProvider) {
+        for (const modelOption of MODEL_OPTIONS_BY_PROVIDER[activeProvider]) {
+          commands.push({
+            id: `model:${activeThread.id}:${modelOption.slug}`,
+            label:
+              activeThread.model === modelOption.slug
+                ? `Current Model: ${modelOption.name}`
+                : `Set Model: ${modelOption.name}`,
+            description: `${activeProvider} · ${modelOption.slug}`,
+            keywords: ["model", activeProvider, modelOption.name, modelOption.slug],
+            run: () => setThreadModel(activeThread.id, modelOption.slug),
+          });
+        }
+      }
+
       commands.push(
         {
           id: `interaction:${activeThread.id}:default`,
@@ -689,8 +723,10 @@ export function App() {
     handleSplitActivePane,
     interruptTurn,
     activatePaneAndFocus,
+    activeProvider,
     focusActivePanePrompt,
     respondToUserInput,
+    setThreadModel,
     setInteractionMode,
     stopSession,
     closePane,
@@ -832,7 +868,8 @@ export function App() {
 
   const footerText = useMemo(() => {
     const source = `live ${consoleData.connectionState}`;
-    const provider = activeThread?.session?.providerName ?? activeThread?.model ?? "no-thread";
+    const provider = activeProvider ?? "no-provider";
+    const model = activeThread?.model ?? "no-model";
     const title = activeThread?.title ?? "No thread loaded";
     const cwd = workspace.activeSession?.cwd ?? activeProject?.workspaceRoot ?? "no project";
     const paneLabel =
@@ -846,15 +883,15 @@ export function App() {
       : consoleData.isPromptSubmitting
         ? "submitting"
         : "idle";
-    const base = `${source} · ${phase} · ${provider} · ${runtime} · ${paneLabel} · ${title} · ${cwd}`;
+    const base = `${source} · ${phase} · ${provider} · ${model} · ${runtime} · ${paneLabel} · ${title} · ${cwd}`;
     return errorText ? `${base} · ${errorText}` : base;
   }, [
+    activeProvider,
     activePane,
     activeProject?.workspaceRoot,
     activeSession,
     activeThread?.model,
     activeThread?.runtimeMode,
-    activeThread?.session?.providerName,
     activeThread?.title,
     consoleData.connectionState,
     consoleData.error,

@@ -21,6 +21,39 @@ function dedupePaths(paths: ReadonlyArray<string | undefined>): string[] {
   return resolved;
 }
 
+function resolveCopilotCliFromPathEnv(input: {
+  platform?: string;
+  pathEnv?: string;
+  pathExtEnv?: string;
+  exists?: (path: string) => boolean;
+}): string | undefined {
+  const platform = input.platform ?? process.platform;
+  const pathEnv = input.pathEnv ?? process.env.PATH;
+  if (!pathEnv) return undefined;
+
+  const exists = input.exists ?? existsSync;
+  const directories = pathEnv.split(platform === "win32" ? ";" : ":").filter(Boolean);
+  const candidateNames =
+    platform === "win32"
+      ? [
+          "copilot.exe",
+          "copilot.cmd",
+          "copilot.bat",
+        ]
+      : ["copilot"];
+
+  for (const directory of directories) {
+    for (const candidateName of candidateNames) {
+      const candidatePath = join(directory, candidateName);
+      if (exists(candidatePath)) {
+        return candidatePath;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function resolveSdkEntrypoint(): string | undefined {
   try {
     return require.resolve("@github/copilot-sdk");
@@ -126,6 +159,14 @@ export function resolveBundledCopilotCliPathFrom(input: {
     if (exists(candidate)) {
       return candidate;
     }
+  }
+
+  const pathBinary = resolveCopilotCliFromPathEnv({
+    platform,
+    exists,
+  });
+  if (pathBinary) {
+    return pathBinary;
   }
 
   const npmLoaderCandidates = dedupePaths(
