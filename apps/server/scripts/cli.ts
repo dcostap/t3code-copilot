@@ -19,6 +19,9 @@ class CliError extends Data.TaggedError("CliError")<{
   readonly cause?: unknown;
 }> {}
 
+const DesktopSurface = ["web", "console"] as const;
+type DesktopSurface = (typeof DesktopSurface)[number];
+
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("../../..", import.meta.url))),
 );
@@ -102,15 +105,21 @@ const applyDevelopmentIconOverrides = Effect.fn("applyDevelopmentIconOverrides")
       });
     }
     if (!(yield* fs.exists(targetPath))) {
-      return yield* new CliError({
-        message: `Missing development icon target: ${targetPath}. Build web first.`,
-      });
+      continue;
     }
 
     yield* fs.copyFile(sourcePath, targetPath);
   }
 
   yield* Effect.log("[cli] Applied development icon overrides to dist/client");
+});
+
+const resolveClientDistDir = Effect.fn("resolveClientDistDir")(function* (
+  repoRoot: string,
+  surface: DesktopSurface,
+) {
+  const path = yield* Path.Path;
+  return path.join(repoRoot, surface === "console" ? "apps/console-ui/dist" : "apps/web/dist");
 });
 
 // ---------------------------------------------------------------------------
@@ -120,6 +129,10 @@ const applyDevelopmentIconOverrides = Effect.fn("applyDevelopmentIconOverrides")
 const buildCmd = Command.make(
   "build",
   {
+    surface: Flag.choice("surface", DesktopSurface).pipe(
+      Flag.withDescription("Renderer surface to bundle into dist/client."),
+      Flag.withDefault("web"),
+    ),
     verbose: Flag.boolean("verbose").pipe(Flag.withDefault(false)),
   },
   (config) =>
@@ -140,18 +153,20 @@ const buildCmd = Command.make(
         })`bun tsdown`,
       );
 
-      const webDist = path.join(repoRoot, "apps/web/dist");
+      const clientDist = yield* resolveClientDistDir(repoRoot, config.surface);
       const clientTarget = path.join(serverDir, "dist/client");
 
-      if (yield* fs.exists(webDist)) {
-        yield* fs.copy(webDist, clientTarget);
+      if (yield* fs.exists(clientDist)) {
+        yield* fs.copy(clientDist, clientTarget);
         yield* applyDevelopmentIconOverrides(repoRoot, serverDir);
-        yield* Effect.log("[cli] Bundled web app into dist/client");
+        yield* Effect.log(`[cli] Bundled ${config.surface} app into dist/client`);
       } else {
-        yield* Effect.logWarning("[cli] Web dist not found — skipping client bundle.");
+        yield* Effect.logWarning(
+          `[cli] ${config.surface} dist not found at ${clientDist} — skipping client bundle.`,
+        );
       }
     }),
-).pipe(Command.withDescription("Build the server package (tsdown + bundle web client)."));
+).pipe(Command.withDescription("Build the server package (tsdown + bundle selected client)."));
 
 // ---------------------------------------------------------------------------
 // publish subcommand

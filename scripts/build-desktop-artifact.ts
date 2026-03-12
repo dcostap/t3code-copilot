@@ -20,6 +20,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
+const DesktopSurface = Schema.Literals(["web", "console"]);
 
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
@@ -66,6 +67,7 @@ const PLATFORM_CONFIG: Record<typeof BuildPlatform.Type, PlatformConfig> = {
 };
 
 interface BuildCliInput {
+  readonly surface: typeof DesktopSurface.Type;
   readonly platform: Option.Option<typeof BuildPlatform.Type>;
   readonly target: Option.Option<string>;
   readonly arch: Option.Option<typeof BuildArch.Type>;
@@ -154,6 +156,7 @@ function resolvePythonForNodeGyp(): string | undefined {
 }
 
 interface ResolvedBuildOptions {
+  readonly surface: typeof DesktopSurface.Type;
   readonly platform: typeof BuildPlatform.Type;
   readonly target: string;
   readonly arch: typeof BuildArch.Type;
@@ -260,6 +263,7 @@ const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (input: B
   const verbose = resolveBooleanFlag(input.verbose, env.verbose);
 
   return {
+    surface: input.surface,
     platform,
     target,
     arch,
@@ -609,14 +613,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const bundledClientEntry = path.join(distDirs.serverDist, "client/index.html");
 
   if (!options.skipBuild) {
-    yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
+    yield* Effect.log(`[desktop-artifact] Building desktop/server/${options.surface} artifacts...`);
     yield* runCommand(
       ChildProcess.make({
         cwd: repoRoot,
         ...commandOutputOptions(options.verbose),
         // Windows needs shell mode to resolve .cmd shims (e.g. bun.cmd).
         shell: process.platform === "win32",
-      })`bun run build:desktop`,
+      })`bun run build:desktop -- --surface=${options.surface}`,
     );
   }
 
@@ -772,6 +776,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 });
 
 const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
+  surface: Flag.choice("surface", DesktopSurface.literals).pipe(
+    Flag.withDescription("Desktop renderer surface to package."),
+  ),
   platform: Flag.choice("platform", BuildPlatform.literals).pipe(
     Flag.withDescription("Build platform (env: T3CODE_DESKTOP_PLATFORM)."),
     Flag.optional,
