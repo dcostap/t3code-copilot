@@ -77,6 +77,7 @@ export interface ConsoleDataState {
     attachments?: ReadonlyArray<UploadChatImageAttachment>;
   }): Promise<void>;
   respondToUserInput(threadId: string, requestId: string, answers: Record<string, unknown>): Promise<void>;
+  setThreadModel(threadId: string, model: string): Promise<void>;
   setInteractionMode(threadId: string, interactionMode: ProviderInteractionMode): Promise<void>;
   interruptTurn(threadId: string): Promise<void>;
   stopSession(threadId: string): Promise<void>;
@@ -817,6 +818,22 @@ export function useConsoleData(): ConsoleDataState {
     [assertLiveCommandReady, backend, threads],
   );
 
+  const setThreadModel = useCallback(async (threadId: string, model: string) => {
+    const targetThread = findThreadById(threads, threadId);
+    const normalizedModel = model.trim();
+    if (!targetThread || normalizedModel.length === 0 || targetThread.model === normalizedModel) {
+      return;
+    }
+    assertLiveCommandReady();
+
+    await backend.dispatchCommand({
+      type: "thread.meta.update",
+      commandId: makeCommandId(),
+      threadId: targetThread.id,
+      model: normalizedModel,
+    });
+  }, [assertLiveCommandReady, backend, threads]);
+
   const setInteractionMode = useCallback(
     async (threadId: string, interactionMode: ProviderInteractionMode) => {
       const targetThread = findThreadById(threads, threadId);
@@ -910,6 +927,7 @@ export function useConsoleData(): ConsoleDataState {
     canSubmitPromptForThread,
     submitPrompt,
     respondToUserInput,
+    setThreadModel,
     setInteractionMode,
     interruptTurn,
     stopSession,
