@@ -29,6 +29,7 @@ interface AppPaletteCommand extends CommandPaletteCommand {
 
 export function App() {
   const consoleData = useConsoleData();
+  const [nowIso, setNowIso] = useState(() => new Date().toISOString());
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
@@ -58,6 +59,22 @@ export function App() {
   const activePendingShortcut = activePendingQuestion
     ? resolvePendingUserInputShortcut(composerDraft, activePendingQuestion.options)
     : null;
+
+  useEffect(() => {
+    if (!consoleData.isTurnRunning) {
+      setNowIso(new Date().toISOString());
+      return;
+    }
+
+    setNowIso(new Date().toISOString());
+    const interval = window.setInterval(() => {
+      setNowIso(new Date().toISOString());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [consoleData.isTurnRunning]);
 
   useEffect(() => {
     const openRequestIds = new Set(consoleData.pendingUserInputs.map((entry) => entry.requestId));
@@ -154,13 +171,14 @@ export function App() {
         resolveAttachmentPreviewUrl: (attachmentId) =>
           `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
         orchestrationEvents: consoleData.threadEvents,
+        now: nowIso,
       });
     }
     if (consoleData.error) {
       return [{ type: "status" as const, text: `Connection error: ${consoleData.error}` }];
     }
     return [{ type: "status" as const, text: "Waiting for orchestration snapshot..." }];
-  }, [attachmentPreviewBaseUrl, consoleData.error, consoleData.thread, consoleData.threadEvents]);
+  }, [attachmentPreviewBaseUrl, consoleData.error, consoleData.thread, consoleData.threadEvents, nowIso]);
   const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
     const commands: AppPaletteCommand[] = [];
     const activeThread = consoleData.thread;

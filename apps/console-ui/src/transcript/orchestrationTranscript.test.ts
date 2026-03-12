@@ -380,6 +380,45 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("appends a transient working-state block while the turn is running", () => {
+    const snapshot = buildDemoSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        messages: [],
+        proposedPlans: [],
+        checkpoints: [],
+        activities: [],
+        latestTurn: {
+          turnId: TurnId.makeUnsafe("turn-running"),
+          state: "running",
+          requestedAt: "2026-03-12T09:00:00.000Z",
+          startedAt: "2026-03-12T09:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe("turn-running"),
+          updatedAt: "2026-03-12T09:00:02.000Z",
+        },
+      },
+      { now: "2026-03-12T09:00:04.500Z" },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "working-state",
+        startedAt: "2026-03-12T09:00:01.000Z",
+        now: "2026-03-12T09:00:04.500Z",
+      },
+    ]);
+  });
+
   it("splits assistant output around inline user-input requests using orchestration events", () => {
     const snapshot = buildDemoSnapshot();
     const thread = snapshot.threads[0];

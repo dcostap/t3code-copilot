@@ -28,6 +28,9 @@ export type LineKind =
   | "checkpointHeader"
   | "checkpointSummary"
   | "checkpointFile"
+  | "workingSeparator"
+  | "workingHeader"
+  | "workingFooter"
   | "promptInput"
   | "promptSeparator"
   | "toolCall"
@@ -175,6 +178,12 @@ export interface CheckpointSummaryBlock {
   }>;
 }
 
+export interface WorkingStateBlock {
+  readonly type: "working-state";
+  readonly startedAt: string;
+  readonly now: string;
+}
+
 export interface DividerBlock {
   readonly type: "divider";
 }
@@ -197,6 +206,7 @@ export type TranscriptBlock =
   | PlanBlock
   | ProposedPlanBlock
   | CheckpointSummaryBlock
+  | WorkingStateBlock
   | DividerBlock
   | StatusBlock;
 
@@ -530,6 +540,16 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
           kind: "checkpointFile" as const,
         })),
         { text: "", kind: "checkpointSeparator" },
+      ];
+    }
+
+    case "working-state": {
+      const elapsedLabel = formatElapsedDuration(Date.parse(block.now) - Date.parse(block.startedAt));
+      return [
+        { text: "", kind: "workingSeparator" },
+        { text: "Working", kind: "workingHeader" },
+        { text: `running for ${elapsedLabel}`, kind: "workingFooter" },
+        { text: "", kind: "workingSeparator" },
       ];
     }
 
