@@ -448,6 +448,44 @@ function buildEditorTheme() {
         fontSize: "12px",
         paddingTop: "2px",
       },
+      ".cm-line-planSeparator": {
+        position: "relative",
+        minHeight: "10px",
+      },
+      ".cm-line-planSeparator::before": {
+        content: '""',
+        position: "absolute",
+        left: "0",
+        right: "0",
+        top: "50%",
+        borderTop: "1px solid rgba(88, 130, 98, 0.34)",
+        transform: "translateY(-50%)",
+      },
+      ".cm-line-planHeader": {
+        color: "#9dc5a3",
+        letterSpacing: "0.08em",
+        fontSize: "12px",
+        textTransform: "uppercase",
+        paddingTop: "2px",
+      },
+      ".cm-line-planHeader.cm-line-proposedPlanHeader": {
+        color: "#b4d7b8",
+      },
+      ".cm-line-planExplanation": {
+        color: "#c4cbc5",
+      },
+      ".cm-line-planStepPending": {
+        color: "#8d949b",
+      },
+      ".cm-line-planStepInProgress": {
+        color: "#d7c17a",
+      },
+      ".cm-line-planStepCompleted": {
+        color: "#9fc6a5",
+      },
+      ".cm-line-proposedPlanBody": {
+        color: "#bcc4cb",
+      },
       ".cm-line-promptInput": { color: "#d6dbe0" },
       ".cm-line-attachmentPanel": {
         paddingLeft: "2ch",
@@ -536,7 +574,6 @@ function buildEditorTheme() {
       },
       ".cm-line-commandExec": { color: "#a3d9a5" },
       ".cm-line-commandOutput": { color: "#7a828b" },
-      ".cm-line-planText": { color: "#b8bfc7" },
     },
     { dark: true },
   );

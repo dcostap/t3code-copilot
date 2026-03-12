@@ -231,7 +231,7 @@ function uniqueStrings(values: ReadonlyArray<string>) {
   return [...new Set(values)];
 }
 
-function planUpdateMarkdown(payload: Record<string, unknown> | null): string | null {
+function planUpdateBlock(payload: Record<string, unknown> | null): TranscriptBlock | null {
   const rawSteps = Array.isArray(payload?.plan) ? payload.plan : [];
   const steps = rawSteps
     .map((entry) => {
@@ -239,21 +239,52 @@ function planUpdateMarkdown(payload: Record<string, unknown> | null): string | n
       const step = asString(record?.step);
       const status = asString(record?.status) ?? "pending";
       if (!step) return null;
-      const marker =
-        status === "completed" ? "[x]" : status === "inProgress" ? "[~]" : "[ ]";
-      return `${marker} ${step}`;
+      return {
+        step,
+        status:
+          status === "completed" || status === "inProgress" || status === "pending"
+            ? status
+            : "pending",
+      };
     })
-    .filter((entry): entry is string => entry !== null);
+    .filter(
+      (
+        entry,
+      ): entry is {
+        step: string;
+        status: "pending" | "inProgress" | "completed";
+      } => entry !== null,
+    );
 
   const explanation = asString(payload?.explanation);
   if (!explanation && steps.length === 0) return null;
 
-  return [
-    "Plan update",
-    "",
-    ...(explanation ? [explanation, ""] : []),
-    ...steps,
-  ].join("\n");
+  return {
+    type: "plan-update",
+    ...(explanation ? { explanation } : {}),
+    steps,
+  };
+}
+
+function proposedPlanTitle(planMarkdown: string): string | null {
+  const heading = planMarkdown.match(/^\s{0,3}#{1,6}\s+(.+)$/m)?.[1]?.trim();
+  return heading && heading.length > 0 ? heading : null;
+}
+
+function stripDisplayedPlanMarkdown(planMarkdown: string): string {
+  const lines = planMarkdown.trimEnd().split(/\r?\n/);
+  const sourceLines = lines[0] && /^\s{0,3}#{1,6}\s+/.test(lines[0]) ? lines.slice(1) : [...lines];
+  while (sourceLines[0]?.trim().length === 0) {
+    sourceLines.shift();
+  }
+  const firstHeadingMatch = sourceLines[0]?.match(/^\s{0,3}#{1,6}\s+(.+)$/);
+  if (firstHeadingMatch?.[1]?.trim().toLowerCase() === "summary") {
+    sourceLines.shift();
+    while (sourceLines[0]?.trim().length === 0) {
+      sourceLines.shift();
+    }
+  }
+  return sourceLines.join("\n");
 }
 
 function userInputBlock(payload: Record<string, unknown> | null): UserInputRequestBlock | null {
@@ -522,8 +553,8 @@ function activityToBlocks(
     }
 
     case "turn.plan.updated": {
-      const markdown = planUpdateMarkdown(payload);
-      return markdown ? [{ type: "plan", markdown }] : [{ type: "status", text: activity.summary }];
+      const block = planUpdateBlock(payload);
+      return block ? [block] : [{ type: "status", text: activity.summary }];
     }
   }
 
@@ -818,7 +849,13 @@ export function threadToTranscriptBlocks(
       id: `plan:${proposedPlan.id}`,
       createdAt: proposedPlan.createdAt,
       source: "plan",
-      blocks: [{ type: "plan", markdown: proposedPlan.planMarkdown }],
+      blocks: [{
+        type: "proposed-plan",
+        ...(proposedPlanTitle(proposedPlan.planMarkdown)
+          ? { title: proposedPlanTitle(proposedPlan.planMarkdown)! }
+          : {}),
+        body: stripDisplayedPlanMarkdown(proposedPlan.planMarkdown),
+      }],
     });
   }
 

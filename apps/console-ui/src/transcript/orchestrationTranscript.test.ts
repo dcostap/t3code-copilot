@@ -231,6 +231,80 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("maps turn.plan.updated activities to structured plan-update blocks", () => {
+    const snapshot = buildDemoSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-plan-update"),
+          tone: "info",
+          kind: "turn.plan.updated",
+          summary: "Plan updated",
+          payload: {
+            explanation: "Reshape the UI around a single conversation scroll owner.",
+            plan: [
+              { step: "Unify transcript scrolling.", status: "completed" },
+              { step: "Render tool activity inline.", status: "inProgress" },
+              { step: "Tighten prompt layout.", status: "pending" },
+            ],
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:00.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "plan-update",
+        explanation: "Reshape the UI around a single conversation scroll owner.",
+        steps: [
+          { step: "Unify transcript scrolling.", status: "completed" },
+          { step: "Render tool activity inline.", status: "inProgress" },
+          { step: "Tighten prompt layout.", status: "pending" },
+        ],
+      },
+    ]);
+  });
+
+  it("maps proposed plans to distinct proposed-plan blocks", () => {
+    const snapshot = buildDemoSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      checkpoints: [],
+      activities: [],
+      proposedPlans: [
+        {
+          id: "plan-1",
+          turnId: null,
+          planMarkdown: "# Console UI migration\n\n## Summary\n\n- Bind the prototype to the orchestration read model.\n- Keep transcript rendering text-first.",
+          createdAt: "2026-03-11T09:00:00.000Z",
+          updatedAt: "2026-03-11T09:00:01.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "proposed-plan",
+        title: "Console UI migration",
+        body: "- Bind the prototype to the orchestration read model.\n- Keep transcript rendering text-first.",
+      },
+    ]);
+  });
+
   it("splits assistant output around inline user-input requests using orchestration events", () => {
     const snapshot = buildDemoSnapshot();
     const thread = snapshot.threads[0];

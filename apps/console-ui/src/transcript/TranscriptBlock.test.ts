@@ -133,4 +133,53 @@ describe("blockToLines", () => {
       { text: "", kind: "userPromptSeparator" },
     ]);
   });
+
+  it("renders plan updates as structured step rows", () => {
+    expect(
+      blockToLines({
+        type: "plan-update",
+        explanation: "Reshape the UI around a single conversation scroll owner.",
+        steps: [
+          { step: "Unify transcript scrolling.", status: "completed" },
+          { step: "Render tool activity inline.", status: "inProgress" },
+          { step: "Tighten prompt layout.", status: "pending" },
+        ],
+      }),
+    ).toEqual([
+      { text: "", kind: "planSeparator" },
+      { text: "Plan update", kind: "planHeader" },
+      { text: "Reshape the UI around a single conversation scroll owner.", kind: "planExplanation" },
+      { text: "", kind: "meta" },
+      { text: "[x] Unify transcript scrolling.", kind: "planStepCompleted" },
+      { text: "[~] Render tool activity inline.", kind: "planStepInProgress" },
+      { text: "[ ] Tighten prompt layout.", kind: "planStepPending" },
+      { text: "", kind: "planSeparator" },
+    ]);
+  });
+
+  it("renders proposed plans with a distinct header and body", () => {
+    expect(
+      blockToLines({
+        type: "proposed-plan",
+        title: "Console UI migration",
+        body: "- Bind the prototype to the orchestration read model.\n- Keep transcript rendering text-first.",
+      }),
+    ).toEqual([
+      { text: "", kind: "planSeparator" },
+      {
+        text: "Console UI migration",
+        kind: "planHeader",
+        extraClasses: ["cm-line-proposedPlanHeader"],
+      },
+      {
+        text: "- Bind the prototype to the orchestration read model.",
+        kind: "proposedPlanBody",
+      },
+      {
+        text: "- Keep transcript rendering text-first.",
+        kind: "proposedPlanBody",
+      },
+      { text: "", kind: "planSeparator" },
+    ]);
+  });
 });
