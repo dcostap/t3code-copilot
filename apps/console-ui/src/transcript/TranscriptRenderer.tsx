@@ -410,6 +410,23 @@ function buildEditorTheme() {
       },
       ".cm-line-meta": { color: "#5f676f" },
       ".cm-line-body": { color: "#cfd4d9" },
+      ".cm-line-table": {
+        color: "#d8dde2",
+      },
+      ".cm-line-codeFenceSeparator": {
+        color: "#4f5861",
+      },
+      ".cm-line-codeFenceHeader": {
+        color: "#8aa5c2",
+        fontSize: "12px",
+        letterSpacing: "0.06em",
+        textTransform: "uppercase",
+        paddingTop: "2px",
+      },
+      ".cm-line-codeFenceBody": {
+        color: "#c7d0d8",
+        backgroundColor: "rgba(22, 29, 36, 0.82)",
+      },
       ".cm-line-list": { color: "#c7ccd1" },
       ".cm-line-userPromptSeparator": {
         position: "relative",
