@@ -225,33 +225,53 @@ function flattenBlocks(
     number,
     { widget: WidgetType; side: -1 | 1; signature: string }
   >();
+  let seenVisibleBlock = false;
 
   for (const block of blocks) {
-    const blockLines = blockToLines(block).map((line) => {
-      if (!pendingUserInputHighlight || !line.userInputRef) {
-        return line;
-      }
+    const blockLines = blockToLines(block).map((line, lineIndex) => {
+      let nextLine = line;
 
       if (
-        line.userInputRef.requestId !== pendingUserInputHighlight.requestId
-        || line.userInputRef.questionIndex !== pendingUserInputHighlight.questionIndex
+        !seenVisibleBlock
+        && block.type === "user-message"
+        && lineIndex === 0
+        && line.kind === "userPromptSeparator"
       ) {
-        return line;
+        nextLine = {
+          ...line,
+          extraClasses: [...(line.extraClasses ?? []), "cm-line-userPromptSeparatorHidden"],
+        };
       }
 
-      const extraClasses = [...(line.extraClasses ?? []), "cm-line-userInputActiveQuestion"];
+      const userInputRef = nextLine.userInputRef;
+
+      if (!pendingUserInputHighlight || !userInputRef) {
+        return nextLine;
+      }
+
       if (
-        line.userInputRef.optionIndex !== undefined
+        userInputRef.requestId !== pendingUserInputHighlight.requestId
+        || userInputRef.questionIndex !== pendingUserInputHighlight.questionIndex
+      ) {
+        return nextLine;
+      }
+
+      const extraClasses = [...(nextLine.extraClasses ?? []), "cm-line-userInputActiveQuestion"];
+      if (
+        userInputRef.optionIndex !== undefined
         && pendingUserInputHighlight.optionIndex !== undefined
-        && line.userInputRef.optionIndex === pendingUserInputHighlight.optionIndex
+        && userInputRef.optionIndex === pendingUserInputHighlight.optionIndex
       ) {
         extraClasses.push("cm-line-userInputActiveOption");
       }
 
-      return Object.assign({}, line, { extraClasses });
+      return Object.assign({}, nextLine, { extraClasses });
     });
     const startLineIndex = allLines.length;
     allLines.push(...blockLines);
+    if (blockLines.some((line) => line.text.length > 0 || line.kind !== "userPromptSeparator")) {
+      seenVisibleBlock = true;
+    }
 
     if (block.type === "user-message" && block.attachments && block.attachments.length > 0) {
       const attachmentLineOffsets = [...blockLines]
@@ -522,7 +542,7 @@ function buildEditorTheme() {
       ".cm-line-list": { color: "#c7ccd1" },
       ".cm-line-userPromptSeparator": {
         position: "relative",
-        minHeight: "12px",
+        minHeight: "40px",
       },
       ".cm-line-userPromptSeparator::before": {
         content: '""',
@@ -530,8 +550,14 @@ function buildEditorTheme() {
         left: "0",
         right: "0",
         top: "50%",
-        borderTop: "1px solid rgba(95, 103, 111, 0.38)",
+        borderTop: "1px solid rgba(226, 232, 238, 0.26)",
         transform: "translateY(-50%)",
+      },
+      ".cm-line-userPromptSeparator.cm-line-userPromptSeparatorHidden": {
+        minHeight: "0",
+      },
+      ".cm-line-userPromptSeparator.cm-line-userPromptSeparatorHidden::before": {
+        display: "none",
       },
       ".cm-line-workGroupSeparator": {
         position: "relative",
@@ -656,14 +682,25 @@ function buildEditorTheme() {
         position: "relative",
         overflow: "visible",
       },
-      ".cm-line-promptStart::before": {
+      ".cm-line-userMessageStart": {
+        position: "relative",
+        overflow: "visible",
+      },
+      ".cm-line-promptStart::before, .cm-line-userMessageStart::before": {
         content: '"›"',
         position: "absolute",
         left: "-2ch",
         top: "0",
-        color: "#757b82",
         userSelect: "none",
         pointerEvents: "none",
+        fontSize: "18px",
+        lineHeight: "1",
+      },
+      ".cm-line-promptStart::before": {
+        color: "#ffffff",
+      },
+      ".cm-line-userMessageStart::before": {
+        color: "#8e959d",
       },
       ".cm-line-promptSeparator": {
         position: "relative",

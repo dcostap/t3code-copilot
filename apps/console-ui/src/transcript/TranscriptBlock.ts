@@ -430,15 +430,23 @@ function userPromptToLines(
   options: { attachmentCount?: number } = {},
 ): AnnotatedLine[] {
   const contentLines = text.length > 0 ? wrapLines(text, "userMessage") : [];
-  const attachmentLines = Array.from(
+  const attachmentLines: AnnotatedLine[] = Array.from(
     { length: options.attachmentCount ?? 0 },
     () => ({ text: "", kind: "attachmentPanel" as const }),
   );
+  const bodyLines = [...contentLines, ...attachmentLines];
+
+  if (bodyLines.length > 0) {
+    const firstLine = bodyLines[0]!;
+    bodyLines[0] = {
+      ...firstLine,
+      extraClasses: [...(firstLine.extraClasses ?? []), "cm-line-userMessageStart"],
+    };
+  }
 
   return [
     { text: "", kind: "userPromptSeparator" },
-    ...contentLines,
-    ...attachmentLines,
+    ...bodyLines,
     { text: "", kind: "userPromptSeparator" },
   ];
 }
@@ -570,7 +578,6 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
 
     case "reasoning-text":
       return [
-        { text: "", kind: "reasoningSeparator" },
         ...renderMarkdownTextToLines(block.text, "reasoning"),
         { text: "", kind: "reasoningSeparator" },
       ];
