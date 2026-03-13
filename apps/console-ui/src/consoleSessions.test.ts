@@ -5,6 +5,7 @@ import type { OrchestrationProject, OrchestrationThread } from "@t3tools/contrac
 import {
   activateSessionPane,
   closeSessionPane,
+  closeWorkspaceSession,
   createSessionFromHistoryRef,
   reconcileWorkspaceState,
   resolveThreadCwd,
@@ -359,5 +360,73 @@ describe("session pane operations", () => {
 
     expect(closed.panes).toHaveLength(1);
     expect(closed.histories).toHaveLength(2);
+  });
+});
+
+describe("workspace session operations", () => {
+  it("closes an active session and focuses the previous remaining session", () => {
+    const firstThread = makeThread({
+      id: "thread:1",
+      createdAt: "2026-03-12T10:00:00.000Z",
+    });
+    const secondThread = makeThread({
+      id: "thread:2",
+      createdAt: "2026-03-12T10:05:00.000Z",
+    });
+    const firstSession = createSessionFromHistoryRef(
+      {
+        threadId: firstThread.id,
+        preferredProvider: "codex",
+        cwd: project.workspaceRoot,
+        projectId: project.id,
+        createdAt: firstThread.createdAt,
+      },
+      [],
+    );
+    const secondSession = createSessionFromHistoryRef(
+      {
+        threadId: secondThread.id,
+        preferredProvider: "copilot",
+        cwd: project.workspaceRoot,
+        projectId: project.id,
+        createdAt: secondThread.createdAt,
+      },
+      [firstSession],
+    );
+
+    const closed = closeWorkspaceSession(
+      {
+        sessions: [firstSession, secondSession],
+        activeSessionId: secondSession.id,
+      },
+      secondSession.id,
+    );
+
+    expect(closed.sessions).toHaveLength(1);
+    expect(closed.sessions[0]?.id).toBe(firstSession.id);
+    expect(closed.activeSessionId).toBe(firstSession.id);
+  });
+
+  it("does nothing when trying to close the last remaining session", () => {
+    const thread = makeThread({
+      id: "thread:1",
+      createdAt: "2026-03-12T10:00:00.000Z",
+    });
+    const session = createSessionFromHistoryRef(
+      {
+        threadId: thread.id,
+        preferredProvider: "codex",
+        cwd: project.workspaceRoot,
+        projectId: project.id,
+        createdAt: thread.createdAt,
+      },
+      [],
+    );
+    const state = {
+      sessions: [session],
+      activeSessionId: session.id,
+    };
+
+    expect(closeWorkspaceSession(state, session.id)).toBe(state);
   });
 });

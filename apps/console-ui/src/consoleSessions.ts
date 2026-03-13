@@ -44,6 +44,7 @@ export interface ConsoleWorkspaceModel {
   readonly activeThread: OrchestrationThread | null;
   readonly activeProject: OrchestrationProject | null;
   activateSession(sessionId: string): void;
+  closeSession(sessionId: string): void;
   activatePane(paneId: string): void;
   splitActivePane(input: {
     threadId: OrchestrationThread["id"];
@@ -203,6 +204,35 @@ function updateSession(
     return next;
   });
   return changed ? sessions : existing;
+}
+
+export function closeWorkspaceSession(
+  state: ConsoleWorkspaceState,
+  sessionId: string,
+): ConsoleWorkspaceState {
+  if (state.sessions.length <= 1 || !state.sessions.some((session) => session.id === sessionId)) {
+    return state;
+  }
+
+  const closingIndex = state.sessions.findIndex((session) => session.id === sessionId);
+  if (closingIndex === -1) {
+    return state;
+  }
+
+  const sessions = state.sessions.filter((session) => session.id !== sessionId);
+  const activeSessionId =
+    state.activeSessionId === sessionId
+      ? (sessions[Math.max(0, closingIndex - 1)]?.id ?? sessions[0]?.id ?? null)
+      : state.activeSessionId;
+
+  if (sessions.length === state.sessions.length && activeSessionId === state.activeSessionId) {
+    return state;
+  }
+
+  return {
+    sessions,
+    activeSessionId,
+  };
 }
 
 function withSessionUpdatedAt(
@@ -560,6 +590,10 @@ export function useConsoleWorkspaceSessions(input: {
     );
   }, []);
 
+  const closeSession = useCallback((sessionId: string) => {
+    setState((existing) => closeWorkspaceSession(existing, sessionId));
+  }, []);
+
   const activatePane = useCallback((paneId: string) => {
     setState((existing) => {
       if (!existing.activeSessionId) {
@@ -628,6 +662,7 @@ export function useConsoleWorkspaceSessions(input: {
     activeThread,
     activeProject,
     activateSession,
+    closeSession,
     activatePane,
     splitActivePane,
     closePane,
