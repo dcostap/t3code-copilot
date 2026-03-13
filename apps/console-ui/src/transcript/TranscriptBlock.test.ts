@@ -11,7 +11,7 @@ describe("blockToLines", () => {
       }),
     ).toEqual([
       { text: "", kind: "userPromptSeparator" },
-      { text: "hello", kind: "userMessage" },
+      { text: "hello", kind: "userMessage", extraClasses: ["cm-line-userMessageStart"] },
       { text: "", kind: "userPromptSeparator" },
     ]);
   });
@@ -129,7 +129,7 @@ describe("blockToLines", () => {
         },
       },
       { text: "", kind: "userPromptSeparator" },
-      { text: "Staging", kind: "userMessage" },
+      { text: "Staging", kind: "userMessage", extraClasses: ["cm-line-userMessageStart"] },
       { text: "", kind: "userPromptSeparator" },
     ]);
   });

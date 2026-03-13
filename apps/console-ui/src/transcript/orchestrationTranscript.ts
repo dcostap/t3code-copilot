@@ -69,6 +69,40 @@ function stripSimpleMarkdown(text: string): string {
     .replace(/_(.*?)_/g, "$1");
 }
 
+function splitReasoningSummaryIntoBlocks(text: string): TranscriptBlock[] {
+  const headingMatches = [...text.matchAll(/\*\*([^*\n][^*]*?)\*\*/g)];
+  if (headingMatches.length === 0) {
+    const normalized = stripSimpleMarkdown(text).trim();
+    return normalized ? [{ type: "reasoning-summary", text: normalized }] : [];
+  }
+
+  const blocks: TranscriptBlock[] = [];
+
+  for (let index = 0; index < headingMatches.length; index += 1) {
+    const match = headingMatches[index];
+    const headingText = match?.[1]?.trim();
+    if (!match || !headingText) {
+      continue;
+    }
+
+    blocks.push({ type: "reasoning-summary", text: stripSimpleMarkdown(headingText) });
+
+    const bodyStart = match.index + match[0].length;
+    const bodyEnd = headingMatches[index + 1]?.index ?? text.length;
+    const bodyText = stripSimpleMarkdown(text.slice(bodyStart, bodyEnd)).trim();
+    if (bodyText) {
+      blocks.push({ type: "reasoning-text", text: bodyText });
+    }
+  }
+
+  if (blocks.length > 0) {
+    return blocks;
+  }
+
+  const normalized = stripSimpleMarkdown(text).trim();
+  return normalized ? [{ type: "reasoning-summary", text: normalized }] : [];
+}
+
 function toolStatusToBlockStatus(status: unknown): "running" | "done" | "error" | "declined" {
   switch (status) {
     case "in_progress":
@@ -504,9 +538,7 @@ function activityToBlocks(
         asString(payload?.detail) ??
         asString(payload?.message) ??
         asString(activity.summary);
-      return detail
-        ? [{ type: "reasoning-summary", text: stripSimpleMarkdown(detail) }]
-        : [];
+      return detail ? splitReasoningSummaryIntoBlocks(detail) : [];
     }
 
     case "reasoning.text": {

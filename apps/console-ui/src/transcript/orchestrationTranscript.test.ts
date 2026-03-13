@@ -540,6 +540,53 @@ describe("threadToTranscriptBlocks", () => {
     });
   });
 
+  it("splits markdown-formatted reasoning summaries into headings and faded body blocks", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-reasoning-summary-markdown"),
+          tone: "info",
+          kind: "reasoning.summary",
+          summary: "Reasoning summary",
+          payload: {
+            streamKind: "reasoning_summary_text",
+            text:
+              "**Interpreting user humor**\n\nI see the user is asking a lighthearted question about taking their car to a car wash 50 meters away or walking. Since it is only 50 meters, driving might seem funny, but they probably just want practical advice!**Crafting a light response**\n\nIf the car wash is just 50 meters away, walking makes sense for a short trip. However, since the goal is to wash the car, it has to get there somehow.",
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-12T09:00:02.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toContainEqual({
+      type: "reasoning-summary",
+      text: "Interpreting user humor",
+    });
+    expect(derived).toContainEqual({
+      type: "reasoning-text",
+      text:
+        "I see the user is asking a lighthearted question about taking their car to a car wash 50 meters away or walking. Since it is only 50 meters, driving might seem funny, but they probably just want practical advice!",
+    });
+    expect(derived).toContainEqual({
+      type: "reasoning-summary",
+      text: "Crafting a light response",
+    });
+    expect(derived).toContainEqual({
+      type: "reasoning-text",
+      text:
+        "If the car wash is just 50 meters away, walking makes sense for a short trip. However, since the goal is to wash the car, it has to get there somehow.",
+    });
+  });
+
   it("suppresses coarse task.progress and keeps only detailed reasoning", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
