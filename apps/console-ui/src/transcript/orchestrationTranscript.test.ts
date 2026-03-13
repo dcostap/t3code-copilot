@@ -633,6 +633,80 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("keeps reasoning blocks separate while the working-state line stays generic", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        messages: [],
+        proposedPlans: [],
+        checkpoints: [],
+        activities: [
+          {
+            id: EventId.makeUnsafe("activity-task-progress-working-line"),
+            tone: "info",
+            kind: "task.progress",
+            summary: "Thinking about the file layout",
+            payload: {
+              taskId: "task-1",
+              detail: "**Thinking about the file layout**",
+            },
+            turnId: TurnId.makeUnsafe("turn-running"),
+            sequence: 3,
+            createdAt: "2026-03-12T09:00:03.000Z",
+          },
+          {
+            id: EventId.makeUnsafe("activity-reasoning-summary-working-line"),
+            tone: "info",
+            kind: "reasoning.summary",
+            summary: "Clarifying file layout",
+            payload: {
+              streamKind: "reasoning_summary_text",
+              text: "**Clarifying file layout**\n\nNeed to inspect the workspace tree first.",
+            },
+            turnId: TurnId.makeUnsafe("turn-running"),
+            sequence: 4,
+            createdAt: "2026-03-12T09:00:04.000Z",
+          },
+        ],
+        latestTurn: {
+          turnId: TurnId.makeUnsafe("turn-running"),
+          state: "running",
+          requestedAt: "2026-03-12T09:00:00.000Z",
+          startedAt: "2026-03-12T09:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe("turn-running"),
+          updatedAt: "2026-03-12T09:00:04.000Z",
+        },
+      },
+      { now: "2026-03-12T09:00:04.500Z" },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "reasoning-summary",
+        text: "Clarifying file layout",
+      },
+      {
+        type: "reasoning-text",
+        text: "Need to inspect the workspace tree first.",
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-12T09:00:01.000Z",
+        now: "2026-03-12T09:00:04.500Z",
+      },
+    ]);
+  });
+
   it("suppresses routine task lifecycle chatter from transcript history", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
@@ -751,6 +825,42 @@ describe("threadToTranscriptBlocks", () => {
     expect(derived.at(-1)).toEqual({
       type: "reasoning-summary",
       text: "Clarifying the car wash situation",
+    });
+  });
+
+  it("promotes long unstructured reasoning.summary payloads into reasoning text", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-reasoning-summary-long"),
+          tone: "info",
+          kind: "reasoning.summary",
+          summary: "Reasoning summary",
+          payload: {
+            streamKind: "reasoning_summary_text",
+            text:
+              "I need to respond to the user's request to run a sleep command for two minutes. "
+              + "Before I execute the command, I'll include some commentary to clarify that I'm preparing to do substantial work.",
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-12T09:00:03.000Z",
+        },
+      ],
+    });
+
+    expect(derived.at(-1)).toEqual({
+      type: "reasoning-text",
+      text:
+        "I need to respond to the user's request to run a sleep command for two minutes. "
+        + "Before I execute the command, I'll include some commentary to clarify that I'm preparing to do substantial work.",
     });
   });
 

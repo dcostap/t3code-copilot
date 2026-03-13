@@ -277,11 +277,49 @@ describe("blockToLines", () => {
       { text: "", kind: "workGroupSeparator" },
       { text: "Command run", kind: "workGroupHeader" },
       {
-        text: '      $ "C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command \'Write-Output $env:USERPROFILE\'',
+        text: '      ✓ "C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command \'Write-Output $env:USERPROFILE\'',
         kind: "commandExec",
         extraClasses: ["cm-line-workItemDone"],
       },
       { text: "completed in 0.6s", kind: "workGroupFooter" },
+      { text: "", kind: "workGroupSeparator" },
+    ]);
+  });
+
+  it("renders running commands without a spinner glyph and pulses the command text", () => {
+    expect(
+      blockToLines({
+        type: "work-group",
+        title: "Command run",
+        status: "running",
+        startedAt: "1970-01-01T00:00:00.000Z",
+        endedAt: "1970-01-01T00:00:00.180Z",
+        now: "1970-01-01T00:00:00.180Z",
+        items: [
+          {
+            kind: "command",
+            label: "Command run",
+            status: "running",
+            command: "Get-Location",
+          },
+        ],
+      }),
+    ).toEqual([
+      { text: "", kind: "workGroupSeparator" },
+      { text: "Command run", kind: "workGroupHeader" },
+      {
+        text: "      Get-Location",
+        kind: "commandExec",
+        extraClasses: ["cm-line-workItemRunning"],
+        highlightSpans: [
+          { from: 6, to: 7, className: "tok-workingPulseMid" },
+          { from: 7, to: 8, className: "tok-workingPulseCore" },
+          { from: 8, to: 9, className: "tok-workingPulseMid" },
+          { from: 9, to: 10, className: "tok-workingPulseEdge" },
+          { from: 10, to: 11, className: "tok-workingPulseEdge" },
+        ],
+      },
+      { text: "running for 0.2s", kind: "workGroupFooter" },
       { text: "", kind: "workGroupSeparator" },
     ]);
   });
@@ -456,14 +494,21 @@ describe("blockToLines", () => {
     expect(
       blockToLines({
         type: "working-state",
-        startedAt: "2026-03-12T09:00:00.000Z",
-        now: "2026-03-12T09:00:04.200Z",
+        startedAt: "1970-01-01T00:00:00.000Z",
+        now: "1970-01-01T00:00:00.180Z",
       }),
     ).toEqual([
-      { text: "", kind: "workingSeparator" },
-      { text: "Working", kind: "workingHeader" },
-      { text: "running for 4.2s", kind: "workingFooter" },
-      { text: "", kind: "workingSeparator" },
+      {
+        text: "Working for 0.2s",
+        kind: "workingLine",
+        highlightSpans: [
+          { from: 0, to: 1, className: "tok-workingPulseMid" },
+          { from: 1, to: 2, className: "tok-workingPulseCore" },
+          { from: 2, to: 3, className: "tok-workingPulseMid" },
+          { from: 3, to: 4, className: "tok-workingPulseEdge" },
+          { from: 4, to: 5, className: "tok-workingPulseEdge" },
+        ],
+      },
     ]);
   });
 });

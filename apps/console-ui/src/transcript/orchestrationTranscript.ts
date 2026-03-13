@@ -73,7 +73,13 @@ function splitReasoningSummaryIntoBlocks(text: string): TranscriptBlock[] {
   const headingMatches = [...text.matchAll(/\*\*([^*\n][^*]*?)\*\*/g)];
   if (headingMatches.length === 0) {
     const normalized = stripSimpleMarkdown(text).trim();
-    return normalized ? [{ type: "reasoning-summary", text: normalized }] : [];
+    if (!normalized) {
+      return [];
+    }
+
+    const lineCount = normalized.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
+    const looksLikeBody = lineCount > 1 || normalized.length > 120;
+    return [{ type: looksLikeBody ? "reasoning-text" : "reasoning-summary", text: normalized }];
   }
 
   const blocks: TranscriptBlock[] = [];
@@ -558,6 +564,8 @@ function workGroupStatus(items: ReadonlyArray<WorkGroupItem>): "running" | "done
 
 function workItemsToBlock(
   items: ReadonlyArray<{ activity: OrchestrationThreadActivity; item: PendingWorkItem }>,
+  now?: string,
+  pulseOriginAt?: string,
 ): TranscriptBlock | null {
   if (items.length === 0) {
     return null;
@@ -599,6 +607,8 @@ function workItemsToBlock(
     status: workGroupStatus(mergedItems),
     startedAt,
     endedAt,
+    ...(now ? { now } : {}),
+    ...(workGroupStatus(mergedItems) === "running" && pulseOriginAt ? { pulseOriginAt } : {}),
     items: mergedItems.map(({ mergeKey: _mergeKey, ...item }) => item),
   };
 }
@@ -993,9 +1003,14 @@ export function threadToTranscriptBlocks(
   const blocks: TranscriptBlock[] = [];
   let pendingWorkItems: Array<{ activity: OrchestrationThreadActivity; item: PendingWorkItem }> = [];
   let pendingWorkTurnId: OrchestrationThreadActivity["turnId"] = null;
+  const activePulseOriginAt =
+    thread.latestTurn?.startedAt
+    ?? thread.latestTurn?.requestedAt
+    ?? thread.session?.updatedAt
+    ?? thread.updatedAt;
 
   const flushWorkItems = () => {
-    const block = workItemsToBlock(pendingWorkItems);
+    const block = workItemsToBlock(pendingWorkItems, options.now, activePulseOriginAt);
     if (block) {
       blocks.push(block);
     }

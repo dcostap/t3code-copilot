@@ -39,9 +39,7 @@ export type LineKind =
   | "checkpointHeader"
   | "checkpointSummary"
   | "checkpointFile"
-  | "workingSeparator"
-  | "workingHeader"
-  | "workingFooter"
+  | "workingLine"
   | "promptInput"
   | "promptSeparator"
   | "toolCall"
@@ -157,6 +155,8 @@ export interface WorkGroupBlock {
   readonly status: "running" | "done" | "error" | "declined";
   readonly startedAt: string;
   readonly endedAt: string;
+  readonly now?: string;
+  readonly pulseOriginAt?: string;
   readonly items: ReadonlyArray<WorkGroupItem>;
 }
 
@@ -461,9 +461,9 @@ function userPromptToLines(
   }
 
   return [
-    { text: "", kind: "userPromptSeparator" },
+    { text: DIVIDER_TEXT, kind: "userPromptSeparator" },
     ...bodyLines,
-    { text: "", kind: "userPromptSeparator" },
+    { text: DIVIDER_TEXT, kind: "userPromptSeparator" },
   ];
 }
 
@@ -481,8 +481,11 @@ function formatElapsedDuration(ms: number) {
 
 function formatWorkGroupFooter(block: WorkGroupBlock) {
   const startedAtMs = Date.parse(block.startedAt);
-  const endedAtMs = Date.parse(block.endedAt);
-  const elapsedLabel = formatElapsedDuration(endedAtMs - startedAtMs);
+  const referenceAtMs =
+    block.status === "running" && block.now
+      ? Date.parse(block.now)
+      : Date.parse(block.endedAt);
+  const elapsedLabel = formatElapsedDuration(referenceAtMs - startedAtMs);
 
   switch (block.status) {
     case "running":
@@ -496,24 +499,55 @@ function formatWorkGroupFooter(block: WorkGroupBlock) {
   }
 }
 
+function workItemStatusPrefix(item: WorkGroupItem, now?: string) {
+  switch (item.status) {
+    case "running": {
+      const frames = ["◜", "◠", "◝", "◞", "◡", "◟"] as const;
+      if (!now) {
+        return frames[0];
+      }
+      const nowMs = Date.parse(now);
+      if (!Number.isFinite(nowMs)) {
+        return frames[0];
+      }
+      return frames[Math.floor(nowMs / 100) % frames.length] ?? frames[0];
+    }
+    case "done":
+      return "✓";
+    case "error":
+    case "declined":
+      return "✗";
+  }
+}
+
 function workItemToLines(
   item: WorkGroupItem,
   collapseLabel: boolean,
+  now?: string,
+  startedAt?: string,
 ): AnnotatedLine[] {
-  const statusIcon =
-    item.status === "running" ? "⟳" : item.status === "done" ? "✓" : "✗";
+  const statusPrefix = workItemStatusPrefix(item, now);
   const lines: AnnotatedLine[] = [];
 
   if (!collapseLabel && item.kind !== "command") {
-    lines.push({ text: `  • ${statusIcon} ${item.label}`, kind: "toolCall" });
+    lines.push({ text: `  • ${statusPrefix} ${item.label}`, kind: "toolCall" });
   }
 
   if (item.command) {
     const exitLabel = item.exitCode !== undefined ? ` [exit ${item.exitCode}]` : "";
+    const isRunning = item.status === "running";
+    const text = isRunning
+      ? `      ${item.command}${exitLabel}`
+      : `      ${statusPrefix} ${item.command}${exitLabel}`;
+    const highlightSpans =
+      isRunning && now
+        ? workingPulseSpans(text, now, startedAt, 6, text.length)
+        : undefined;
     lines.push({
-      text: `      ${item.command}${exitLabel}`,
+      text,
       kind: "commandExec",
       extraClasses: [workItemStatusClass(item)],
+      ...(highlightSpans && highlightSpans.length > 0 ? { highlightSpans } : {}),
     });
   }
 
@@ -542,7 +576,7 @@ function workItemToLines(
   }
 
   if (lines.length === 0) {
-    lines.push({ text: `  • ${statusIcon} ${item.label}`, kind: "toolCall" });
+    lines.push({ text: `  • ${statusPrefix} ${item.label}`, kind: "toolCall" });
   }
 
   return lines;
@@ -646,6 +680,71 @@ function formatSignedCount(value: number) {
   return `${value >= 0 ? "+" : ""}${value}`;
 }
 
+function workingPulseIndex(text: string, now: string, startedAt?: string, radius = 0) {
+  const textLength = text.length;
+  if (textLength === 0) {
+    return null;
+  }
+
+  const pauseMs = 550;
+  const activeMs = 1_900;
+  const cycleMs = activeMs + pauseMs;
+  const nowMs = Date.parse(now);
+  const startMs = startedAt ? Date.parse(startedAt) : nowMs;
+  if (!Number.isFinite(nowMs) || !Number.isFinite(startMs)) {
+    return null;
+  }
+
+  const elapsedMs = Math.max(0, nowMs - startMs);
+  const offsetMs = elapsedMs % cycleMs;
+  if (offsetMs >= activeMs) {
+    return null;
+  }
+
+  const activePositions = Math.max(1, textLength + radius);
+  return Math.floor((offsetMs / activeMs) * activePositions);
+}
+
+function workingPulseSpans(
+  text: string,
+  now: string,
+  startedAt?: string,
+  rangeStart = 0,
+  rangeEnd = text.length,
+): ReadonlyArray<{
+  readonly from: number;
+  readonly to: number;
+  readonly className: string;
+}> {
+  const safeStart = Math.max(0, Math.min(rangeStart, text.length));
+  const safeEnd = Math.max(safeStart, Math.min(rangeEnd, text.length));
+  const slice = text.slice(safeStart, safeEnd);
+  const baselineChars = 22;
+  const baseRadius = 3;
+  const extraRadius =
+    slice.length <= baselineChars ? 0 : Math.max(0, Math.floor((slice.length - baselineChars) / 6));
+  const radius = baseRadius + extraRadius;
+  const center = workingPulseIndex(slice, now, startedAt, radius);
+  if (center === null) {
+    return [];
+  }
+
+  return Array.from({ length: radius * 2 + 1 }, (_, arrayIndex) => arrayIndex - radius).flatMap((offset) => {
+    const index = center + offset;
+    if (index < 0 || index >= slice.length) {
+      return [];
+    }
+    const absOffset = Math.abs(offset);
+    const className =
+      absOffset === 0
+        ? "tok-workingPulseCore"
+        : absOffset === 1
+          ? "tok-workingPulseMid"
+          : "tok-workingPulseEdge";
+    return [{ from: safeStart + index, to: safeStart + index + 1, className }];
+  });
+}
+
 function summarizeCheckpointFiles(
   files: ReadonlyArray<CheckpointSummaryBlock["files"][number]>,
 ) {
@@ -715,7 +814,8 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
       return [
         { text: "", kind: "workGroupSeparator" },
         { text: headerText, kind: "workGroupHeader" },
-        ...block.items.flatMap((item) => workItemToLines(item, collapseSingleItemLabel)),
+        ...block.items.flatMap((item) =>
+          workItemToLines(item, collapseSingleItemLabel, block.now, block.pulseOriginAt ?? block.startedAt)),
         { text: formatWorkGroupFooter(block), kind: "workGroupFooter" },
         { text: "", kind: "workGroupSeparator" },
       ];
@@ -844,12 +944,17 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
 
     case "working-state": {
       const elapsedLabel = formatElapsedDuration(Date.parse(block.now) - Date.parse(block.startedAt));
-      return [
-        { text: "", kind: "workingSeparator" },
-        { text: "Working", kind: "workingHeader" },
-        { text: `running for ${elapsedLabel}`, kind: "workingFooter" },
-        { text: "", kind: "workingSeparator" },
-      ];
+      const text = `Working for ${elapsedLabel}`;
+      const highlightSpans = workingPulseSpans(text, block.now, block.startedAt);
+      return [{
+        text,
+        kind: "workingLine",
+        ...(highlightSpans.length > 0
+          ? {
+              highlightSpans,
+            }
+          : {}),
+      }];
     }
 
     case "divider":
