@@ -461,9 +461,9 @@ function userPromptToLines(
   }
 
   return [
-    { text: DIVIDER_TEXT, kind: "userPromptSeparator" },
+    { text: "", kind: "userPromptSeparator" },
     ...bodyLines,
-    { text: DIVIDER_TEXT, kind: "userPromptSeparator" },
+    { text: "", kind: "userPromptSeparator" },
   ];
 }
 
