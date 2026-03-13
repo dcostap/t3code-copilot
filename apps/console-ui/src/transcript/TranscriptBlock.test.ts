@@ -157,7 +157,7 @@ describe("blockToLines", () => {
     ]);
   });
 
-  it("renders single file-change work groups as one-line edit summaries", () => {
+  it("renders single file-change work groups as bounded edit blocks", () => {
     expect(
       blockToLines({
         type: "work-group",
@@ -182,17 +182,107 @@ describe("blockToLines", () => {
         kind: "workGroupSeparator",
       },
       {
-        text: 'Edited "C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt" (+3, -0)',
+        text: "Edited file",
+        kind: "workGroupHeader",
+      },
+      {
+        text: '      "C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt" (+3, -0)',
         kind: "fileChangeSummary",
         highlightSpans: [
-          { from: 55, to: 57, className: "tok-added" },
-          { from: 59, to: 61, className: "tok-removed" },
+          { from: 54, to: 56, className: "tok-added" },
+          { from: 58, to: 60, className: "tok-removed" },
         ],
+      },
+      {
+        text: "completed in 0.0s",
+        kind: "workGroupFooter",
       },
       {
         text: "",
         kind: "workGroupSeparator",
       },
+    ]);
+  });
+
+  it("renders consecutive file-change items under one edited-files block", () => {
+    expect(
+      blockToLines({
+        type: "work-group",
+        title: "File change",
+        status: "done",
+        startedAt: "2026-03-13T10:57:31.912Z",
+        endedAt: "2026-03-13T10:57:32.512Z",
+        items: [
+          {
+            kind: "file-change",
+            label: "File change",
+            status: "done",
+            changedFiles: ["src/one.ts"],
+            additions: 2,
+            deletions: 1,
+          },
+          {
+            kind: "file-change",
+            label: "File change",
+            status: "done",
+            changedFiles: ["src/two.ts"],
+            additions: 4,
+            deletions: 0,
+          },
+        ],
+      }),
+    ).toEqual([
+      { text: "", kind: "workGroupSeparator" },
+      { text: "Edited files", kind: "workGroupHeader" },
+      {
+        text: '      "src/one.ts" (+2, -1)',
+        kind: "fileChangeSummary",
+        highlightSpans: [
+          { from: 20, to: 22, className: "tok-added" },
+          { from: 24, to: 26, className: "tok-removed" },
+        ],
+      },
+      {
+        text: '      "src/two.ts" (+4, -0)',
+        kind: "fileChangeSummary",
+        highlightSpans: [
+          { from: 20, to: 22, className: "tok-added" },
+          { from: 24, to: 26, className: "tok-removed" },
+        ],
+      },
+      { text: "completed in 0.6s", kind: "workGroupFooter" },
+      { text: "", kind: "workGroupSeparator" },
+    ]);
+  });
+
+  it("does not repeat command detail when it matches the command text", () => {
+    expect(
+      blockToLines({
+        type: "work-group",
+        title: "Command run",
+        status: "done",
+        startedAt: "2026-03-13T10:57:31.912Z",
+        endedAt: "2026-03-13T10:57:32.512Z",
+        items: [
+          {
+            kind: "command",
+            label: "Command run",
+            status: "done",
+            command: '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command \'Write-Output $env:USERPROFILE\'',
+            detail: '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command \'Write-Output $env:USERPROFILE\'',
+          },
+        ],
+      }),
+    ).toEqual([
+      { text: "", kind: "workGroupSeparator" },
+      { text: "Command run", kind: "workGroupHeader" },
+      {
+        text: '      $ "C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command \'Write-Output $env:USERPROFILE\'',
+        kind: "commandExec",
+        extraClasses: ["cm-line-workItemDone"],
+      },
+      { text: "completed in 0.6s", kind: "workGroupFooter" },
+      { text: "", kind: "workGroupSeparator" },
     ]);
   });
 

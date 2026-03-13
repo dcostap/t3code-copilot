@@ -238,6 +238,17 @@ function extractChangedFiles(payload: Record<string, unknown> | null): string[] 
   return results;
 }
 
+function extractWorkItemId(payload: Record<string, unknown> | null): string | null {
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  const result = asRecord(item?.result);
+  return (
+    asString(item?.id) ??
+    asString(result?.id) ??
+    asString(data?.id)
+  );
+}
+
 function extractFileChangeStats(
   payload: Record<string, unknown> | null,
 ): { changedFiles: string[]; additions?: number; deletions?: number } | null {
@@ -452,13 +463,16 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
   const status = resolveActivityStatus(payload?.status, activity.kind);
   const label = asString(payload?.title) ?? activity.summary;
   const fileChangeStats = itemType === "file_change" ? extractFileChangeStats(payload) : null;
+  const itemId = extractWorkItemId(payload);
 
   if (itemType === "file_change") {
     return {
       kind: "file-change",
       label,
       status,
-      mergeKey: `file-change:${(fileChangeStats?.changedFiles ?? changedFiles).join("|")}`,
+      mergeKey: itemId
+        ? `file-change:id:${itemId}`
+        : `file-change:path:${(fileChangeStats?.changedFiles ?? changedFiles).join("|")}`,
       ...(fileChangeStats?.changedFiles?.length ? { changedFiles: fileChangeStats.changedFiles } : changedFiles.length > 0 ? { changedFiles } : {}),
       ...(typeof fileChangeStats?.additions === "number" ? { additions: fileChangeStats.additions } : {}),
       ...(typeof fileChangeStats?.deletions === "number" ? { deletions: fileChangeStats.deletions } : {}),
@@ -470,7 +484,9 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
       kind: "command",
       label,
       status,
-      mergeKey: `command:${command ?? label}`,
+      mergeKey: itemId
+        ? `command:id:${itemId}`
+        : `command:text:${command ?? label}`,
       ...(detail ? { detail } : {}),
       ...(command ? { command } : {}),
       ...(typeof exitCode === "number" ? { exitCode } : {}),
@@ -548,12 +564,24 @@ function workItemsToBlock(
   }
 
   const mergedItems: PendingWorkItem[] = [];
+  const mergedIndexByKey = new Map<string, number>();
   for (const entry of items) {
+    const existingIndex = mergedIndexByKey.get(entry.item.mergeKey);
+    if (existingIndex !== undefined) {
+      const existing = mergedItems[existingIndex];
+      if (existing && canMergeWorkItems(existing, entry.item)) {
+        mergedItems[existingIndex] = mergeWorkItems(existing, entry.item);
+        continue;
+      }
+    }
+
     const previous = mergedItems.at(-1);
     if (previous && canMergeWorkItems(previous, entry.item)) {
       mergedItems[mergedItems.length - 1] = mergeWorkItems(previous, entry.item);
+      mergedIndexByKey.set(entry.item.mergeKey, mergedItems.length - 1);
       continue;
     }
+    mergedIndexByKey.set(entry.item.mergeKey, mergedItems.length);
     mergedItems.push(entry.item);
   }
 

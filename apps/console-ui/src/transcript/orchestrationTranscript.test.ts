@@ -162,6 +162,129 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("deduplicates interleaved command lifecycle items into one line per command", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-command-start-1"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "Command run",
+          payload: {
+            itemType: "command_execution",
+            title: "Command run",
+            status: "inProgress",
+            data: {
+              item: {
+                id: "cmd-1",
+                command: ["Get-Location"],
+                status: "inProgress",
+              },
+            },
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-13T12:00:00.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-command-start-2"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "Command run",
+          payload: {
+            itemType: "command_execution",
+            title: "Command run",
+            status: "inProgress",
+            data: {
+              item: {
+                id: "cmd-2",
+                command: ["git", "status", "--short"],
+                status: "inProgress",
+              },
+            },
+          },
+          turnId: null,
+          sequence: 2,
+          createdAt: "2026-03-13T12:00:00.100Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-command-complete-1"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "Command run",
+          payload: {
+            itemType: "command_execution",
+            title: "Command run",
+            status: "completed",
+            data: {
+              item: {
+                id: "cmd-1",
+                command: ["Get-Location"],
+                status: "completed",
+              },
+            },
+          },
+          turnId: null,
+          sequence: 3,
+          createdAt: "2026-03-13T12:00:00.200Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-command-complete-2"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "Command run",
+          payload: {
+            itemType: "command_execution",
+            title: "Command run",
+            status: "completed",
+            data: {
+              item: {
+                id: "cmd-2",
+                command: ["git", "status", "--short"],
+                status: "completed",
+              },
+            },
+          },
+          turnId: null,
+          sequence: 4,
+          createdAt: "2026-03-13T12:00:00.300Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "work-group",
+        title: "Command run",
+        status: "done",
+        startedAt: "2026-03-13T12:00:00.000Z",
+        endedAt: "2026-03-13T12:00:00.300Z",
+        items: [
+          {
+            kind: "command",
+            label: "Command run",
+            status: "done",
+            command: "Get-Location",
+          },
+          {
+            kind: "command",
+            label: "Command run",
+            status: "done",
+            command: "git status --short",
+          },
+        ],
+      },
+    ]);
+  });
+
   it("captures file-change diff counts for compact edit summaries", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];

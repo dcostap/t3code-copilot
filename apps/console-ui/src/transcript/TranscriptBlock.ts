@@ -138,6 +138,19 @@ export interface WorkGroupItem {
   readonly deletions?: number;
 }
 
+function workItemStatusClass(item: WorkGroupItem) {
+  switch (item.status) {
+    case "running":
+      return "cm-line-workItemRunning";
+    case "done":
+      return "cm-line-workItemDone";
+    case "error":
+      return "cm-line-workItemError";
+    case "declined":
+      return "cm-line-workItemDeclined";
+  }
+}
+
 export interface WorkGroupBlock {
   readonly type: "work-group";
   readonly title?: string;
@@ -491,34 +504,40 @@ function workItemToLines(
     item.status === "running" ? "⟳" : item.status === "done" ? "✓" : "✗";
   const lines: AnnotatedLine[] = [];
 
-  if (!collapseLabel) {
+  if (!collapseLabel && item.kind !== "command") {
     lines.push({ text: `  • ${statusIcon} ${item.label}`, kind: "toolCall" });
   }
 
   if (item.command) {
     const exitLabel = item.exitCode !== undefined ? ` [exit ${item.exitCode}]` : "";
     lines.push({
-      text: `    $ ${item.command}${exitLabel}`,
+      text: `      ${item.command}${exitLabel}`,
       kind: "commandExec",
+      extraClasses: [workItemStatusClass(item)],
     });
   }
 
-  if (item.detail) {
-    lines.push({ text: `    ${item.detail}`, kind: "toolResult" });
+  const detailDuplicatesCommand =
+    typeof item.detail === "string"
+    && typeof item.command === "string"
+    && item.detail.trim() === item.command.trim();
+
+  if (item.detail && !detailDuplicatesCommand) {
+    lines.push({ text: `      ${item.detail}`, kind: "toolResult" });
   }
 
   if (item.output) {
-    lines.push(...prefixWrappedLines(item.output, "commandOutput", "    "));
+    lines.push(...prefixWrappedLines(item.output, "commandOutput", "      "));
   }
 
   if (item.changedFiles && item.changedFiles.length > 0) {
     const [firstPath, ...restPaths] = item.changedFiles;
     lines.push({
-      text: `    changed: ${firstPath}`,
+      text: `      changed: ${firstPath}`,
       kind: "toolResult",
     });
     for (const path of restPaths) {
-      lines.push({ text: `      ${path}`, kind: "toolResult" });
+      lines.push({ text: `        ${path}`, kind: "toolResult" });
     }
   }
 
@@ -539,7 +558,7 @@ function formatEditCounts(additions?: number, deletions?: number) {
   return ` (+${safeAdditions}, -${safeDeletions})`;
 }
 
-function fileChangeWorkGroupToLines(block: WorkGroupBlock, item: WorkGroupItem): AnnotatedLine[] {
+function fileChangeItemToLine(item: WorkGroupItem): AnnotatedLine {
   const changedFiles = item.changedFiles ?? [];
   const subject =
     changedFiles.length === 1
@@ -547,16 +566,8 @@ function fileChangeWorkGroupToLines(block: WorkGroupBlock, item: WorkGroupItem):
       : changedFiles.length > 1
         ? `${changedFiles.length} files`
         : "files";
-  const action =
-    item.status === "running"
-      ? "Editing"
-      : item.status === "error"
-        ? "Failed to edit"
-        : item.status === "declined"
-          ? "Declined edit for"
-          : "Edited";
   const counts = formatEditCounts(item.additions, item.deletions);
-  const text = `${action} ${subject}${counts}`;
+  const text = `      ${subject}${counts}`;
   const highlightSpans =
     counts.length > 0
       ? (() => {
@@ -573,13 +584,36 @@ function fileChangeWorkGroupToLines(block: WorkGroupBlock, item: WorkGroupItem):
         })()
       : undefined;
 
+  return {
+    text,
+    kind: "fileChangeSummary",
+    ...(highlightSpans ? { highlightSpans } : {}),
+  };
+}
+
+function fileChangeWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
+  const headerText =
+    block.status === "running"
+      ? block.items.length === 1
+        ? "Editing file"
+        : "Editing files"
+      : block.status === "error"
+        ? block.items.length === 1
+          ? "Failed to edit file"
+          : "Failed to edit files"
+        : block.status === "declined"
+          ? block.items.length === 1
+            ? "Declined file edit"
+            : "Declined file edits"
+          : block.items.length === 1
+            ? "Edited file"
+            : "Edited files";
+
   return [
     { text: "", kind: "workGroupSeparator" },
-    {
-      text,
-      kind: "fileChangeSummary",
-      ...(highlightSpans ? { highlightSpans } : {}),
-    },
+    { text: headerText, kind: "workGroupHeader" },
+    ...block.items.map((item) => fileChangeItemToLine(item)),
+    { text: formatWorkGroupFooter(block), kind: "workGroupFooter" },
     { text: "", kind: "workGroupSeparator" },
   ];
 }
@@ -671,8 +705,8 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
     }
 
     case "work-group": {
-      if (block.items.length === 1 && block.items[0]?.kind === "file-change") {
-        return fileChangeWorkGroupToLines(block, block.items[0]);
+      if (block.items.every((item) => item.kind === "file-change")) {
+        return fileChangeWorkGroupToLines(block);
       }
 
       const headerText = block.title ?? "Working";
