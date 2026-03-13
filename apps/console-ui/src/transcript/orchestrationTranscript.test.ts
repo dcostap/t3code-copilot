@@ -419,6 +419,63 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("suppresses routine task lifecycle chatter and renders progress as plain text", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-task-started"),
+          tone: "info",
+          kind: "task.started",
+          summary: "default task started",
+          payload: {
+            taskId: "task-1",
+            detail: "Inspect the repo",
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-12T09:00:01.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-task-progress"),
+          tone: "info",
+          kind: "task.progress",
+          summary: "Reasoning update",
+          payload: {
+            taskId: "task-1",
+            detail: "**Confirming response needed**",
+          },
+          turnId: null,
+          sequence: 2,
+          createdAt: "2026-03-12T09:00:02.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-task-completed"),
+          tone: "info",
+          kind: "task.completed",
+          summary: "Task completed",
+          payload: {
+            taskId: "task-1",
+            status: "completed",
+            detail: "All good on my end",
+          },
+          turnId: null,
+          sequence: 3,
+          createdAt: "2026-03-12T09:00:03.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([{ type: "status", text: "Confirming response needed" }]);
+  });
+
   it("splits assistant output around inline user-input requests using orchestration events", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];

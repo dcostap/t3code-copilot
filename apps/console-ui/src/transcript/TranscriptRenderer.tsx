@@ -413,8 +413,8 @@ function buildEditorTheme() {
         color: "#c5ccd3",
         backgroundColor: "transparent",
         fontFamily:
-          '"Cascadia Mono", "Cascadia Code", "Iosevka Term", "JetBrains Mono", Consolas, monospace',
-        fontSize: "15px",
+          '"Iosevka Term", "JetBrains Mono", "Cascadia Mono", "Cascadia Code", Consolas, monospace',
+        fontSize: "16px",
       },
       ".cm-scroller": {
         overflow: "visible",
@@ -429,7 +429,22 @@ function buildEditorTheme() {
         borderLeftColor: "#cfd6dd",
       },
       ".cm-selectionBackground": {
-        backgroundColor: "rgba(153, 170, 184, 0.14) !important",
+        backgroundColor: "#e6e6e6 !important",
+      },
+      ".cm-content ::selection": {
+        backgroundColor: "#e6e6e6",
+        color: "#000000",
+      },
+      ".cm-line::selection": {
+        backgroundColor: "#e6e6e6",
+        color: "#000000",
+      },
+      ".cm-line > span::selection": {
+        backgroundColor: "#e6e6e6",
+        color: "#000000",
+      },
+      ".cm-content .cm-selectionBackground": {
+        color: "#000000",
       },
       ".cm-focused": {
         outline: "none",
@@ -456,6 +471,9 @@ function buildEditorTheme() {
       ".cm-line-codeFenceBody": {
         color: "#c7d0d8",
         backgroundColor: "rgba(22, 29, 36, 0.82)",
+      },
+      ".cm-line-blockquote": {
+        color: "#aeb6bf",
       },
       ".cm-codeToken.tok-keyword": { color: "#d39bff" },
       ".cm-codeToken.tok-comment": { color: "#6e7d8b", fontStyle: "italic" },
@@ -603,18 +621,20 @@ function buildEditorTheme() {
         fontSize: "12px",
         paddingTop: "2px",
       },
-      ".cm-line-promptInput": { color: "#d6dbe0" },
+      ".cm-line-promptInput": {
+        color: "#d6dbe0",
+      },
       ".cm-line-attachmentPanel": {
         paddingLeft: "2ch",
       },
       ".cm-line-promptStart": {
         position: "relative",
-        paddingLeft: "2ch",
+        overflow: "visible",
       },
       ".cm-line-promptStart::before": {
         content: '"›"',
         position: "absolute",
-        left: "0",
+        left: "-2ch",
         top: "0",
         color: "#757b82",
         userSelect: "none",

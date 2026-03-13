@@ -16,6 +16,7 @@ export type LineKind =
   | "codeFenceSeparator"
   | "codeFenceHeader"
   | "codeFenceBody"
+  | "blockquote"
   | "meta"
   | "list"
   | "attachmentPanel"
@@ -317,6 +318,38 @@ function codeFenceToLines(language: string, lines: ReadonlyArray<string>): Annot
   ];
 }
 
+function renderMarkdownLine(line: string, fallbackKind: LineKind): AnnotatedLine {
+  const unorderedListMatch = line.match(/^(\s*)[-+*]\s+(.*)$/);
+  if (unorderedListMatch) {
+    const [, indent = "", content = ""] = unorderedListMatch;
+    return {
+      text: `${indent}• ${content}`,
+      kind: "list",
+    };
+  }
+
+  const orderedListMatch = line.match(/^(\s*)(\d+)[.)]\s+(.*)$/);
+  if (orderedListMatch) {
+    const [, indent = "", ordinal = "1", content = ""] = orderedListMatch;
+    return {
+      text: `${indent}${ordinal}. ${content}`,
+      kind: "list",
+    };
+  }
+
+  const blockquoteMatch = line.match(/^(\s*)((?:>\s*)+)(.*)$/);
+  if (blockquoteMatch) {
+    const [, indent = "", quotePrefix = "", content = ""] = blockquoteMatch;
+    const depth = (quotePrefix.match(/>/g) ?? []).length;
+    return {
+      text: `${indent}${"│ ".repeat(Math.max(1, depth))}${content}`,
+      kind: "blockquote",
+    };
+  }
+
+  return { text: line, kind: fallbackKind };
+}
+
 function renderMarkdownTextToLines(text: string, fallbackKind: LineKind): AnnotatedLine[] {
   const sourceLines = text.split("\n");
   const rendered: AnnotatedLine[] = [];
@@ -362,7 +395,7 @@ function renderMarkdownTextToLines(text: string, fallbackKind: LineKind): Annota
       continue;
     }
 
-    rendered.push({ text: sourceLines[index] ?? "", kind: fallbackKind });
+    rendered.push(renderMarkdownLine(sourceLines[index] ?? "", fallbackKind));
   }
 
   return rendered;

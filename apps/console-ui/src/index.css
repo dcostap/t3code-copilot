@@ -1,8 +1,8 @@
 :root {
   color-scheme: dark;
-  font-family: "Cascadia Mono", "Cascadia Code", "Iosevka Term", "JetBrains Mono", Consolas, monospace;
-  font-size: 15px;
-  background-color: #111419;
+  font-family: "Iosevka Term", "JetBrains Mono", "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 16px;
+  background-color: #202020;
   color: #cfd4d9;
 }
 
@@ -28,7 +28,7 @@ body {
   inset: 0;
   z-index: 0;
   background: url("/bg.png") center / cover no-repeat;
-  opacity: 0.19;
+  opacity: 0.10;
   filter: blur(1px);
   pointer-events: none;
 }
@@ -167,7 +167,7 @@ body {
 }
 
 .conversation-pane--active {
-  background: rgba(15, 19, 24, 0.28);
+  background: transparent;
 }
 
 .conversation-pane--active .conversation-pane__header {
@@ -211,7 +211,7 @@ body {
   height: calc(100% - 26px);
   overflow: auto;
   border: 1px solid rgba(95, 103, 111, 0.14);
-  background: rgba(11, 14, 18, 0.12);
+  background: transparent;
 }
 
 .transcript-surface {
@@ -444,7 +444,8 @@ body {
 
 .status-line {
   padding: 6px 12px 10px;
-  background: rgba(17, 20, 25, 0.98);
+  background: transparent;
+  border: 0;
   color: #555b62;
   font-size: 13px;
   line-height: 1.2;

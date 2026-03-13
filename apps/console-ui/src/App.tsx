@@ -867,37 +867,14 @@ export function App() {
   }, [activePaneId, closePalette, focusActivePanePrompt, paletteOpen]);
 
   const footerText = useMemo(() => {
-    const source = `live ${consoleData.connectionState}`;
     const provider = activeProvider ?? "no-provider";
     const model = activeThread?.model ?? "no-model";
-    const title = activeThread?.title ?? "No thread loaded";
     const cwd = workspace.activeSession?.cwd ?? activeProject?.workspaceRoot ?? "no project";
-    const paneLabel =
-      activeSession && activePane
-        ? `pane ${activeSession.panes.findIndex((pane) => pane.id === activePane.id) + 1}/${activeSession.panes.length}`
-        : "pane 1/1";
-    const runtime = activeThread?.runtimeMode ?? "full-access";
-    const errorText = submitError ?? consoleData.error;
-    const phase = activeThreadTurnRunning
-      ? "running"
-      : consoleData.isPromptSubmitting
-        ? "submitting"
-        : "idle";
-    const base = `${source} · ${phase} · ${provider} · ${model} · ${runtime} · ${paneLabel} · ${title} · ${cwd}`;
-    return errorText ? `${base} · ${errorText}` : base;
+    return `${provider} · ${model} · ${cwd}`;
   }, [
     activeProvider,
-    activePane,
     activeProject?.workspaceRoot,
-    activeSession,
     activeThread?.model,
-    activeThread?.runtimeMode,
-    activeThread?.title,
-    consoleData.connectionState,
-    consoleData.error,
-    consoleData.isPromptSubmitting,
-    activeThreadTurnRunning,
-    submitError,
     workspace.activeSession?.cwd,
   ]);
 

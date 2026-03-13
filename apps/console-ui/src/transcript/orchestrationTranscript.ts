@@ -61,6 +61,14 @@ function asStringArray(value: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
 }
 
+function stripSimpleMarkdown(text: string): string {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/\*(.*?)\*/g, "$1")
+    .replace(/_(.*?)_/g, "$1");
+}
+
 function toolStatusToBlockStatus(status: unknown): "running" | "done" | "error" | "declined" {
   switch (status) {
     case "in_progress":
@@ -483,6 +491,30 @@ function activityToBlocks(
     case "approval.resolved":
       return [];
 
+    case "task.started":
+      return [];
+
+    case "task.progress": {
+      const detail =
+        asString(payload?.detail) ??
+        asString(payload?.message) ??
+        asString(activity.summary);
+      return detail ? [{ type: "status", text: stripSimpleMarkdown(detail) }] : [];
+    }
+
+    case "task.completed": {
+      const status = asString(payload?.status);
+      if (status !== "failed" && status !== "stopped") {
+        return [];
+      }
+
+      const detail =
+        asString(payload?.detail) ??
+        asString(payload?.message) ??
+        activity.summary;
+      return [{ type: "status", text: stripSimpleMarkdown(detail) }];
+    }
+
     case "user-input.requested": {
       const requestId = asString(payload?.requestId);
       const block = userInputBlock(payload);
@@ -550,7 +582,7 @@ function activityToBlocks(
   return [
     {
       type: "status",
-      text: detail ? `${activity.summary}: ${detail}` : activity.summary,
+      text: stripSimpleMarkdown(detail ? `${activity.summary}: ${detail}` : activity.summary),
     },
   ];
 }

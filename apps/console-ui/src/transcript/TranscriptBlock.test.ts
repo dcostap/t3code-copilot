@@ -247,6 +247,25 @@ describe("blockToLines", () => {
     ]);
   });
 
+  it("renders markdown blockquotes and lists as cleaner transcript text", () => {
+    expect(
+      blockToLines({
+        type: "assistant-text",
+        text:
+          "> quoted line\n"
+          + "- first item\n"
+          + "  - nested item\n"
+          + "1. ordered item",
+        streaming: false,
+      }),
+    ).toEqual([
+      { text: "│ quoted line", kind: "blockquote" },
+      { text: "• first item", kind: "list" },
+      { text: "  • nested item", kind: "list" },
+      { text: "1. ordered item", kind: "list" },
+    ]);
+  });
+
   it("renders proposed plans with a distinct header and body", () => {
     expect(
       blockToLines({
@@ -262,12 +281,12 @@ describe("blockToLines", () => {
         extraClasses: ["cm-line-proposedPlanHeader"],
       },
       {
-        text: "- Bind the prototype to the orchestration read model.",
-        kind: "proposedPlanBody",
+        text: "• Bind the prototype to the orchestration read model.",
+        kind: "list",
       },
       {
-        text: "- Keep transcript rendering text-first.",
-        kind: "proposedPlanBody",
+        text: "• Keep transcript rendering text-first.",
+        kind: "list",
       },
       { text: "", kind: "planSeparator" },
     ]);
