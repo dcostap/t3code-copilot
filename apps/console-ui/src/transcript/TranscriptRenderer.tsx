@@ -425,6 +425,35 @@ function buildDecorationSignature(docModel: TranscriptDocumentModel) {
   return `${docModel.promptStart}::${lineSignature}::${markSignature}::${widgetSignature}`;
 }
 
+function computeMinimalDocChange(currentText: string, nextText: string) {
+  if (currentText === nextText) {
+    return null;
+  }
+
+  let prefix = 0;
+  const maxPrefix = Math.min(currentText.length, nextText.length);
+  while (prefix < maxPrefix && currentText[prefix] === nextText[prefix]) {
+    prefix += 1;
+  }
+
+  let currentSuffix = currentText.length;
+  let nextSuffix = nextText.length;
+  while (
+    currentSuffix > prefix
+    && nextSuffix > prefix
+    && currentText[currentSuffix - 1] === nextText[nextSuffix - 1]
+  ) {
+    currentSuffix -= 1;
+    nextSuffix -= 1;
+  }
+
+  return {
+    from: prefix,
+    to: currentSuffix,
+    insert: nextText.slice(prefix, nextSuffix),
+  };
+}
+
 function buildEditorTheme() {
   return EditorView.theme(
     {
@@ -480,25 +509,20 @@ function buildEditorTheme() {
         minHeight: "8px",
       },
       ".cm-line-reasoningSeparator::before": {
-        content: '""',
-        position: "absolute",
-        left: "0",
-        right: "0",
-        top: "50%",
-        borderTop: "1px solid rgba(95, 103, 111, 0.18)",
-        transform: "translateY(-50%)",
+        display: "none",
       },
       ".cm-line-reasoningSummary": {
         color: "#69737d",
-        fontSize: "12px",
-        letterSpacing: "0.04em",
+        fontSize: "14px",
         fontStyle: "italic",
         paddingTop: "2px",
         paddingBottom: "4px",
       },
       ".cm-line-reasoning": {
-        color: "#76808a",
+        color: "#69737d",
+        fontSize: "13px",
         fontStyle: "italic",
+        paddingBottom: "4px",
       },
       ".cm-line-table": {
         color: "#d8dde2",
@@ -509,7 +533,6 @@ function buildEditorTheme() {
       ".cm-line-codeFenceHeader": {
         color: "#8aa5c2",
         fontSize: "12px",
-        letterSpacing: "0.06em",
         textTransform: "uppercase",
         paddingTop: "2px",
       },
@@ -543,22 +566,9 @@ function buildEditorTheme() {
       ".cm-codeToken.tok-removed": { color: "#ff7575" },
       ".cm-line-list": { color: "#c7ccd1" },
       ".cm-line-userPromptSeparator": {
-        position: "relative",
-        minHeight: "40px",
-      },
-      ".cm-line-userPromptSeparator::before": {
-        content: '""',
-        position: "absolute",
-        left: "0",
-        right: "0",
-        top: "50%",
-        borderTop: "1px solid rgba(226, 232, 238, 0.26)",
-        transform: "translateY(-50%)",
+        color: "rgba(236, 241, 246, 0.38)",
       },
       ".cm-line-userPromptSeparator.cm-line-userPromptSeparatorHidden": {
-        minHeight: "0",
-      },
-      ".cm-line-userPromptSeparator.cm-line-userPromptSeparatorHidden::before": {
         display: "none",
       },
       ".cm-line-workGroupSeparator": {
@@ -566,23 +576,15 @@ function buildEditorTheme() {
         minHeight: "10px",
       },
       ".cm-line-workGroupSeparator::before": {
-        content: '""',
-        position: "absolute",
-        left: "0",
-        right: "0",
-        top: "50%",
-        borderTop: "1px solid rgba(95, 103, 111, 0.32)",
-        transform: "translateY(-50%)",
+        display: "none",
       },
       ".cm-line-workGroupHeader": {
         color: "#9fa7af",
-        letterSpacing: "0.08em",
         fontSize: "12px",
         paddingTop: "2px",
       },
       ".cm-line-workGroupFooter": {
         color: "#9fa7af",
-        letterSpacing: "0.08em",
         fontSize: "12px",
         paddingTop: "2px",
       },
@@ -599,12 +601,11 @@ function buildEditorTheme() {
         left: "0",
         right: "0",
         top: "50%",
-        borderTop: "1px solid rgba(88, 130, 98, 0.34)",
+        borderTop: "1px solid rgba(210, 225, 216, 0.28)",
         transform: "translateY(-50%)",
       },
       ".cm-line-planHeader": {
         color: "#9dc5a3",
-        letterSpacing: "0.08em",
         fontSize: "12px",
         textTransform: "uppercase",
         paddingTop: "2px",
@@ -637,12 +638,11 @@ function buildEditorTheme() {
         left: "0",
         right: "0",
         top: "50%",
-        borderTop: "1px solid rgba(108, 118, 128, 0.30)",
+        borderTop: "1px solid rgba(224, 230, 236, 0.28)",
         transform: "translateY(-50%)",
       },
       ".cm-line-checkpointHeader": {
         color: "#a9b2bb",
-        letterSpacing: "0.08em",
         fontSize: "12px",
         textTransform: "uppercase",
         paddingTop: "2px",
@@ -653,30 +653,18 @@ function buildEditorTheme() {
       ".cm-line-checkpointFile": {
         color: "#9098a1",
       },
-      ".cm-line-workingSeparator": {
-        position: "relative",
-        minHeight: "10px",
+      ".cm-line-workingLine": {
+        color: "#7f8790",
+        fontSize: "13px",
       },
-      ".cm-line-workingSeparator::before": {
-        content: '""',
-        position: "absolute",
-        left: "0",
-        right: "0",
-        top: "50%",
-        borderTop: "1px solid rgba(95, 103, 111, 0.28)",
-        transform: "translateY(-50%)",
+      ".cm-codeToken.tok-workingPulseEdge": {
+        color: "rgba(255, 255, 255, 0.42)",
       },
-      ".cm-line-workingHeader": {
-        color: "#aeb5bc",
-        letterSpacing: "0.08em",
-        fontSize: "12px",
-        textTransform: "uppercase",
-        paddingTop: "2px",
+      ".cm-codeToken.tok-workingPulseMid": {
+        color: "rgba(255, 255, 255, 0.76)",
       },
-      ".cm-line-workingFooter": {
-        color: "#6f7780",
-        fontSize: "12px",
-        paddingTop: "2px",
+      ".cm-codeToken.tok-workingPulseCore": {
+        color: "#ffffff",
       },
       ".cm-line-promptInput": {
         color: "#d6dbe0",
@@ -718,7 +706,7 @@ function buildEditorTheme() {
         left: "0",
         right: "0",
         top: "50%",
-        borderTop: "1px solid rgba(95, 103, 111, 0.42)",
+        borderTop: "1px solid rgba(230, 236, 242, 0.34)",
         transform: "translateY(-50%)",
       },
       ".cm-line-promptSeparator.cm-line-promptSeparatorPlan": {
@@ -779,42 +767,8 @@ function buildEditorTheme() {
       },
       ".cm-line-commandExec": {
         color: "#8d949b",
-        position: "relative",
-        overflow: "visible",
-      },
-      ".cm-line-commandExec.cm-line-workItemRunning::before, .cm-line-commandExec.cm-line-workItemDone::before, .cm-line-commandExec.cm-line-workItemError::before, .cm-line-commandExec.cm-line-workItemDeclined::before": {
-        position: "absolute",
-        left: "3ch",
-        top: "50%",
-        display: "inline-block",
-        width: "1.2ch",
-        textAlign: "center",
-        userSelect: "none",
-        pointerEvents: "none",
-        lineHeight: "1.1",
-        fontSize: "12px",
-        transformOrigin: "50% 50%",
-      },
-      ".cm-line-commandExec.cm-line-workItemRunning::before": {
-        content: '"⟳"',
-        color: "#8dc5ff",
-        animation: "cm-spin 0.9s linear infinite",
-      },
-      ".cm-line-commandExec.cm-line-workItemDone::before": {
-        content: '"✓"',
-        color: "#8cd59a",
-        transform: "translateY(-50%)",
-      },
-      ".cm-line-commandExec.cm-line-workItemError::before, .cm-line-commandExec.cm-line-workItemDeclined::before": {
-        content: '"✗"',
-        color: "#ff8a8a",
-        transform: "translateY(-50%)",
       },
       ".cm-line-commandOutput": { color: "#7a828b" },
-      "@keyframes cm-spin": {
-        from: { transform: "translateY(-50%) rotate(0deg)" },
-        to: { transform: "translateY(-50%) rotate(360deg)" },
-      },
     },
     { dark: true },
   );
@@ -984,19 +938,6 @@ function resolvePromptSelection(
   };
 }
 
-function resolvePromptSelectionForDocModel(
-  docModel: TranscriptDocumentModel,
-  stored: StoredPromptSelection | null,
-): StoredSelection {
-  const maxOffset = Math.max(0, docModel.text.length - docModel.promptStart);
-  const anchorOffset = Math.min(stored?.anchorOffset ?? maxOffset, maxOffset);
-  const headOffset = Math.min(stored?.headOffset ?? maxOffset, maxOffset);
-  return {
-    anchor: docModel.promptStart + anchorOffset,
-    head: docModel.promptStart + headOffset,
-  };
-}
-
 function resolveHistorySelection(
   state: EditorState,
   stored: StoredSelection | null,
@@ -1006,20 +947,6 @@ function resolveHistorySelection(
     return { anchor: historyLimit, head: historyLimit };
   }
   return clampStoredSelectionToHistory(state, stored);
-}
-
-function resolveHistorySelectionForDocModel(
-  docModel: TranscriptDocumentModel,
-  stored: StoredSelection | null,
-): StoredSelection {
-  const historyLimit = Math.max(0, docModel.separatorStart - 1);
-  if (!stored) {
-    return { anchor: historyLimit, head: historyLimit };
-  }
-  return {
-    anchor: Math.min(stored.anchor, historyLimit),
-    head: Math.min(stored.head, historyLimit),
-  };
 }
 
 export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, TranscriptRendererProps>(
@@ -1447,21 +1374,15 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         return;
       }
 
-      const nextSelection =
-        activeRegionRef.current === "prompt"
-          ? resolvePromptSelectionForDocModel(docModel, promptSelectionRef.current)
-          : resolveHistorySelectionForDocModel(docModel, historySelectionRef.current);
       const shouldPinToBottom =
         view.hasFocus
         && activeRegionRef.current === "prompt"
         && isConversationScrollNearBottom(view);
+      const minimalDocChange = isTextStable ? null : computeMinimalDocChange(currentText, docModel.text);
 
       syncingViewRef.current = true;
       view.dispatch({
-        ...(!isTextStable ? { changes: { from: 0, to: view.state.doc.length, insert: docModel.text } } : {}),
-        selection: isTextStable
-          ? view.state.selection
-          : EditorSelection.range(nextSelection.anchor, nextSelection.head),
+        ...(minimalDocChange ? { changes: minimalDocChange } : {}),
         effects: [
           decorationsCompartment.reconfigure(
             EditorView.decorations.of(
@@ -1477,9 +1398,15 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
       if (!isTextStable) {
         if (activeRegionRef.current === "prompt") {
-          promptSelectionRef.current = storePromptSelection(view.state, nextSelection);
+          promptSelectionRef.current = storePromptSelection(view.state, {
+            anchor: view.state.selection.main.anchor,
+            head: view.state.selection.main.head,
+          });
         } else {
-          historySelectionRef.current = clampStoredSelectionToHistory(view.state, nextSelection);
+          historySelectionRef.current = clampStoredSelectionToHistory(view.state, {
+            anchor: view.state.selection.main.anchor,
+            head: view.state.selection.main.head,
+          });
         }
       }
 
@@ -1487,9 +1414,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         requestAnimationFrame(() => {
           if (shouldPinToBottom) {
             scrollConversationToBottom(view);
-            return;
           }
-          keepCursorWithinViewportPadding(view);
         });
       }
     }, [docModel]);
