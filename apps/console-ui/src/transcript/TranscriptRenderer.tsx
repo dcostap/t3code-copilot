@@ -433,7 +433,7 @@ function buildEditorTheme() {
         color: "#c5ccd3",
         backgroundColor: "transparent",
         fontFamily:
-          '"Iosevka Term", "JetBrains Mono", "Cascadia Mono", "Cascadia Code", Consolas, monospace',
+          '"Cascadia Mono", "Cascadia Code", "Iosevka Term", "JetBrains Mono", Consolas, monospace',
         fontSize: "16px",
       },
       ".cm-scroller": {
@@ -539,6 +539,8 @@ function buildEditorTheme() {
       ".cm-codeToken.tok-attributeName": { color: "#e7c26f" },
       ".cm-codeToken.tok-attributeValue": { color: "#a8d38f" },
       ".cm-codeToken.tok-special.tok-string": { color: "#9adf8f" },
+      ".cm-codeToken.tok-added": { color: "#63f28a" },
+      ".cm-codeToken.tok-removed": { color: "#ff7575" },
       ".cm-line-list": { color: "#c7ccd1" },
       ".cm-line-userPromptSeparator": {
         position: "relative",
@@ -582,6 +584,9 @@ function buildEditorTheme() {
         color: "#5f676f",
         fontSize: "12px",
         paddingTop: "2px",
+      },
+      ".cm-line-fileChangeSummary": {
+        color: "#d7dde3",
       },
       ".cm-line-planSeparator": {
         position: "relative",
