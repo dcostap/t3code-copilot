@@ -1580,6 +1580,128 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe("# Plan title");
   });
 
+  it("projects Codex reasoning deltas into cumulative thread activities", async () => {
+    const harness = await createHarness();
+    const startedAt = "2026-03-13T09:00:00.000Z";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-delta-1"),
+      provider: "codex",
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning-1"),
+      itemId: asItemId("item-reasoning-1"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: "Checking transcript ordering",
+      },
+    });
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-delta-2"),
+      provider: "codex",
+      createdAt: "2026-03-13T09:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning-1"),
+      itemId: asItemId("item-reasoning-1"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: " before streaming the answer.",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.engine,
+      (entry) =>
+        entry.activities.some(
+          (activity: ProviderRuntimeTestActivity) => activity.kind === "reasoning.text",
+        ),
+    );
+
+    const reasoning = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.kind === "reasoning.text",
+    );
+    const reasoningPayload =
+      reasoning?.payload && typeof reasoning.payload === "object"
+        ? (reasoning.payload as Record<string, unknown>)
+        : undefined;
+
+    expect(reasoning?.summary).toBe("Reasoning");
+    expect(reasoning?.createdAt).toBe(startedAt);
+    expect(reasoningPayload?.text).toBe(
+      "Checking transcript ordering before streaming the answer.",
+    );
+  });
+
+  it("merges overlapping Codex reasoning deltas without duplicating text", async () => {
+    const harness = await createHarness();
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-overlap-1"),
+      provider: "codex",
+      createdAt: "2026-03-13T09:10:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning-overlap"),
+      itemId: asItemId("item-reasoning-overlap"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: "Evalu",
+      },
+    });
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-overlap-2"),
+      provider: "codex",
+      createdAt: "2026-03-13T09:10:01.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning-overlap"),
+      itemId: asItemId("item-reasoning-overlap"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: "Evaluating user advice",
+      },
+    });
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-overlap-3"),
+      provider: "codex",
+      createdAt: "2026-03-13T09:10:02.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning-overlap"),
+      itemId: asItemId("item-reasoning-overlap"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: "advice carefully",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.engine,
+      (entry) =>
+        entry.activities.some(
+          (activity: ProviderRuntimeTestActivity) =>
+            activity.kind === "reasoning.text"
+            && typeof (activity.payload as Record<string, unknown>)?.text === "string"
+            && ((activity.payload as Record<string, unknown>).text as string).endsWith("carefully"),
+        ),
+    );
+
+    const reasoning = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.kind === "reasoning.text",
+    );
+    const reasoningPayload =
+      reasoning?.payload && typeof reasoning.payload === "object"
+        ? (reasoning.payload as Record<string, unknown>)
+        : undefined;
+
+    expect(reasoningPayload?.text).toBe("Evaluating user advice carefully");
+  });
+
   it("projects structured user input request and resolution as thread activities", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();

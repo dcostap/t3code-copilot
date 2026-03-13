@@ -623,6 +623,62 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("persists thread model options through thread.meta.update", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const createdAt = now();
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.makeUnsafe("cmd-project-model-options-create"),
+        projectId: asProjectId("project-model-options"),
+        title: "Model Options Project",
+        workspaceRoot: "/tmp/project-model-options",
+        defaultModel: "gpt-5-codex",
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("cmd-thread-model-options-create"),
+        threadId: ThreadId.makeUnsafe("thread-model-options"),
+        projectId: asProjectId("project-model-options"),
+        title: "Model Options Thread",
+        model: "claude-sonnet-4.6",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("cmd-thread-model-options-update"),
+        threadId: ThreadId.makeUnsafe("thread-model-options"),
+        modelOptions: {
+          copilot: {
+            reasoningEffort: "medium",
+          },
+        },
+      }),
+    );
+
+    const thread = (await system.run(engine.getReadModel())).threads.find(
+      (entry) => entry.id === "thread-model-options",
+    );
+    expect(thread?.modelOptions).toEqual({
+      copilot: {
+        reasoningEffort: "medium",
+      },
+    });
+
+    await system.dispose();
+  });
+
   it("rejects duplicate thread creation", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;

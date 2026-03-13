@@ -1,4 +1,9 @@
-import { DEFAULT_MODEL_BY_PROVIDER, MODEL_OPTIONS_BY_PROVIDER, type ProviderKind } from "@t3tools/contracts";
+import {
+  DEFAULT_MODEL_BY_PROVIDER,
+  MODEL_OPTIONS_BY_PROVIDER,
+  REASONING_EFFORT_OPTIONS_BY_PROVIDER,
+  type ProviderKind,
+} from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CommandPalette } from "./CommandPalette";
@@ -61,6 +66,7 @@ export function App() {
   const submitPrompt = consoleData.submitPrompt;
   const respondToUserInput = consoleData.respondToUserInput;
   const setThreadModel = consoleData.setThreadModel;
+  const setThreadReasoningEffort = consoleData.setThreadReasoningEffort;
   const setInteractionMode = consoleData.setInteractionMode;
   const interruptTurn = consoleData.interruptTurn;
   const stopSession = consoleData.stopSession;
@@ -69,7 +75,7 @@ export function App() {
   const activatePane = workspace.activatePane;
   const closePane = workspace.closePane;
   const [nowIso, setNowIso] = useState(() => new Date().toISOString());
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [_submitError, setSubmitError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
@@ -128,6 +134,43 @@ export function App() {
     activeHistory?.preferredProvider ??
     resolveProviderFromThread(activeThread?.session?.providerName) ??
     null;
+  const activeReasoningEffort =
+    activeProvider === "codex"
+      ? (activeThread?.modelOptions?.codex?.reasoningEffort ?? null)
+      : activeProvider === "copilot"
+        ? (activeThread?.modelOptions?.copilot?.reasoningEffort ?? null)
+        : null;
+  const activeReasoningOptions = useMemo(() => {
+    if (!activeProvider || !activeThread) {
+      return [];
+    }
+
+    const providerStatus = consoleData.serverConfig?.providers.find(
+      (provider) => provider.provider === activeProvider,
+    );
+    const activeModelStatus = providerStatus?.models?.find((model) => model.id === activeThread.model);
+
+    if (activeModelStatus) {
+      if (!activeModelStatus.supportsReasoningEffort) {
+        return [];
+      }
+      return activeModelStatus.supportedReasoningEfforts ??
+        REASONING_EFFORT_OPTIONS_BY_PROVIDER[activeProvider];
+    }
+
+    return REASONING_EFFORT_OPTIONS_BY_PROVIDER[activeProvider];
+  }, [activeProvider, activeThread, consoleData.serverConfig?.providers]);
+  const activeDefaultReasoningEffort = useMemo(() => {
+    if (!activeProvider || !activeThread) {
+      return null;
+    }
+
+    const providerStatus = consoleData.serverConfig?.providers.find(
+      (provider) => provider.provider === activeProvider,
+    );
+    const activeModelStatus = providerStatus?.models?.find((model) => model.id === activeThread.model);
+    return activeModelStatus?.defaultReasoningEffort ?? null;
+  }, [activeProvider, activeThread, consoleData.serverConfig?.providers]);
 
   useEffect(() => {
     if (!activeThreadTurnRunning) {
@@ -628,8 +671,35 @@ export function App() {
                 : `Set Model: ${modelOption.name}`,
             description: `${activeProvider} · ${modelOption.slug}`,
             keywords: ["model", activeProvider, modelOption.name, modelOption.slug],
-            run: () => setThreadModel(activeThread.id, modelOption.slug),
+            run: () => setThreadModel(activeThread.id, activeProvider, modelOption.slug),
           });
+        }
+
+        if (activeReasoningOptions.length > 0) {
+          commands.push({
+            id: `reasoning:${activeThread.id}:default`,
+            label:
+              activeReasoningEffort === null
+                ? "Current Reasoning: Default"
+                : "Set Reasoning: Default",
+            description: `${activeProvider} · use the model default reasoning effort`,
+            keywords: ["reasoning", "default", activeProvider],
+            run: () => setThreadReasoningEffort(activeThread.id, activeProvider, null),
+          });
+
+          for (const reasoningOption of activeReasoningOptions) {
+            commands.push({
+              id: `reasoning:${activeThread.id}:${reasoningOption}`,
+              label:
+                activeReasoningEffort === reasoningOption
+                  ? `Current Reasoning: ${reasoningOption}`
+                  : `Set Reasoning: ${reasoningOption}`,
+              description: `${activeProvider} · ${activeThread.model}`,
+              keywords: ["reasoning", activeProvider, reasoningOption, activeThread.model],
+              run: () =>
+                setThreadReasoningEffort(activeThread.id, activeProvider, reasoningOption),
+            });
+          }
         }
       }
 
@@ -724,9 +794,12 @@ export function App() {
     interruptTurn,
     activatePaneAndFocus,
     activeProvider,
+    activeReasoningEffort,
+    activeReasoningOptions,
     focusActivePanePrompt,
     respondToUserInput,
     setThreadModel,
+    setThreadReasoningEffort,
     setInteractionMode,
     stopSession,
     closePane,
@@ -869,11 +942,19 @@ export function App() {
   const footerText = useMemo(() => {
     const provider = activeProvider ?? "no-provider";
     const model = activeThread?.model ?? "no-model";
+    const reasoning =
+      activeReasoningEffort === null
+        ? activeDefaultReasoningEffort
+          ? `default (${activeDefaultReasoningEffort})`
+          : "default"
+        : activeReasoningEffort;
     const cwd = workspace.activeSession?.cwd ?? activeProject?.workspaceRoot ?? "no project";
-    return `${provider} · ${model} · ${cwd}`;
+    return `${provider} · ${model} · ${reasoning} · ${cwd}`;
   }, [
+    activeDefaultReasoningEffort,
     activeProvider,
     activeProject?.workspaceRoot,
+    activeReasoningEffort,
     activeThread?.model,
     workspace.activeSession?.cwd,
   ]);

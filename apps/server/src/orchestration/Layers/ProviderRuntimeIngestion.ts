@@ -2,6 +2,7 @@ import {
   ApprovalRequestId,
   type AssistantDeliveryMode,
   CommandId,
+  EventId,
   type ItemLifecyclePayload,
   MessageId,
   type OrchestrationEvent,
@@ -70,6 +71,30 @@ function sameId(left: string | null | undefined, right: string | null | undefine
 
 function truncateDetail(value: string, limit = 180): string {
   return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
+}
+
+function appendWithOverlap(existing: string, incoming: string): string {
+  if (existing.length === 0) {
+    return incoming;
+  }
+  if (incoming.length === 0) {
+    return existing;
+  }
+  if (existing.endsWith(incoming)) {
+    return existing;
+  }
+  if (incoming.includes(existing)) {
+    return incoming;
+  }
+
+  const maxOverlap = Math.min(existing.length, incoming.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    if (existing.endsWith(incoming.slice(0, overlap))) {
+      return `${existing}${incoming.slice(overlap)}`;
+    }
+  }
+
+  return `${existing}${incoming}`;
 }
 
 function normalizeProposedPlanMarkdown(planMarkdown: string | undefined): string | undefined {
@@ -509,6 +534,10 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed({ text: "", createdAt: "" }),
   });
 
+  const bufferedReasoningTextByKey = yield* Ref.make(
+    new Map<string, { text: string; createdAt: string; activityId: EventId }>(),
+  );
+
   const isGitRepoForThread = Effect.fnUntraced(function* (threadId: ThreadId) {
     const readModel = yield* orchestrationEngine.getReadModel();
     const thread = readModel.threads.find((entry) => entry.id === threadId);
@@ -774,6 +803,81 @@ const make = Effect.gen(function* () {
       yield* clearBufferedProposedPlan(input.planId);
     });
 
+  const reasoningActivityKind = (streamKind: "reasoning_text" | "reasoning_summary_text") =>
+    streamKind === "reasoning_summary_text" ? "reasoning.summary" : "reasoning.text";
+
+  const reasoningActivitySummary = (streamKind: "reasoning_text" | "reasoning_summary_text") =>
+    streamKind === "reasoning_summary_text" ? "Reasoning summary" : "Reasoning";
+
+  const reasoningActivityKey = (
+    threadId: ThreadId,
+    event: Extract<ProviderRuntimeEvent, { type: "content.delta" }>,
+  ) =>
+    `${threadId}:${event.turnId ?? event.itemId ?? event.eventId}:${event.payload.streamKind}`;
+
+  const appendReasoningActivity = (
+    threadId: ThreadId,
+    event: Extract<ProviderRuntimeEvent, { type: "content.delta" }>,
+  ) =>
+    Effect.gen(function* () {
+      if (
+        (event.payload.streamKind !== "reasoning_text"
+          && event.payload.streamKind !== "reasoning_summary_text")
+        || event.payload.delta.length === 0
+      ) {
+        return;
+      }
+
+      const key = reasoningActivityKey(threadId, event);
+      const nextEntry = yield* Ref.modify(bufferedReasoningTextByKey, (existing) => {
+        const next = new Map(existing);
+        const current = next.get(key);
+        const createdAt = current?.createdAt ?? event.createdAt;
+        const activityId =
+          current?.activityId
+          ?? EventId.makeUnsafe(
+            `reasoning:${threadId}:${event.turnId ?? event.itemId ?? event.eventId}:${event.payload.streamKind}`,
+          );
+        const entry = {
+          text: appendWithOverlap(current?.text ?? "", event.payload.delta),
+          createdAt,
+          activityId,
+        };
+        next.set(key, entry);
+        return [entry, next] as const;
+      });
+
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: providerCommandId(event, "thread-activity-reasoning"),
+        threadId,
+        activity: {
+          id: nextEntry.activityId,
+          createdAt: nextEntry.createdAt,
+          tone: "info",
+          kind: reasoningActivityKind(event.payload.streamKind),
+          summary: reasoningActivitySummary(event.payload.streamKind),
+          payload: {
+            streamKind: event.payload.streamKind,
+            text: nextEntry.text,
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+        },
+        createdAt: nextEntry.createdAt,
+      });
+    });
+
+  const clearReasoningActivitiesForPrefix = (prefix: string) =>
+    Ref.update(bufferedReasoningTextByKey, (existing) => {
+      const next = new Map(existing);
+      for (const key of next.keys()) {
+        if (key.startsWith(prefix)) {
+          next.delete(key);
+        }
+      }
+      return next;
+    });
+
   const clearTurnStateForSession = (threadId: ThreadId) =>
     Effect.gen(function* () {
       const prefix = `${threadId}:`;
@@ -807,6 +911,7 @@ const make = Effect.gen(function* () {
             : Effect.void,
         { concurrency: 1 },
       ).pipe(Effect.asVoid);
+      yield* clearReasoningActivitiesForPrefix(prefix);
     });
 
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
@@ -962,6 +1067,10 @@ const make = Effect.gen(function* () {
         }
       }
 
+      if (event.type === "content.delta") {
+        yield* appendReasoningActivity(thread.id, event);
+      }
+
       if (proposedPlanDelta && proposedPlanDelta.length > 0) {
         const planId = proposedPlanIdFromEvent(event, thread.id);
         yield* appendBufferedProposedPlan(planId, proposedPlanDelta, now);
@@ -1064,6 +1173,7 @@ const make = Effect.gen(function* () {
             turnId,
             updatedAt: now,
           });
+          yield* clearReasoningActivitiesForPrefix(`${thread.id}:${turnId}:`);
         }
       }
 

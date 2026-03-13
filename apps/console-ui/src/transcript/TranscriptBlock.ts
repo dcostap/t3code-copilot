@@ -12,6 +12,9 @@ import { highlightCodeFence } from "./codeFenceHighlight";
 
 export type LineKind =
   | "body"
+  | "reasoningSeparator"
+  | "reasoningSummary"
+  | "reasoning"
   | "table"
   | "codeFenceSeparator"
   | "codeFenceHeader"
@@ -89,6 +92,16 @@ export interface AssistantTextBlock {
   readonly type: "assistant-text";
   readonly text: string;
   readonly streaming: boolean;
+}
+
+export interface ReasoningTextBlock {
+  readonly type: "reasoning-text";
+  readonly text: string;
+}
+
+export interface ReasoningSummaryBlock {
+  readonly type: "reasoning-summary";
+  readonly text: string;
 }
 
 export interface ToolCallBlock {
@@ -195,11 +208,14 @@ export interface DividerBlock {
 export interface StatusBlock {
   readonly type: "status";
   readonly text: string;
+  readonly variant?: "default" | "reasoning";
 }
 
 export type TranscriptBlock =
   | UserMessageBlock
   | AssistantTextBlock
+  | ReasoningTextBlock
+  | ReasoningSummaryBlock
   | ToolCallBlock
   | ToolResultBlock
   | CommandExecBlock
@@ -552,6 +568,16 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
     case "assistant-text":
       return renderMarkdownTextToLines(block.text, "body");
 
+    case "reasoning-text":
+      return [
+        { text: "", kind: "reasoningSeparator" },
+        ...renderMarkdownTextToLines(block.text, "reasoning"),
+        { text: "", kind: "reasoningSeparator" },
+      ];
+
+    case "reasoning-summary":
+      return [{ text: block.text, kind: "reasoningSummary" }];
+
     case "tool-call": {
       const statusIcon = block.status === "running" ? "⟳" : block.status === "done" ? "✓" : block.status === "declined" ? "✗" : "✗";
       const line = `• ${statusIcon} ${block.label}`;
@@ -731,6 +757,6 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
       ];
 
     case "status":
-      return [{ text: block.text, kind: "status" }];
+      return [{ text: block.text, kind: block.variant === "reasoning" ? "reasoning" : "status" }];
   }
 }

@@ -212,6 +212,7 @@ const make = Effect.gen(function* () {
         : undefined;
     const preferredProvider: ProviderKind | undefined = options?.provider ?? currentProvider;
     const desiredModel = options?.model ?? thread.model;
+    const desiredModelOptions = options?.modelOptions ?? thread.modelOptions;
     const effectiveCwd = resolveThreadWorkspaceCwd({
       thread,
       projects: readModel.projects,
@@ -233,7 +234,7 @@ const make = Effect.gen(function* () {
           : {}),
         ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
         ...(desiredModel ? { model: desiredModel } : {}),
-        ...(options?.modelOptions !== undefined ? { modelOptions: options.modelOptions } : {}),
+        ...(desiredModelOptions !== undefined ? { modelOptions: desiredModelOptions } : {}),
         ...(options?.providerOptions !== undefined
           ? { providerOptions: options.providerOptions }
           : {}),

@@ -31,6 +31,36 @@ describe("reconcileReadModelWithEvents", () => {
     expect(reconciled?.snapshotSequence).toBe(event.sequence);
   });
 
+  it("applies newer model-options updates to the snapshot", () => {
+    const snapshot = buildTestSnapshot();
+    const event = {
+      sequence: snapshot.snapshotSequence + 1,
+      eventId: EventId.makeUnsafe("event:2"),
+      aggregateKind: "thread",
+      aggregateId: snapshot.threads[0]!.id,
+      occurredAt: "2026-03-11T10:01:00.000Z",
+      commandId: CommandId.makeUnsafe("command:2"),
+      causationEventId: null,
+      correlationId: CommandId.makeUnsafe("command:2"),
+      metadata: {},
+      type: "thread.meta-updated",
+      payload: {
+        threadId: snapshot.threads[0]!.id,
+        modelOptions: {
+          copilot: {
+            reasoningEffort: "high",
+          },
+        },
+        updatedAt: "2026-03-11T10:01:00.000Z",
+      },
+    } satisfies OrchestrationEvent;
+
+    const reconciled = reconcileReadModelWithEvents(snapshot, [event]);
+
+    expect(reconciled?.threads[0]?.modelOptions?.copilot?.reasoningEffort).toBe("high");
+    expect(reconciled?.snapshotSequence).toBe(event.sequence);
+  });
+
   it("does not reapply events already reflected in the snapshot", () => {
     const snapshot = buildTestSnapshot();
     const event = {

@@ -44,6 +44,9 @@ export function reconcileReadModelWithEvents(
           ...thread,
           ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
           ...(event.payload.model !== undefined ? { model: event.payload.model } : {}),
+          ...(event.payload.modelOptions !== undefined
+            ? { modelOptions: event.payload.modelOptions }
+            : {}),
           ...(event.payload.branch !== undefined ? { branch: event.payload.branch } : {}),
           ...(event.payload.worktreePath !== undefined
             ? { worktreePath: event.payload.worktreePath }

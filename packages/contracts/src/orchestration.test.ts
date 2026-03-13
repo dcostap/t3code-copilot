@@ -10,6 +10,7 @@ import {
   ProjectCreateCommand,
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
+  ThreadMetaUpdatedPayload,
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
 } from "./orchestration";
@@ -23,6 +24,7 @@ const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
 );
 const decodeOrchestrationSession = Schema.decodeUnknownEffect(OrchestrationSession);
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
+const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
 
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   Effect.gen(function* () {
@@ -183,6 +185,21 @@ it.effect("accepts provider-scoped model options in thread.turn.start", () =>
     assert.strictEqual(parsed.provider, "codex");
     assert.strictEqual(parsed.modelOptions?.codex?.reasoningEffort, "high");
     assert.strictEqual(parsed.modelOptions?.codex?.fastMode, true);
+  }),
+);
+
+it.effect("accepts provider-scoped model options in thread.meta-updated payloads", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeThreadMetaUpdatedPayload({
+      threadId: "thread-1",
+      modelOptions: {
+        copilot: {
+          reasoningEffort: "medium",
+        },
+      },
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(parsed.modelOptions?.copilot?.reasoningEffort, "medium");
   }),
 );
 

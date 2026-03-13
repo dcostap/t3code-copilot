@@ -495,11 +495,29 @@ function activityToBlocks(
       return [];
 
     case "task.progress": {
+      return [];
+    }
+
+    case "reasoning.summary": {
       const detail =
+        asString(payload?.text) ??
         asString(payload?.detail) ??
         asString(payload?.message) ??
         asString(activity.summary);
-      return detail ? [{ type: "status", text: stripSimpleMarkdown(detail) }] : [];
+      return detail
+        ? [{ type: "reasoning-summary", text: stripSimpleMarkdown(detail) }]
+        : [];
+    }
+
+    case "reasoning.text": {
+      const detail =
+        asString(payload?.text) ??
+        asString(payload?.detail) ??
+        asString(payload?.message) ??
+        asString(activity.summary);
+      return detail
+        ? [{ type: "reasoning-text", text: stripSimpleMarkdown(detail) }]
+        : [];
     }
 
     case "task.completed": {

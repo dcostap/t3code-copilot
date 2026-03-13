@@ -419,7 +419,7 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
-  it("suppresses routine task lifecycle chatter and renders progress as plain text", () => {
+  it("suppresses routine task lifecycle chatter from transcript history", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
@@ -473,7 +473,120 @@ describe("threadToTranscriptBlocks", () => {
       ],
     });
 
-    expect(derived).toEqual([{ type: "status", text: "Confirming response needed" }]);
+    expect(derived).toEqual([]);
+  });
+
+  it("renders cumulative reasoning activities as distinct reasoning blocks", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-reasoning-text"),
+          tone: "info",
+          kind: "reasoning.text",
+          summary: "Reasoning",
+          payload: {
+            streamKind: "reasoning_text",
+            text: "**Checking** transcript ordering before streaming the answer.",
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-12T09:00:02.000Z",
+        },
+      ],
+    });
+
+    expect(derived.at(-1)).toEqual({
+      type: "reasoning-text",
+      text: "Checking transcript ordering before streaming the answer.",
+    });
+  });
+
+  it("renders reasoning summaries as distinct summary blocks", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-reasoning-summary"),
+          tone: "info",
+          kind: "reasoning.summary",
+          summary: "Reasoning summary",
+          payload: {
+            streamKind: "reasoning_summary_text",
+            text: "Clarifying the car wash situation",
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-12T09:00:02.000Z",
+        },
+      ],
+    });
+
+    expect(derived.at(-1)).toEqual({
+      type: "reasoning-summary",
+      text: "Clarifying the car wash situation",
+    });
+  });
+
+  it("suppresses coarse task.progress and keeps only detailed reasoning", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-reasoning-dedupe");
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-task-progress-dedupe"),
+          tone: "info",
+          kind: "task.progress",
+          summary: "Reasoning update",
+          payload: {
+            detail: "Considering transport options",
+          },
+          turnId,
+          sequence: 1,
+          createdAt: "2026-03-12T09:00:01.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-reasoning-text-dedupe"),
+          tone: "info",
+          kind: "reasoning.text",
+          summary: "Reasoning",
+          payload: {
+            streamKind: "reasoning_text",
+            text: "The car needs to be at the wash, so taking it makes more sense.",
+          },
+          turnId,
+          sequence: 2,
+          createdAt: "2026-03-12T09:00:02.000Z",
+        },
+      ],
+    });
+
+    expect(derived).not.toContainEqual({
+      type: "status",
+      text: "Considering transport options",
+    });
+    expect(derived).toContainEqual({
+      type: "reasoning-text",
+      text: "The car needs to be at the wash, so taking it makes more sense.",
+    });
   });
 
   it("splits assistant output around inline user-input requests using orchestration events", () => {
