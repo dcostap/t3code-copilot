@@ -72,6 +72,7 @@ export function App() {
   const stopSession = consoleData.stopSession;
   const createSessionFromHistory = workspace.createSessionFromHistory;
   const activateSession = workspace.activateSession;
+  const closeSession = workspace.closeSession;
   const activatePane = workspace.activatePane;
   const closePane = workspace.closePane;
   const [nowIso, setNowIso] = useState(() => new Date().toISOString());
@@ -981,6 +982,14 @@ export function App() {
                   : "session-tab"
               }
               onClick={() => activateSession(session.id)}
+              onMouseDown={(event) => {
+                if (event.button !== 1) {
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                closeSession(session.id);
+              }}
               title={session.cwd}
             >
               <span className="session-tab__title">{session.title}</span>
@@ -996,6 +1005,7 @@ export function App() {
           >
             +
           </button>
+          {isDesktop ? <div className="session-tabs__drag-space" aria-hidden="true" /> : null}
         </div>
         <main className={paneViews.length > 1 ? "conversation-scroll conversation-scroll--split" : "conversation-scroll"}>
           {paneViews.length > 0 ? (
