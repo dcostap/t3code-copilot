@@ -238,6 +238,54 @@ function extractChangedFiles(payload: Record<string, unknown> | null): string[] 
   return results;
 }
 
+function extractFileChangeStats(
+  payload: Record<string, unknown> | null,
+): { changedFiles: string[]; additions?: number; deletions?: number } | null {
+  const item = asRecord(asRecord(payload?.data)?.item);
+  const changes = Array.isArray(item?.changes) ? item.changes : [];
+  if (changes.length === 0) {
+    const changedFiles = extractChangedFiles(payload);
+    return changedFiles.length > 0 ? { changedFiles } : null;
+  }
+
+  const changedFiles: string[] = [];
+  let additions = 0;
+  let deletions = 0;
+
+  for (const change of changes) {
+    const record = asRecord(change);
+    const path =
+      asString(record?.path) ??
+      asString(record?.filePath) ??
+      asString(record?.relativePath) ??
+      asString(record?.filename);
+    if (path) {
+      changedFiles.push(path);
+    }
+
+    const diff = asString(record?.diff);
+    if (!diff) {
+      continue;
+    }
+
+    for (const line of diff.split("\n")) {
+      if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")) {
+        continue;
+      }
+      if (line.startsWith("+")) {
+        additions += 1;
+      } else if (line.startsWith("-")) {
+        deletions += 1;
+      }
+    }
+  }
+
+  return {
+    changedFiles: uniqueStrings(changedFiles),
+    ...(additions > 0 || deletions > 0 ? { additions, deletions } : {}),
+  };
+}
+
 function uniqueStrings(values: ReadonlyArray<string>) {
   return [...new Set(values)];
 }
@@ -403,6 +451,19 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
   const changedFiles = extractChangedFiles(payload);
   const status = resolveActivityStatus(payload?.status, activity.kind);
   const label = asString(payload?.title) ?? activity.summary;
+  const fileChangeStats = itemType === "file_change" ? extractFileChangeStats(payload) : null;
+
+  if (itemType === "file_change") {
+    return {
+      kind: "file-change",
+      label,
+      status,
+      mergeKey: `file-change:${(fileChangeStats?.changedFiles ?? changedFiles).join("|")}`,
+      ...(fileChangeStats?.changedFiles?.length ? { changedFiles: fileChangeStats.changedFiles } : changedFiles.length > 0 ? { changedFiles } : {}),
+      ...(typeof fileChangeStats?.additions === "number" ? { additions: fileChangeStats.additions } : {}),
+      ...(typeof fileChangeStats?.deletions === "number" ? { deletions: fileChangeStats.deletions } : {}),
+    };
+  }
 
   if (itemType === "command_execution" || command) {
     return {

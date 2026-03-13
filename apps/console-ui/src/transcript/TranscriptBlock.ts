@@ -27,6 +27,7 @@ export type LineKind =
   | "workGroupSeparator"
   | "workGroupHeader"
   | "workGroupFooter"
+  | "fileChangeSummary"
   | "planSeparator"
   | "planHeader"
   | "planExplanation"
@@ -125,7 +126,7 @@ export interface CommandExecBlock {
 }
 
 export interface WorkGroupItem {
-  readonly kind: "tool" | "command";
+  readonly kind: "tool" | "command" | "file-change";
   readonly label: string;
   readonly status: "running" | "done" | "error" | "declined";
   readonly detail?: string;
@@ -133,6 +134,8 @@ export interface WorkGroupItem {
   readonly exitCode?: number;
   readonly output?: string;
   readonly changedFiles?: ReadonlyArray<string>;
+  readonly additions?: number;
+  readonly deletions?: number;
 }
 
 export interface WorkGroupBlock {
@@ -526,6 +529,61 @@ function workItemToLines(
   return lines;
 }
 
+function formatEditCounts(additions?: number, deletions?: number) {
+  if (typeof additions !== "number" && typeof deletions !== "number") {
+    return "";
+  }
+
+  const safeAdditions = typeof additions === "number" ? additions : 0;
+  const safeDeletions = typeof deletions === "number" ? deletions : 0;
+  return ` (+${safeAdditions}, -${safeDeletions})`;
+}
+
+function fileChangeWorkGroupToLines(block: WorkGroupBlock, item: WorkGroupItem): AnnotatedLine[] {
+  const changedFiles = item.changedFiles ?? [];
+  const subject =
+    changedFiles.length === 1
+      ? `"${changedFiles[0]}"`
+      : changedFiles.length > 1
+        ? `${changedFiles.length} files`
+        : "files";
+  const action =
+    item.status === "running"
+      ? "Editing"
+      : item.status === "error"
+        ? "Failed to edit"
+        : item.status === "declined"
+          ? "Declined edit for"
+          : "Edited";
+  const counts = formatEditCounts(item.additions, item.deletions);
+  const text = `${action} ${subject}${counts}`;
+  const highlightSpans =
+    counts.length > 0
+      ? (() => {
+          const countStart = text.length - counts.length;
+          const commaIndex = counts.indexOf(",");
+          const plusStart = countStart + 2;
+          const plusEnd = commaIndex === -1 ? text.length - 1 : countStart + commaIndex;
+          const minusStart = commaIndex === -1 ? text.length - 1 : countStart + commaIndex + 2;
+          const minusEnd = text.length - 1;
+          return [
+            { from: plusStart, to: plusEnd, className: "tok-added" },
+            { from: minusStart, to: minusEnd, className: "tok-removed" },
+          ];
+        })()
+      : undefined;
+
+  return [
+    { text: "", kind: "workGroupSeparator" },
+    {
+      text,
+      kind: "fileChangeSummary",
+      ...(highlightSpans ? { highlightSpans } : {}),
+    },
+    { text: "", kind: "workGroupSeparator" },
+  ];
+}
+
 const DIVIDER_TEXT = "────────────────────────────────────────────────────────────────────────────────";
 
 function planStepKind(status: "pending" | "inProgress" | "completed"): LineKind {
@@ -613,6 +671,10 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
     }
 
     case "work-group": {
+      if (block.items.length === 1 && block.items[0]?.kind === "file-change") {
+        return fileChangeWorkGroupToLines(block, block.items[0]);
+      }
+
       const headerText = block.title ?? "Working";
       const collapseSingleItemLabel =
         block.items.length === 1 && block.title !== undefined && block.items[0]?.label === block.title;

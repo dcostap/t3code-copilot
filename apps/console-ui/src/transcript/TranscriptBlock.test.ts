@@ -157,6 +157,45 @@ describe("blockToLines", () => {
     ]);
   });
 
+  it("renders single file-change work groups as one-line edit summaries", () => {
+    expect(
+      blockToLines({
+        type: "work-group",
+        title: "File change",
+        status: "done",
+        startedAt: "2026-03-13T10:57:31.912Z",
+        endedAt: "2026-03-13T10:57:31.931Z",
+        items: [
+          {
+            kind: "file-change",
+            label: "File change",
+            status: "done",
+            changedFiles: ["C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt"],
+            additions: 3,
+            deletions: 0,
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        text: "",
+        kind: "workGroupSeparator",
+      },
+      {
+        text: 'Edited "C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt" (+3, -0)',
+        kind: "fileChangeSummary",
+        highlightSpans: [
+          { from: 55, to: 57, className: "tok-added" },
+          { from: 59, to: 61, className: "tok-removed" },
+        ],
+      },
+      {
+        text: "",
+        kind: "workGroupSeparator",
+      },
+    ]);
+  });
+
   it("renders markdown tables in assistant text as unicode box tables", () => {
     expect(
       blockToLines({

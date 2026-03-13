@@ -162,6 +162,97 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("captures file-change diff counts for compact edit summaries", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-file-change-start"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "File change started",
+          payload: {
+            itemType: "file_change",
+            title: "File change",
+            status: "inProgress",
+            data: {
+              item: {
+                type: "fileChange",
+                id: "call_file_change_1",
+                changes: [
+                  {
+                    path: "src/example.ts",
+                    kind: { type: "update", move_path: null },
+                    diff: "@@ -1 +1,3 @@\n-old line\n+new line\n+extra line\n",
+                  },
+                ],
+                status: "inProgress",
+              },
+            },
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-13T10:57:31.912Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-file-change-complete"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "File change completed",
+          payload: {
+            itemType: "file_change",
+            title: "File change",
+            status: "completed",
+            data: {
+              item: {
+                type: "fileChange",
+                id: "call_file_change_1",
+                changes: [
+                  {
+                    path: "src/example.ts",
+                    kind: { type: "update", move_path: null },
+                    diff: "@@ -1 +1,3 @@\n-old line\n+new line\n+extra line\n",
+                  },
+                ],
+                status: "completed",
+              },
+            },
+          },
+          turnId: null,
+          sequence: 2,
+          createdAt: "2026-03-13T10:57:31.931Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "work-group",
+        title: "File change",
+        status: "done",
+        startedAt: "2026-03-13T10:57:31.912Z",
+        endedAt: "2026-03-13T10:57:31.931Z",
+        items: [
+          {
+            kind: "file-change",
+            label: "File change",
+            status: "done",
+            changedFiles: ["src/example.ts"],
+            additions: 2,
+            deletions: 1,
+          },
+        ],
+      },
+    ]);
+  });
+
   it("keeps resolved user-input request blocks in the transcript in answered state", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
