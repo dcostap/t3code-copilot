@@ -4,8 +4,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 const STORAGE_KEY = "t3code:console-workspace-sessions:v2";
 const PENDING_HISTORY_MAX_AGE_MS = 60_000;
 
-export type ConsoleHistoryDebugPreset = "scroll";
-
 export interface ConsoleHistoryRef {
   readonly id: string;
   readonly threadId: OrchestrationThread["id"];
@@ -14,7 +12,6 @@ export interface ConsoleHistoryRef {
   readonly createdAt: string;
   readonly archivedAt: string | null;
   readonly pending: boolean;
-  readonly debugPreset?: ConsoleHistoryDebugPreset;
 }
 
 export interface ConsolePane {
@@ -56,7 +53,6 @@ export interface ConsoleWorkspaceModel {
     projectId: OrchestrationProject["id"];
     createdAt: string;
     pending?: boolean;
-    debugPreset?: ConsoleHistoryDebugPreset;
   }): void;
   closePane(paneId: string): void;
   createSessionFromHistory(input: {
@@ -66,7 +62,6 @@ export interface ConsoleWorkspaceModel {
     projectId: OrchestrationProject["id"];
     createdAt: string;
     pending?: boolean;
-    debugPreset?: ConsoleHistoryDebugPreset;
   }): void;
 }
 
@@ -150,7 +145,6 @@ function createHistoryRef(input: {
   cwd: string;
   createdAt: string;
   pending?: boolean;
-  debugPreset?: ConsoleHistoryDebugPreset;
 }): ConsoleHistoryRef {
   return {
     id: makeId("history"),
@@ -160,7 +154,6 @@ function createHistoryRef(input: {
     createdAt: input.createdAt,
     archivedAt: null,
     pending: input.pending ?? false,
-    ...(input.debugPreset ? { debugPreset: input.debugPreset } : {}),
   };
 }
 
@@ -172,7 +165,6 @@ export function createSessionFromHistoryRef(
     projectId: OrchestrationProject["id"];
     createdAt: string;
     pending?: boolean;
-    debugPreset?: ConsoleHistoryDebugPreset;
   },
   existingSessions: ReadonlyArray<ConsoleWorkspaceSession>,
 ): ConsoleWorkspaceSession {
@@ -261,7 +253,6 @@ export function splitSessionWithHistoryRef(
     cwd: string;
     createdAt: string;
     pending?: boolean;
-    debugPreset?: ConsoleHistoryDebugPreset;
   },
 ): ConsoleWorkspaceSession {
   if (session.panes.length >= 2) {
@@ -328,18 +319,7 @@ function isHistoryAvailable(
   history: ConsoleHistoryRef,
   threadsById: ReadonlyMap<string, OrchestrationThread>,
 ) {
-  if (history.debugPreset) {
-    return true;
-  }
   return threadsById.has(history.threadId);
-}
-
-function sessionHasAvailableHistory(
-  session: ConsoleWorkspaceSession,
-  threads: ReadonlyArray<OrchestrationThread>,
-) {
-  const threadIds = new Set(threads.map((thread) => thread.id));
-  return session.histories.some((history) => history.debugPreset || threadIds.has(history.threadId));
 }
 
 function reconcilePersistedSessionShape(
@@ -515,7 +495,7 @@ export function reconcileWorkspaceState(input: {
     : null;
   const activeSessionHasAvailableThread =
     activeSession !== null &&
-    sessionHasAvailableHistory(activeSession, input.threads);
+    activeSession.histories.some((history) => input.threads.some((thread) => thread.id === history.threadId));
 
   if (
     activeSessionId &&
@@ -586,11 +566,7 @@ export function useConsoleWorkspaceSessions(input: {
     if (!activePane.historyId) {
       return null;
     }
-    const history = activeSession.histories.find((candidate) => candidate.id === activePane.historyId) ?? null;
-    if (!history || history.debugPreset) {
-      return null;
-    }
-    return history.threadId;
+    return activeSession.histories.find((history) => history.id === activePane.historyId)?.threadId ?? null;
   }, [activePane, activeSession]);
 
   const activeThread = useMemo(
@@ -637,7 +613,6 @@ export function useConsoleWorkspaceSessions(input: {
     projectId: OrchestrationProject["id"];
     createdAt: string;
     pending?: boolean;
-    debugPreset?: ConsoleHistoryDebugPreset;
   }) => {
     setState((existing) => {
       if (!existing.activeSessionId) {
@@ -669,7 +644,6 @@ export function useConsoleWorkspaceSessions(input: {
     projectId: OrchestrationProject["id"];
     createdAt: string;
     pending?: boolean;
-    debugPreset?: ConsoleHistoryDebugPreset;
   }) => {
     setState((existing) => {
       const nextSession = createSessionFromHistoryRef(history, existing.sessions);

@@ -566,9 +566,24 @@ function buildEditorTheme() {
       ".cm-codeToken.tok-removed": { color: "#ff7575" },
       ".cm-line-list": { color: "#c7ccd1" },
       ".cm-line-userPromptSeparator": {
-        color: "rgba(236, 241, 246, 0.38)",
+        // TODO: This drawn separator currently contributes to subtle wheel-scroll jank.
+        // Revisit with a lower-churn implementation once transcript rendering is stabilized.
+        position: "relative",
+        minHeight: "40px",
+      },
+      ".cm-line-userPromptSeparator::before": {
+        content: '""',
+        position: "absolute",
+        left: "0",
+        right: "0",
+        top: "50%",
+        borderTop: "1px solid rgba(236, 241, 246, 0.38)",
+        transform: "translateY(-50%)",
       },
       ".cm-line-userPromptSeparator.cm-line-userPromptSeparatorHidden": {
+        minHeight: "0",
+      },
+      ".cm-line-userPromptSeparator.cm-line-userPromptSeparatorHidden::before": {
         display: "none",
       },
       ".cm-line-workGroupSeparator": {

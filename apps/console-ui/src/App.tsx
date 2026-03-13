@@ -2,7 +2,6 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   MODEL_OPTIONS_BY_PROVIDER,
   REASONING_EFFORT_OPTIONS_BY_PROVIDER,
-  type OrchestrationThread,
   type ProviderKind,
 } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -47,35 +46,6 @@ function resolveProviderFromThread(providerName: string | null | undefined): Pro
     return providerName;
   }
   return null;
-}
-
-function buildScrollDebugBlocks() {
-  return Array.from({ length: 24 }, (_, index) => {
-    const section = index + 1;
-    return [
-      {
-        type: "user-message" as const,
-        text: `Scroll debug prompt ${section}: test plain user/assistant transcript flow without structured widgets yet.`,
-      },
-      {
-        type: "assistant-text" as const,
-        streaming: false,
-        text:
-          `Scroll debug section ${section}\n` +
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789  ─ │ ┌ ┐ └ ┘\n" +
-          "The quick brown fox jumps over the lazy dog. Smooth wheel scrolling should feel uniform here.\n" +
-          `Line ${section}.1  ·  Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor.\n` +
-          `Line ${section}.2  ·  Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip.\n` +
-          `Line ${section}.3  ·  Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore.\n` +
-          `Line ${section}.4  ·  Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt.`,
-      },
-      {
-        type: "assistant-text" as const,
-        streaming: false,
-        text: `Unicode sample ${section}: · • ◦ ○ ◉ ◎ □ ▣ ░ ▒ ▓ → ← ↑ ↓`,
-      },
-    ];
-  }).flat();
 }
 
 export function App() {
@@ -131,7 +101,7 @@ export function App() {
     }
     return activeSession.histories.find((history) => history.id === activePane.historyId) ?? null;
   }, [activePane?.historyId, activeSession]);
-  const activeThreadId = activeSession ? workspace.activeThreadId : consoleData.activeThreadId;
+  const activeThreadId = workspace.activeThreadId ?? consoleData.activeThreadId;
   const activeThread = activeSession
     ? workspace.activeThread
     : (activeThreadId
@@ -162,11 +132,9 @@ export function App() {
     ? resolvePendingUserInputShortcut(composerDraft, activePendingQuestion.options)
     : null;
   const activeProvider =
-    activeHistory?.debugPreset === "scroll"
-      ? null
-      : activeHistory?.preferredProvider ??
-        resolveProviderFromThread(activeThread?.session?.providerName) ??
-        null;
+    activeHistory?.preferredProvider ??
+    resolveProviderFromThread(activeThread?.session?.providerName) ??
+    null;
   const activeReasoningEffort =
     activeProvider === "codex"
       ? (activeThread?.modelOptions?.codex?.reasoningEffort ?? null)
@@ -462,9 +430,6 @@ export function App() {
   const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
   const activeThreadNow = activeThreadTurnRunning ? nowIso : undefined;
   const blocks = useMemo(() => {
-    if (activeHistory?.debugPreset === "scroll") {
-      return buildScrollDebugBlocks();
-    }
     if (activeThread) {
       return threadToTranscriptBlocks(activeThread, {
         resolveAttachmentPreviewUrl: (attachmentId) =>
@@ -480,26 +445,7 @@ export function App() {
       return [{ type: "status" as const, text: `Connection error: ${consoleData.error}` }];
     }
     return [{ type: "status" as const, text: "Waiting for orchestration snapshot..." }];
-  }, [activeHistory?.debugPreset, activeSession, activeThread, activeThreadNow, attachmentPreviewBaseUrl, consoleData.error, getThreadEvents]);
-
-  const handleCreateScrollDebugSession = useCallback(() => {
-    const sessionCwd =
-      activeSession?.cwd ?? activeThread?.worktreePath ?? activeProject?.workspaceRoot ?? null;
-    const projectId = activeSession?.projectId ?? activeProject?.id ?? null;
-    if (!sessionCwd || !projectId) {
-      setSubmitError("No workspace is available for a scroll debug session.");
-      return;
-    }
-
-    createSessionFromHistory({
-      threadId: `debug:scroll:${crypto.randomUUID()}` as OrchestrationThread["id"],
-      preferredProvider: "codex",
-      cwd: sessionCwd,
-      projectId,
-      createdAt: new Date().toISOString(),
-      debugPreset: "scroll",
-    });
-  }, [activeProject, activeSession, activeThread?.worktreePath, createSessionFromHistory]);
+  }, [activeSession, activeThread, activeThreadNow, attachmentPreviewBaseUrl, consoleData.error, getThreadEvents]);
 
   const handleCreateSession = useCallback(async (preferredProvider: ProviderKind) => {
     const sessionCwd =
@@ -584,7 +530,7 @@ export function App() {
 
     return activeSession.panes.map((pane, index) => {
       const history = activeSession.histories.find((candidate) => candidate.id === pane.historyId) ?? null;
-      const threadId = history?.debugPreset === "scroll" ? null : (history?.threadId ?? null);
+      const threadId = history?.threadId ?? null;
       const thread =
         threadId ? (consoleData.threads.find((candidate) => candidate.id === threadId) ?? null) : null;
       const pendingUserInputs = threadId ? getPendingUserInputs(threadId) : [];
@@ -598,16 +544,14 @@ export function App() {
         ? resolvePendingUserInputShortcut(draft, pendingQuestion.options)
         : null;
       const paneNow = threadId && isThreadTurnRunning(threadId) ? nowIso : undefined;
-      const blocks = history?.debugPreset === "scroll"
-        ? buildScrollDebugBlocks()
-        : thread
-          ? threadToTranscriptBlocks(thread, {
+      const blocks = thread
+        ? threadToTranscriptBlocks(thread, {
             resolveAttachmentPreviewUrl: (attachmentId) =>
               `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
             orchestrationEvents: getThreadEvents(thread.id),
             ...(paneNow ? { now: paneNow } : {}),
           })
-          : [{
+        : [{
             type: "status" as const,
             text: history?.pending ? "Loading session history..." : "History unavailable in this session.",
           }];
@@ -681,16 +625,6 @@ export function App() {
           run: () => handleCreateSession("copilot"),
         },
       );
-    }
-
-    if (currentSession || activeProject) {
-      commands.push({
-        id: "session:new:scroll-debug",
-        label: "New Session: Scroll Debug",
-        description: "Open a local-only debug tab with plain transcript text for scroll testing.",
-        keywords: ["session", "new", "debug", "scroll", "plain", "transcript"],
-        run: handleCreateScrollDebugSession,
-      });
     }
 
     if (canDispatchBackendCommands && currentSession && currentSession.panes.length < 2) {
@@ -869,7 +803,6 @@ export function App() {
     consoleData.isInterruptingTurn,
     consoleData.isStoppingSession,
     consoleData.respondingUserInputRequestIds,
-    handleCreateScrollDebugSession,
     handleCreateSession,
     handleSplitActivePane,
     interruptTurn,
@@ -1021,10 +954,6 @@ export function App() {
   }, [activePaneId, closePalette, focusActivePanePrompt, paletteOpen]);
 
   const footerText = useMemo(() => {
-    if (activeHistory?.debugPreset === "scroll") {
-      const cwd = workspace.activeSession?.cwd ?? activeProject?.workspaceRoot ?? "no project";
-      return `debug · scroll-debug · ${cwd}`;
-    }
     const provider = activeProvider ?? "no-provider";
     const model = activeThread?.model ?? "no-model";
     const reasoning =
@@ -1036,7 +965,6 @@ export function App() {
     const cwd = workspace.activeSession?.cwd ?? activeProject?.workspaceRoot ?? "no project";
     return `${provider} · ${model} · ${reasoning} · ${cwd}`;
   }, [
-    activeHistory?.debugPreset,
     activeDefaultReasoningEffort,
     activeProvider,
     activeProject?.workspaceRoot,
@@ -1109,11 +1037,9 @@ export function App() {
                     <span className="conversation-pane__label">Pane {paneView.index + 1}</span>
                     <span className="conversation-pane__meta">
                       {paneView.thread?.title ??
-                        (paneView.history?.debugPreset === "scroll"
-                          ? "Debug · Scroll transcript"
-                          : `${paneView.history?.preferredProvider === "copilot" ? "Copilot" : "Codex"} · ${
-                            paneView.history?.pending ? "Loading thread..." : "History unavailable"
-                          }`)}
+                        `${paneView.history?.preferredProvider === "copilot" ? "Copilot" : "Codex"} · ${
+                          paneView.history?.pending ? "Loading thread..." : "History unavailable"
+                        }`}
                     </span>
                   </div>
                   <div className="transcript-shell">
@@ -1149,7 +1075,7 @@ export function App() {
                           paneView.draftAnswers,
                           value,
                         )}
-                      submitDisabled={paneView.history?.debugPreset === "scroll" || !canSubmitPromptForThread(paneView.threadId)}
+                      submitDisabled={!canSubmitPromptForThread(paneView.threadId)}
                     />
                   </div>
                 </section>
