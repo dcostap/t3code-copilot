@@ -6,8 +6,10 @@ import {
   type OrchestrationReadModel,
   type OrchestrationThread,
   type OrchestrationEvent,
+  type ProviderModelOptions,
   type ProviderInteractionMode,
   type ProviderKind,
+  type CodexReasoningEffort,
   type ServerConfig,
   type ThreadId,
   type UploadChatImageAttachment,
@@ -77,10 +79,20 @@ export interface ConsoleDataState {
     attachments?: ReadonlyArray<UploadChatImageAttachment>;
   }): Promise<void>;
   respondToUserInput(threadId: string, requestId: string, answers: Record<string, unknown>): Promise<void>;
-  setThreadModel(threadId: string, model: string): Promise<void>;
+  setThreadModel(threadId: string, provider: ProviderKind, model: string): Promise<void>;
+  setThreadReasoningEffort(
+    threadId: string,
+    provider: ProviderKind,
+    reasoningEffort: CodexReasoningEffort | null,
+  ): Promise<void>;
   setInteractionMode(threadId: string, interactionMode: ProviderInteractionMode): Promise<void>;
   interruptTurn(threadId: string): Promise<void>;
   stopSession(threadId: string): Promise<void>;
+}
+
+interface OptimisticThreadMetaPatch {
+  readonly model?: string;
+  readonly modelOptions?: ProviderModelOptions;
 }
 
 function readSearchConfig(): ConsoleSearchConfig {
@@ -289,6 +301,109 @@ function findThreadById(
   return threads.find((thread) => thread.id === threadId) ?? null;
 }
 
+function updateReasoningEffortModelOptions(
+  existing: ProviderModelOptions | undefined,
+  provider: ProviderKind,
+  reasoningEffort: CodexReasoningEffort | null,
+): ProviderModelOptions {
+  if (provider === "codex") {
+    const nextCodexOptions = {
+      ...existing?.codex,
+      ...(reasoningEffort !== null ? { reasoningEffort } : {}),
+    };
+
+    if (reasoningEffort === null) {
+      delete nextCodexOptions.reasoningEffort;
+    }
+
+    return {
+      ...existing,
+      codex: nextCodexOptions,
+    };
+  }
+
+  const nextCopilotOptions = {
+    ...existing?.copilot,
+    ...(reasoningEffort !== null ? { reasoningEffort } : {}),
+  };
+
+  if (reasoningEffort === null) {
+    delete nextCopilotOptions.reasoningEffort;
+  }
+
+  return {
+    ...existing,
+    copilot: nextCopilotOptions,
+  };
+}
+
+function clearProviderReasoningEffort(
+  existing: ProviderModelOptions | undefined,
+  provider: ProviderKind,
+): ProviderModelOptions | undefined {
+  if (!existing) {
+    return existing;
+  }
+
+  if (provider === "codex") {
+    if (!existing.codex?.reasoningEffort) {
+      return existing;
+    }
+    const nextCodex = { ...existing.codex };
+    delete nextCodex.reasoningEffort;
+    return { ...existing, codex: nextCodex };
+  }
+
+  if (!existing.copilot?.reasoningEffort) {
+    return existing;
+  }
+  const nextCopilot = { ...existing.copilot };
+  delete nextCopilot.reasoningEffort;
+  return { ...existing, copilot: nextCopilot };
+}
+
+function getProviderReasoningEffort(
+  existing: ProviderModelOptions | undefined,
+  provider: ProviderKind,
+): CodexReasoningEffort | null {
+  return provider === "codex"
+    ? (existing?.codex?.reasoningEffort ?? null)
+    : (existing?.copilot?.reasoningEffort ?? null);
+}
+
+function normalizeModelOptionsForModel(
+  existing: ProviderModelOptions | undefined,
+  provider: ProviderKind,
+  model: string,
+  serverConfig: ServerConfig | null,
+): ProviderModelOptions | undefined {
+  const providerStatus = serverConfig?.providers.find((entry) => entry.provider === provider);
+  const modelStatus = providerStatus?.models?.find((entry) => entry.id === model);
+  if (!modelStatus) {
+    return existing;
+  }
+
+  const reasoningEffort = getProviderReasoningEffort(existing, provider);
+  if (!reasoningEffort) {
+    return existing;
+  }
+
+  if (!modelStatus.supportsReasoningEffort) {
+    return clearProviderReasoningEffort(existing, provider);
+  }
+
+  const supportedReasoningEfforts = modelStatus.supportedReasoningEfforts;
+  if (
+    supportedReasoningEfforts &&
+    supportedReasoningEfforts.length > 0 &&
+    !supportedReasoningEfforts.includes(reasoningEffort)
+  ) {
+    return clearProviderReasoningEffort(existing, provider);
+  }
+
+  return existing;
+}
+
 function findProjectById(
   snapshot: OrchestrationReadModel | null,
   projectId: OrchestrationProject["id"] | null,
@@ -336,6 +451,9 @@ export function useConsoleData(): ConsoleDataState {
   const stopSessionInFlightRef = useRef(false);
 
   const [snapshot, setSnapshot] = useState<OrchestrationReadModel | null>(null);
+  const [optimisticThreadMetaById, setOptimisticThreadMetaById] = useState<
+    Record<string, OptimisticThreadMetaPatch>
+  >({});
   const [orchestrationEvents, setOrchestrationEvents] = useState<ReadonlyArray<OrchestrationEvent>>([]);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const [welcome, setWelcome] = useState<WsWelcomePayload | null>(null);
@@ -523,7 +641,20 @@ export function useConsoleData(): ConsoleDataState {
     };
   }, [backend, searchConfig.threadId]);
 
-  const threads = useMemo(() => snapshot?.threads ?? EMPTY_THREADS, [snapshot]);
+  const threads = useMemo(() => {
+    const baseThreads = snapshot?.threads ?? EMPTY_THREADS;
+    return baseThreads.map((thread) => {
+      const optimistic = optimisticThreadMetaById[thread.id];
+      if (!optimistic) {
+        return thread;
+      }
+      return {
+        ...thread,
+        ...(optimistic.model !== undefined ? { model: optimistic.model } : {}),
+        ...(optimistic.modelOptions !== undefined ? { modelOptions: optimistic.modelOptions } : {}),
+      };
+    });
+  }, [optimisticThreadMetaById, snapshot?.threads]);
 
   const thread = useMemo(() => {
     if (!snapshot) return null;
@@ -542,6 +673,39 @@ export function useConsoleData(): ConsoleDataState {
     if (!snapshot || !thread) return;
     setActiveThreadIdState(thread.id);
   }, [snapshot, thread]);
+
+  useEffect(() => {
+    if (!snapshot) {
+      return;
+    }
+
+    setOptimisticThreadMetaById((existing) => {
+      let changed = false;
+      const next: Record<string, OptimisticThreadMetaPatch> = {};
+
+      for (const [threadId, patch] of Object.entries(existing)) {
+        const thread = snapshot.threads.find((entry) => entry.id === threadId);
+        if (!thread) {
+          changed = true;
+          continue;
+        }
+
+        const modelSettled = patch.model === undefined || thread.model === patch.model;
+        const modelOptionsSettled =
+          patch.modelOptions === undefined
+          || JSON.stringify(thread.modelOptions ?? null) === JSON.stringify(patch.modelOptions ?? null);
+
+        if (modelSettled && modelOptionsSettled) {
+          changed = true;
+          continue;
+        }
+
+        next[threadId] = patch;
+      }
+
+      return changed ? next : existing;
+    });
+  }, [snapshot]);
 
   useEffect(() => {
     if (!thread || !canDispatchLiveCommand(connectionState)) {
@@ -771,6 +935,9 @@ export function useConsoleData(): ConsoleDataState {
           },
           ...(provider ? { provider } : {}),
           model: targetThread.model,
+          ...(targetThread.modelOptions !== undefined
+            ? { modelOptions: targetThread.modelOptions }
+            : {}),
           assistantDeliveryMode: "streaming",
           runtimeMode: "full-access",
           interactionMode: targetThread.interactionMode,
@@ -818,20 +985,98 @@ export function useConsoleData(): ConsoleDataState {
     [assertLiveCommandReady, backend, threads],
   );
 
-  const setThreadModel = useCallback(async (threadId: string, model: string) => {
+  const setThreadModel = useCallback(async (threadId: string, provider: ProviderKind, model: string) => {
     const targetThread = findThreadById(threads, threadId);
     const normalizedModel = model.trim();
     if (!targetThread || normalizedModel.length === 0 || targetThread.model === normalizedModel) {
       return;
     }
+    const normalizedModelOptions = normalizeModelOptionsForModel(
+      targetThread.modelOptions,
+      provider,
+      normalizedModel,
+      serverConfig,
+    );
     assertLiveCommandReady();
+    const previousModel = targetThread.model;
+    const previousModelOptions = targetThread.modelOptions;
+    setOptimisticThreadMetaById((existing) => ({
+      ...existing,
+      [targetThread.id]: {
+        ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
+        ...(normalizedModelOptions !== undefined ? { modelOptions: normalizedModelOptions } : {}),
+      },
+    }));
 
-    await backend.dispatchCommand({
-      type: "thread.meta.update",
-      commandId: makeCommandId(),
-      threadId: targetThread.id,
-      model: normalizedModel,
-    });
+    try {
+      await backend.dispatchCommand({
+        type: "thread.meta.update",
+        commandId: makeCommandId(),
+        threadId: targetThread.id,
+        model: normalizedModel,
+        ...(normalizedModelOptions !== undefined ? { modelOptions: normalizedModelOptions } : {}),
+      });
+    } catch (error) {
+      setOptimisticThreadMetaById((existing) => ({
+        ...existing,
+        [targetThread.id]: {
+          model: previousModel,
+          ...(previousModelOptions !== undefined ? { modelOptions: previousModelOptions } : {}),
+        },
+      }));
+      throw error;
+    }
+  }, [assertLiveCommandReady, backend, serverConfig, threads]);
+
+  const setThreadReasoningEffort = useCallback(async (
+    threadId: string,
+    provider: ProviderKind,
+    reasoningEffort: CodexReasoningEffort | null,
+  ) => {
+    const targetThread = findThreadById(threads, threadId);
+    if (!targetThread) {
+      return;
+    }
+    const nextModelOptions = updateReasoningEffortModelOptions(
+      targetThread.modelOptions,
+      provider,
+      reasoningEffort,
+    );
+    const currentReasoningEffort = getProviderReasoningEffort(targetThread.modelOptions, provider);
+    if (currentReasoningEffort === reasoningEffort) {
+      return;
+    }
+    assertLiveCommandReady();
+    const previousModelOptions = targetThread.modelOptions;
+    setOptimisticThreadMetaById((existing) => ({
+      ...existing,
+      [targetThread.id]: {
+        ...(existing[targetThread.id]?.model !== undefined
+          ? { model: existing[targetThread.id]!.model }
+          : {}),
+        modelOptions: nextModelOptions,
+      },
+    }));
+
+    try {
+      await backend.dispatchCommand({
+        type: "thread.meta.update",
+        commandId: makeCommandId(),
+        threadId: targetThread.id,
+        modelOptions: nextModelOptions,
+      });
+    } catch (error) {
+      setOptimisticThreadMetaById((existing) => ({
+        ...existing,
+        [targetThread.id]: {
+          ...(existing[targetThread.id]?.model !== undefined
+            ? { model: existing[targetThread.id]!.model }
+            : {}),
+          ...(previousModelOptions !== undefined ? { modelOptions: previousModelOptions } : {}),
+        },
+      }));
+      throw error;
+    }
   }, [assertLiveCommandReady, backend, threads]);
 
   const setInteractionMode = useCallback(
@@ -928,6 +1173,7 @@ export function useConsoleData(): ConsoleDataState {
     submitPrompt,
     respondToUserInput,
     setThreadModel,
+    setThreadReasoningEffort,
     setInteractionMode,
     interruptTurn,
     stopSession,
