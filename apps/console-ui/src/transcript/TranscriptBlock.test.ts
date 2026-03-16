@@ -15,6 +15,16 @@ function expectHighlightClasses(line: TranscriptLine, ...classNames: string[]) {
   }
 }
 
+function highlightedTextForClass(line: TranscriptLine, className: string) {
+  return (line.highlightSpans ?? [])
+    .filter((span) => span.className === className)
+    .map((span) => line.text.slice(span.from, span.to));
+}
+
+function linkSpans(line: TranscriptLine) {
+  return (line.highlightSpans ?? []).filter((span) => span.link);
+}
+
 describe("blockToLines", () => {
   it("wraps user messages in prompt separators", () => {
     const lines = blockToLines({
@@ -338,15 +348,11 @@ describe("blockToLines", () => {
     expect(widgetLine.kind).toBe("commandExec");
     expect(widgetLine.text).toContain("Running");
     expect(widgetLine.text).toContain("Get-Location");
-    expect(widgetLine.text).toContain("Running for");
     expect(widgetLine.extraClasses).toEqual(
       expect.arrayContaining(["cm-line-workItemRunning", "cm-line-commandWidget"]),
     );
     expectHighlightClasses(
       widgetLine,
-      "tok-commandWidgetGlyph",
-      "tok-commandWidgetPrefix",
-      "tok-commandWidgetMeta",
       "tok-workingPulseCore",
       "tok-workingPulseMid",
       "tok-workingPulseEdge",
@@ -557,6 +563,122 @@ describe("blockToLines", () => {
     expect(lines[1]?.text).toContain("first item");
     expect(lines[2]?.text).toContain("nested item");
     expect(lines[3]?.text).toContain("ordered item");
+  });
+
+  it("renders inline code, bold, and italics as styled plain text", () => {
+    const lines = blockToLines({
+      type: "assistant-text",
+      text: "Use `bun run test`, stay **focused**, and be *careful*.",
+      streaming: false,
+    });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.kind).toBe("body");
+    expect(lines[0]?.text).toBe("Use bun run test, stay focused, and be careful.");
+    expect(highlightedTextForClass(lines[0]!, "tok-inlineCode")).toEqual(["bun run test"]);
+    expect(highlightedTextForClass(lines[0]!, "tok-markdownStrong")).toEqual(["focused"]);
+    expect(highlightedTextForClass(lines[0]!, "tok-markdownEmphasis")).toEqual(["careful"]);
+  });
+
+  it("applies inline markdown styling inside list and blockquote content", () => {
+    const lines = blockToLines({
+      type: "assistant-text",
+      text: "- **ship it**\n> use `bun run test`\nLiteral \\*stars\\* stay literal.",
+      streaming: false,
+    });
+
+    expect(lines.map((line) => line.kind)).toEqual(["list", "blockquote", "body"]);
+    expect(lines[0]?.text).toBe("• ship it");
+    expect(highlightedTextForClass(lines[0]!, "tok-markdownStrong")).toEqual(["ship it"]);
+    expect(lines[1]?.text).toBe("│ use bun run test");
+    expect(highlightedTextForClass(lines[1]!, "tok-inlineCode")).toEqual(["bun run test"]);
+    expect(lines[2]?.text).toBe("Literal *stars* stay literal.");
+    expect(lines[2]?.highlightSpans).toBeUndefined();
+  });
+
+  it("renders markdown headings as styled plain text lines", () => {
+    const lines = blockToLines({
+      type: "assistant-text",
+      text: "# Overview\n## Details\n### Notes",
+      streaming: false,
+    });
+
+    expect(lines.map((line) => line.text)).toEqual(["Overview", "Details", "Notes"]);
+    expect(lines[0]?.extraClasses).toEqual(
+      expect.arrayContaining(["cm-line-markdownHeading", "cm-line-markdownHeading1"]),
+    );
+    expect(lines[1]?.extraClasses).toEqual(
+      expect.arrayContaining(["cm-line-markdownHeading", "cm-line-markdownHeading2"]),
+    );
+    expect(lines[2]?.extraClasses).toEqual(
+      expect.arrayContaining(["cm-line-markdownHeading", "cm-line-markdownHeading3"]),
+    );
+  });
+
+  it("captures markdown links, bare urls, and file paths as interactive spans", () => {
+    const lines = blockToLines({
+      type: "assistant-text",
+      text:
+        "Open [repo](https://github.com/example/repo), visit https://example.com/docs, and inspect `C:\\Users\\Dario Costa\\Desktop\\report.xlsx` plus src\\App.tsx and apps/console-ui but not word1/word2 or WSL/Hyper-V",
+      streaming: false,
+    });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.text).toContain("Open repo");
+    expect(lines[0]?.text).toContain("https://example.com/docs");
+    expect(lines[0]?.text).toContain("C:\\Users\\Dario Costa\\Desktop\\report.xlsx");
+
+    const interactiveSpans = linkSpans(lines[0]!);
+    expect(interactiveSpans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          link: {
+            kind: "url",
+            target: "https://github.com/example/repo",
+          },
+        }),
+        expect.objectContaining({
+          link: {
+            kind: "url",
+            target: "https://example.com/docs",
+          },
+        }),
+        expect.objectContaining({
+          link: {
+            kind: "file",
+            target: "C:\\Users\\Dario Costa\\Desktop\\report.xlsx",
+          },
+        }),
+        expect.objectContaining({
+          link: {
+            kind: "file",
+            target: "src\\App.tsx",
+          },
+        }),
+        expect.objectContaining({
+          link: {
+            kind: "file",
+            target: "apps/console-ui",
+          },
+        }),
+      ]),
+    );
+    expect(interactiveSpans).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          link: {
+            kind: "file",
+            target: "word1/word2",
+          },
+        }),
+        expect.objectContaining({
+          link: {
+            kind: "file",
+            target: "WSL/Hyper-V",
+          },
+        }),
+      ]),
+    );
   });
 
   it("renders proposed plans with header and list body lines", () => {

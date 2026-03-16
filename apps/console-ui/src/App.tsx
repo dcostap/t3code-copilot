@@ -1130,6 +1130,7 @@ export function App() {
                       }}
                       blocks={paneView.blocks}
                       composerAttachments={paneView.attachments}
+                      cwd={activeSession?.cwd ?? paneView.thread?.worktreePath ?? activeProject?.workspaceRoot ?? null}
                       interactionMode={paneView.thread?.interactionMode ?? "default"}
                       {...(paneView.pendingUserInput && paneView.pendingQuestion
                         ? {
@@ -1176,6 +1177,7 @@ export function App() {
                 }}
                 blocks={blocks}
                 composerAttachments={composerAttachments}
+                cwd={activeSession?.cwd ?? activeThread?.worktreePath ?? activeProject?.workspaceRoot ?? null}
                 interactionMode={activeThread?.interactionMode ?? "default"}
                 resolveInlineDiff={(lookup) =>
                   getTurnDiff({

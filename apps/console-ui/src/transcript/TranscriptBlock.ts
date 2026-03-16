@@ -68,6 +68,10 @@ export interface AnnotatedLine {
     readonly from: number;
     readonly to: number;
     readonly className: string;
+    readonly link?: {
+      readonly kind: "url" | "file";
+      readonly target: string;
+    };
   }>;
   readonly userInputRef?: {
     readonly requestId: string;
@@ -393,36 +397,435 @@ function codeFenceToLines(language: string, lines: ReadonlyArray<string>): Annot
   ];
 }
 
+function isInlineMarkdownEscapableCharacter(char: string | undefined) {
+  return char === "\\" || char === "`" || char === "*" || char === "[" || char === "]" || char === "(" || char === ")";
+}
+
+function findInlineMarkdownClosingMarker(
+  text: string,
+  start: number,
+  marker: "`" | "*" | "**",
+) {
+  for (let index = start; index < text.length; index += 1) {
+    if (text[index] === "\\") {
+      index += 1;
+      continue;
+    }
+    if (marker === "**" ? text.startsWith("**", index) : text[index] === marker) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function findUnescapedCharacter(text: string, start: number, target: string) {
+  for (let index = start; index < text.length; index += 1) {
+    if (text[index] === "\\" && isInlineMarkdownEscapableCharacter(text[index + 1])) {
+      index += 1;
+      continue;
+    }
+    if (text[index] === target) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function decodeInlineMarkdownEscapes(text: string) {
+  let decoded = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "\\" && isInlineMarkdownEscapableCharacter(text[index + 1])) {
+      decoded += text[index + 1] ?? "";
+      index += 1;
+      continue;
+    }
+    decoded += char;
+  }
+  return decoded;
+}
+
+function trimAutoLinkedSuffix(text: string) {
+  return text.replace(/[),.;:!?]+$/u, "");
+}
+
+const COMMON_RELATIVE_PATH_ROOTS = new Set([
+  "app",
+  "apps",
+  "assets",
+  "components",
+  "docs",
+  "lib",
+  "package",
+  "packages",
+  "public",
+  "script",
+  "scripts",
+  "src",
+  "test",
+  "tests",
+]);
+
+function isLikelyRelativeSlashPath(target: string) {
+  if (!target.includes("/")) {
+    return false;
+  }
+
+  const segments = target.split("/").filter((segment) => segment.length > 0);
+  if (segments.length < 2) {
+    return false;
+  }
+
+  const firstSegment = segments[0]?.toLowerCase() ?? "";
+  const lastSegment = segments.at(-1) ?? "";
+
+  if (target.startsWith("/") || firstSegment === "." || firstSegment === "..") {
+    return true;
+  }
+
+  if (lastSegment.includes(".")) {
+    return true;
+  }
+
+  if (segments.length >= 3) {
+    return true;
+  }
+
+  return COMMON_RELATIVE_PATH_ROOTS.has(firstSegment);
+}
+
+function isLikelyRelativeBackslashPath(target: string) {
+  if (!target.includes("\\")) {
+    return false;
+  }
+
+  const segments = target.split("\\").filter((segment) => segment.length > 0);
+  if (segments.length < 2) {
+    return false;
+  }
+
+  const firstSegment = segments[0]?.toLowerCase() ?? "";
+  const lastSegment = segments.at(-1) ?? "";
+
+  if (firstSegment === "." || firstSegment === "..") {
+    return true;
+  }
+
+  if (lastSegment.includes(".")) {
+    return true;
+  }
+
+  if (segments.length >= 3) {
+    return true;
+  }
+
+  return COMMON_RELATIVE_PATH_ROOTS.has(firstSegment);
+}
+
+function resolveInlineLinkTarget(target: string): { kind: "url" | "file"; target: string } | null {
+  const trimmed = target.trim();
+  if (/^https?:\/\/\S+$/i.test(trimmed)) {
+    return { kind: "url", target: trimmed };
+  }
+  if (
+    /^[A-Za-z]:[\\/]/.test(trimmed)
+    || trimmed.startsWith("\\\\")
+    || /^\.{1,2}[\\/]/.test(trimmed)
+    || isLikelyRelativeBackslashPath(trimmed)
+    || isLikelyRelativeSlashPath(trimmed)
+  ) {
+    return { kind: "file", target: trimmed };
+  }
+  return null;
+}
+
+function detectAutoLinkSpans(text: string): Array<{
+  from: number;
+  to: number;
+  className: string;
+  link: {
+    kind: "url" | "file";
+    target: string;
+  };
+}> {
+  const spans: Array<{
+    from: number;
+    to: number;
+    className: string;
+    link: {
+      kind: "url" | "file";
+      target: string;
+    };
+  }> = [];
+  const addSpan = (
+    from: number,
+    rawText: string,
+    link: {
+      kind: "url" | "file";
+      target: string;
+    },
+  ) => {
+    const trimmedText = trimAutoLinkedSuffix(rawText);
+    if (trimmedText.length === 0) {
+      return;
+    }
+    spans.push({
+      from,
+      to: from + trimmedText.length,
+      className: link.kind === "url" ? "tok-markdownLink tok-linkUrl" : "tok-markdownLink tok-linkFile",
+      link: {
+        kind: link.kind,
+        target: trimmedText,
+      },
+    });
+  };
+
+  const urlPattern = /https?:\/\/[^\s<>()]+/g;
+  for (const match of text.matchAll(urlPattern)) {
+    const rawText = match[0];
+    const index = match.index;
+    if (typeof rawText !== "string" || index === undefined) {
+      continue;
+    }
+    addSpan(index, rawText, { kind: "url", target: rawText });
+  }
+
+  const absoluteFilePattern =
+    /(?:[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]+\.[A-Za-z0-9]{1,12}|\\\\(?:[^\\/:*?"<>|\r\n]+\\)+[^\\/:*?"<>|\r\n]+\.[A-Za-z0-9]{1,12})/g;
+  for (const match of text.matchAll(absoluteFilePattern)) {
+    const rawText = match[0];
+    const index = match.index;
+    if (typeof rawText !== "string" || index === undefined) {
+      continue;
+    }
+    const trimmedText = rawText.trimEnd();
+    const link = resolveInlineLinkTarget(trimmedText);
+    if (!link || link.kind !== "file") {
+      continue;
+    }
+    addSpan(index, trimmedText, link);
+  }
+
+  const relativeFilePattern = /(?:\.{1,2}[\\/]|(?:[^\\/\s]+[\\/])+)[^\s<>()]+/g;
+  for (const match of text.matchAll(relativeFilePattern)) {
+    const rawText = match[0];
+    const index = match.index;
+    if (typeof rawText !== "string" || index === undefined) {
+      continue;
+    }
+    const link = resolveInlineLinkTarget(rawText);
+    if (!link || link.kind !== "file") {
+      continue;
+    }
+    addSpan(index, rawText, link);
+  }
+
+  return spans;
+}
+
+function spansOverlap(
+  left: Pick<NonNullable<AnnotatedLine["highlightSpans"]>[number], "from" | "to">,
+  right: Pick<NonNullable<AnnotatedLine["highlightSpans"]>[number], "from" | "to">,
+) {
+  return left.from < right.to && right.from < left.to;
+}
+
+function offsetInlineHighlightSpan(
+  span: NonNullable<AnnotatedLine["highlightSpans"]>[number],
+  offset: number,
+): {
+  from: number;
+  to: number;
+  className: string;
+  link?: {
+    kind: "url" | "file";
+    target: string;
+  };
+} {
+  return span.link
+    ? {
+        from: span.from + offset,
+        to: span.to + offset,
+        className: span.className,
+        link: span.link,
+      }
+    : {
+        from: span.from + offset,
+        to: span.to + offset,
+        className: span.className,
+      };
+}
+
+function renderInlineMarkdown(text: string): Pick<AnnotatedLine, "text" | "highlightSpans"> {
+  const highlightSpans: Array<{
+    from: number;
+    to: number;
+    className: string;
+    link?: {
+      kind: "url" | "file";
+      target: string;
+    };
+  }> = [];
+  let rendered = "";
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index] ?? "";
+
+    if (char === "\\" && isInlineMarkdownEscapableCharacter(text[index + 1])) {
+      rendered += text[index + 1] ?? "";
+      index += 1;
+      continue;
+    }
+
+    if (char === "[") {
+      const labelEnd = findUnescapedCharacter(text, index + 1, "]");
+      if (labelEnd !== -1 && text[labelEnd + 1] === "(") {
+        const targetEnd = findUnescapedCharacter(text, labelEnd + 2, ")");
+        if (targetEnd !== -1 && targetEnd > labelEnd + 2) {
+          const link = resolveInlineLinkTarget(text.slice(labelEnd + 2, targetEnd));
+          if (link) {
+            const label = renderInlineMarkdown(text.slice(index + 1, labelEnd));
+            const from = rendered.length;
+            rendered += label.text;
+            if (label.highlightSpans) {
+              highlightSpans.push(
+                ...label.highlightSpans.map((span) => offsetInlineHighlightSpan(span, from)),
+              );
+            }
+            highlightSpans.push({
+              from,
+              to: rendered.length,
+              className: link.kind === "url" ? "tok-markdownLink tok-linkUrl" : "tok-markdownLink tok-linkFile",
+              link,
+            });
+            index = targetEnd;
+            continue;
+          }
+        }
+      }
+    }
+
+    if (char === "`") {
+      const closingIndex = findInlineMarkdownClosingMarker(text, index + 1, "`");
+      if (closingIndex > index + 1) {
+        const inlineCode = text.slice(index + 1, closingIndex);
+        const inlineCodeLink = resolveInlineLinkTarget(inlineCode.trim());
+        const from = rendered.length;
+        rendered += inlineCode;
+        highlightSpans.push({
+          from,
+          to: rendered.length,
+          className: inlineCodeLink
+            ? `tok-inlineCode ${inlineCodeLink.kind === "url" ? "tok-markdownLink tok-linkUrl" : "tok-markdownLink tok-linkFile"}`
+            : "tok-inlineCode",
+          ...(inlineCodeLink ? { link: inlineCodeLink } : {}),
+        });
+        index = closingIndex;
+        continue;
+      }
+    }
+
+    if (text.startsWith("**", index)) {
+      const closingIndex = findInlineMarkdownClosingMarker(text, index + 2, "**");
+      if (closingIndex > index + 2) {
+        const strongText = decodeInlineMarkdownEscapes(text.slice(index + 2, closingIndex));
+        const from = rendered.length;
+        rendered += strongText;
+        highlightSpans.push({
+          from,
+          to: rendered.length,
+          className: "tok-markdownStrong",
+        });
+        index = closingIndex + 1;
+        continue;
+      }
+    }
+
+    if (char === "*") {
+      const closingIndex = findInlineMarkdownClosingMarker(text, index + 1, "*");
+      if (closingIndex > index + 1) {
+        const emphasisText = decodeInlineMarkdownEscapes(text.slice(index + 1, closingIndex));
+        const from = rendered.length;
+        rendered += emphasisText;
+        highlightSpans.push({
+          from,
+          to: rendered.length,
+          className: "tok-markdownEmphasis",
+        });
+        index = closingIndex;
+        continue;
+      }
+    }
+
+    rendered += char;
+  }
+
+  highlightSpans.push(
+    ...detectAutoLinkSpans(rendered).filter((candidate) =>
+      !highlightSpans.some((existing) => spansOverlap(existing, candidate))),
+  );
+
+  return {
+    text: rendered,
+    ...(highlightSpans.length > 0 ? { highlightSpans } : {}),
+  };
+}
+
+function renderMarkdownTextLine(
+  content: string,
+  kind: LineKind,
+  options: {
+    prefix?: string;
+    extraClasses?: ReadonlyArray<string>;
+  } = {},
+): AnnotatedLine {
+  const rendered = renderInlineMarkdown(content);
+  const prefix = options.prefix ?? "";
+  return {
+    text: `${prefix}${rendered.text}`,
+    kind,
+    ...(options.extraClasses && options.extraClasses.length > 0 ? { extraClasses: [...options.extraClasses] } : {}),
+    ...(rendered.highlightSpans && rendered.highlightSpans.length > 0
+      ? {
+          highlightSpans: rendered.highlightSpans.map((span) => offsetInlineHighlightSpan(span, prefix.length)),
+        }
+      : {}),
+  };
+}
+
 function renderMarkdownLine(line: string, fallbackKind: LineKind): AnnotatedLine {
+  const headingMatch = line.match(/^(\s{0,3})(#{1,6})\s+(.*)$/);
+  if (headingMatch) {
+    const [, indent = "", hashes = "#", content = ""] = headingMatch;
+    const level = Math.min(3, hashes.length);
+    return renderMarkdownTextLine(content, fallbackKind, {
+      prefix: indent,
+      extraClasses: ["cm-line-markdownHeading", `cm-line-markdownHeading${level}`],
+    });
+  }
+
   const unorderedListMatch = line.match(/^(\s*)[-+*]\s+(.*)$/);
   if (unorderedListMatch) {
     const [, indent = "", content = ""] = unorderedListMatch;
-    return {
-      text: `${indent}• ${content}`,
-      kind: "list",
-    };
+    return renderMarkdownTextLine(content, "list", { prefix: `${indent}• ` });
   }
 
   const orderedListMatch = line.match(/^(\s*)(\d+)[.)]\s+(.*)$/);
   if (orderedListMatch) {
     const [, indent = "", ordinal = "1", content = ""] = orderedListMatch;
-    return {
-      text: `${indent}${ordinal}. ${content}`,
-      kind: "list",
-    };
+    return renderMarkdownTextLine(content, "list", { prefix: `${indent}${ordinal}. ` });
   }
 
   const blockquoteMatch = line.match(/^(\s*)((?:>\s*)+)(.*)$/);
   if (blockquoteMatch) {
     const [, indent = "", quotePrefix = "", content = ""] = blockquoteMatch;
     const depth = (quotePrefix.match(/>/g) ?? []).length;
-    return {
-      text: `${indent}${"│ ".repeat(Math.max(1, depth))}${content}`,
-      kind: "blockquote",
-    };
+    return renderMarkdownTextLine(content, "blockquote", {
+      prefix: `${indent}${"│ ".repeat(Math.max(1, depth))}`,
+    });
   }
 
-  return { text: line, kind: fallbackKind };
+  return renderMarkdownTextLine(line, fallbackKind);
 }
 
 function renderMarkdownTextToLines(text: string, fallbackKind: LineKind): AnnotatedLine[] {
@@ -549,19 +952,10 @@ function capitalizeInlineLabel(value: string) {
   return `${value[0]!.toUpperCase()}${value.slice(1)}`;
 }
 
-function commandWidgetGlyph(item: WorkGroupItem, now?: string) {
+function commandWidgetGlyph(item: WorkGroupItem, _now?: string) {
   switch (item.status) {
-    case "running": {
-      const frames = ["◐", "◓", "◑", "◒"] as const;
-      if (!now) {
-        return frames[0];
-      }
-      const nowMs = Date.parse(now);
-      if (!Number.isFinite(nowMs)) {
-        return frames[0];
-      }
-      return frames[Math.floor(nowMs / 100) % frames.length] ?? frames[0];
-    }
+    case "running":
+      return "○";
     case "done":
       return "✓";
     case "error":
@@ -816,7 +1210,7 @@ function executionWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
           signature:
             `${block.startedAt}:${index}:${item.kind}:`
             + `${item.command ?? item.detail ?? item.changedFiles?.join("|") ?? item.label}`,
-          ...(index === lastItemIndex ? { timingLabel } : {}),
+          ...(index === lastItemIndex && block.status !== "running" ? { timingLabel } : {}),
           ...(block.now ? { now: block.now } : {}),
           startedAt: block.pulseOriginAt ?? block.startedAt,
         }),
@@ -835,7 +1229,7 @@ function fileActivityWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
       const lines: AnnotatedLine[] = [
         fileActivityWorkGroupLine(item, {
           signature: `${block.startedAt}:${index}:${item.detail ?? item.changedFiles?.join("|") ?? item.label}`,
-          ...(index === lastItemIndex ? { timingLabel } : {}),
+          ...(index === lastItemIndex && block.status !== "running" ? { timingLabel } : {}),
           ...(block.now ? { now: block.now } : {}),
           startedAt: block.pulseOriginAt ?? block.startedAt,
         }),
@@ -929,19 +1323,25 @@ function workingPulseSpans(
   const safeEnd = Math.max(safeStart, Math.min(rangeEnd, text.length));
   const slice = text.slice(safeStart, safeEnd);
   const baselineChars = 22;
-  const baseRadius = 3;
+  const baseLeftRadius = 3;
+  const baseRightRadius = 4;
   const edgeRadius = 2;
   const midRadius = 1;
-  const extraRadius =
+  const extraSpread =
     slice.length <= baselineChars ? 0 : Math.max(0, Math.floor((slice.length - baselineChars) / 6));
-  const radius = baseRadius + extraRadius;
-  const coreRadius = Math.max(0, radius - edgeRadius - midRadius);
-  const center = workingPulseIndex(slice, now, startedAt, radius);
+  const leftRadius = baseLeftRadius + Math.floor(extraSpread / 2);
+  const rightRadius = baseRightRadius + Math.ceil(extraSpread / 2);
+  const maxRadius = Math.max(leftRadius, rightRadius);
+  const coreRadius = Math.max(0, maxRadius - edgeRadius - midRadius);
+  const center = workingPulseIndex(slice, now, startedAt, maxRadius);
   if (center === null) {
     return [];
   }
 
-  return Array.from({ length: radius * 2 + 1 }, (_, arrayIndex) => arrayIndex - radius).flatMap((offset) => {
+  return Array.from(
+    { length: leftRadius + rightRadius + 1 },
+    (_, arrayIndex) => arrayIndex - leftRadius,
+  ).flatMap((offset) => {
     const index = center + offset;
     if (index < 0 || index >= slice.length) {
       return [];

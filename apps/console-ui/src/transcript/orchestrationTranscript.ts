@@ -256,6 +256,17 @@ function extractWorkItemId(payload: Record<string, unknown> | null): string | nu
   );
 }
 
+function extractWebSearchQuery(payload: Record<string, unknown> | null): string | null {
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  const result = asRecord(item?.result);
+  return (
+    asString(data?.query) ??
+    asString(item?.query) ??
+    asString(result?.query)
+  );
+}
+
 function extractFileChangeStats(
   payload: Record<string, unknown> | null,
 ): { changedFiles: string[]; additions?: number; deletions?: number } | null {
@@ -591,6 +602,7 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
   const fileChangeStats = itemType === "file_change" ? extractFileChangeStats(payload) : null;
   const fileChangeUnifiedDiff = itemType === "file_change" ? extractFileChangeUnifiedDiff(payload) : null;
   const itemId = extractWorkItemId(payload);
+  const webSearchQuery = itemType === "web_search" ? extractWebSearchQuery(payload) : null;
   const toolDetail = toolInvocationDetail ?? detail;
 
   if (itemType === "file_change") {
@@ -632,7 +644,11 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
     kind: "tool",
     label,
     status,
-    mergeKey: `${itemType ?? "tool"}:${label}`,
+    mergeKey: itemId
+      ? `${itemType ?? "tool"}:id:${itemId}`
+      : itemType === "web_search" && webSearchQuery
+        ? `web_search:query:${webSearchQuery}`
+        : `${itemType ?? "tool"}:${label}`,
     ...(toolDetail ? { detail: toolDetail } : {}),
     ...(output ? { output } : {}),
     ...(changedFiles.length > 0 ? { changedFiles } : {}),
@@ -644,6 +660,23 @@ function canMergeWorkItems(previous: PendingWorkItem, next: PendingWorkItem) {
     && previous.mergeKey === next.mergeKey
     && previous.status === "running"
     && next.status !== "running";
+}
+
+function isWebSearchWorkItem(item: PendingWorkItem) {
+  return item.kind === "tool" && item.mergeKey.startsWith("web_search:");
+}
+
+function shouldKeepWorkItemsGroupedAcrossTurn(
+  pendingItems: ReadonlyArray<{ activity: OrchestrationThreadActivity; item: PendingWorkItem }>,
+  nextItem: PendingWorkItem,
+) {
+  if (!isWebSearchWorkItem(nextItem) || pendingItems.length === 0) {
+    return false;
+  }
+
+  return pendingItems.every(({ item }) =>
+    isWebSearchWorkItem(item) && item.label === nextItem.label,
+  );
 }
 
 function mergeWorkItems(previous: PendingWorkItem, next: PendingWorkItem): PendingWorkItem {
@@ -1182,6 +1215,7 @@ export function threadToTranscriptBlocks(
         if (
           pendingWorkItems.length > 0
           && pendingWorkTurnId !== entry.activity.turnId
+          && !shouldKeepWorkItemsGroupedAcrossTurn(pendingWorkItems, workItem)
         ) {
           flushWorkItems();
         }
