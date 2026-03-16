@@ -699,9 +699,9 @@ export function App() {
         id: `session:${session.id}`,
         label:
           session.id === currentSession?.id
-            ? `Current Session: ${session.title}`
-            : `Switch Session: ${session.title}`,
-        description: `${session.cwd} · ${session.histories.length} histories`,
+            ? `[Session] Current · ${session.title}`
+            : `[Session] Switch · ${session.title}`,
+        contextText: `${session.cwd} · ${session.histories.length} histories`,
         keywords: ["session", session.title, session.cwd],
         run: () => {
           activateSession(session.id);
@@ -713,15 +713,13 @@ export function App() {
       commands.push(
         {
           id: "session:new:codex",
-          label: "New Session: Codex",
-          description: "Create a new session tab with a fresh Codex thread in the current workspace.",
+          label: "[Session] New · Codex",
           keywords: ["session", "new", "tab", "workspace", "codex"],
           run: () => handleCreateSession("codex"),
         },
         {
           id: "session:new:copilot",
-          label: "New Session: Copilot",
-          description: "Create a new session tab with a fresh Copilot thread in the current workspace.",
+          label: "[Session] New · Copilot",
           keywords: ["session", "new", "tab", "workspace", "copilot"],
           run: () => handleCreateSession("copilot"),
         },
@@ -732,15 +730,13 @@ export function App() {
       commands.push(
         {
           id: `session:${currentSession.id}:split:codex`,
-          label: "Split Active Pane: Codex",
-          description: "Create a second pane in the current session with a fresh Codex thread.",
+          label: "[Pane] Split active · Codex",
           keywords: ["split", "pane", "parallel", "session", "codex"],
           run: () => handleSplitActivePane("codex"),
         },
         {
           id: `session:${currentSession.id}:split:copilot`,
-          label: "Split Active Pane: Copilot",
-          description: "Create a second pane in the current session with a fresh Copilot thread.",
+          label: "[Pane] Split active · Copilot",
           keywords: ["split", "pane", "parallel", "session", "copilot"],
           run: () => handleSplitActivePane("copilot"),
         },
@@ -753,9 +749,8 @@ export function App() {
           id: `pane:${pane.id}:focus`,
           label:
             pane.id === currentSession.activePaneId
-              ? `Current Pane: ${index + 1}`
-              : `Focus Pane: ${index + 1}`,
-          description: "Focus this pane and route transcript actions to it.",
+              ? `[Pane] Current · ${index + 1}`
+              : `[Pane] Focus · ${index + 1}`,
           keywords: ["pane", "focus", `${index + 1}`],
           run: () => {
             activatePaneAndFocus(pane.id);
@@ -764,8 +759,7 @@ export function App() {
       });
       commands.push({
         id: `pane:${currentSession.activePaneId}:close`,
-        label: "Close Active Pane",
-        description: "Remove the current split without deleting its history.",
+        label: "[Pane] Close active",
         keywords: ["pane", "close", "split"],
         run: () => {
               if (currentSession.activePaneId) {
@@ -782,9 +776,9 @@ export function App() {
             id: `model:${activeThread.id}:${modelOption.slug}`,
             label:
               activeThread.model === modelOption.slug
-                ? `Current Model: ${modelOption.name}`
-                : `Set Model: ${modelOption.name}`,
-            description: `${activeProvider} · ${modelOption.slug}`,
+                ? `[Model] Current · ${modelOption.name} · ${activeProvider}`
+                : `[Model] Set · ${modelOption.name} · ${activeProvider}`,
+            contextText: modelOption.slug,
             keywords: ["model", activeProvider, modelOption.name, modelOption.slug],
             run: () => setThreadModel(activeThread.id, activeProvider, modelOption.slug),
           });
@@ -795,9 +789,9 @@ export function App() {
             id: `reasoning:${activeThread.id}:default`,
             label:
               activeReasoningEffort === null
-                ? "Current Reasoning: Default"
-                : "Set Reasoning: Default",
-            description: `${activeProvider} · use the model default reasoning effort`,
+                ? `[Reasoning] Current · Default · ${activeProvider}`
+                : `[Reasoning] Set · Default · ${activeProvider}`,
+            contextText: activeThread.model ?? undefined,
             keywords: ["reasoning", "default", activeProvider],
             run: () => setThreadReasoningEffort(activeThread.id, activeProvider, null),
           });
@@ -807,9 +801,9 @@ export function App() {
               id: `reasoning:${activeThread.id}:${reasoningOption}`,
               label:
                 activeReasoningEffort === reasoningOption
-                  ? `Current Reasoning: ${reasoningOption}`
-                  : `Set Reasoning: ${reasoningOption}`,
-              description: `${activeProvider} · ${activeThread.model}`,
+                  ? `[Reasoning] Current · ${reasoningOption} · ${activeProvider}`
+                  : `[Reasoning] Set · ${reasoningOption} · ${activeProvider}`,
+              contextText: activeThread.model ?? undefined,
               keywords: ["reasoning", activeProvider, reasoningOption, activeThread.model],
               run: () =>
                 setThreadReasoningEffort(activeThread.id, activeProvider, reasoningOption),
@@ -821,22 +815,19 @@ export function App() {
       commands.push(
         {
           id: `interaction:${activeThread.id}:default`,
-          label: "Set Interaction: Default",
-          description: "Dispatch thread.interaction-mode.set to default mode.",
+          label: "[Mode] Set · Default",
           keywords: ["interaction", "default"],
           run: () => setInteractionMode(activeThread.id, "default"),
         },
         {
           id: `interaction:${activeThread.id}:plan`,
-          label: "Set Interaction: Plan",
-          description: "Dispatch thread.interaction-mode.set to plan mode.",
+          label: "[Mode] Set · Plan",
           keywords: ["interaction", "plan"],
           run: () => setInteractionMode(activeThread.id, "plan"),
         },
         {
           id: `session:${activeThread.id}:stop`,
-          label: "Stop Session",
-          description: "Dispatch thread.session.stop for the active thread.",
+          label: "[Session] Stop active",
           keywords: ["session", "stop", "disconnect"],
           run: () => stopSession(activeThread.id),
         },
@@ -845,8 +836,7 @@ export function App() {
       if (activeThreadTurnRunning && !consoleData.isInterruptingTurn && !consoleData.isStoppingSession) {
         commands.push({
           id: `turn:${activeThread.id}:interrupt`,
-          label: "Interrupt Turn",
-          description: "Dispatch thread.turn.interrupt for the active thread.",
+          label: "[Turn] Interrupt active",
           keywords: ["interrupt", "cancel", "stop turn"],
           run: () => interruptTurn(activeThread.id),
         });
@@ -866,8 +856,8 @@ export function App() {
         for (const option of question.options) {
           commands.push({
             id: `user-input:${pendingUserInput.requestId}:${question.id}:${option.label}`,
-            label: `${question.header}: ${option.label}`,
-            description: option.description,
+            label: `[Input] ${question.header} · ${option.label}`,
+            contextText: option.description,
             keywords: ["user input", question.header, question.question, option.label],
             run: () =>
               activeThread
@@ -880,8 +870,7 @@ export function App() {
       } else {
         commands.push({
           id: `user-input:${pendingUserInput.requestId}:prompt`,
-          label: "Answer Pending User Input In Prompt",
-          description: "Type one answer per line in the prompt editor, in question order, then press Enter.",
+          label: `[Input] Answer in prompt · ${pendingUserInput.questions.length} questions`,
           keywords: ["user input", "prompt", "answer"],
           run: () => {
             requestAnimationFrame(() => {

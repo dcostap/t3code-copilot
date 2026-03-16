@@ -287,13 +287,11 @@ async function copyTextToClipboard(text: string) {
 function renderCodeBlockLine(
   line: CodeBlockWidgetLineData,
 ) {
-  const lineElement = document.createElement("div");
+  const lineElement = document.createElement("span");
   lineElement.className = "cm-codeBlockLine";
 
   if (!line.highlightSpans || line.highlightSpans.length === 0) {
-    if (line.text.length === 0) {
-      lineElement.append(document.createElement("br"));
-    } else {
+    if (line.text.length > 0) {
       lineElement.textContent = line.text;
     }
     return lineElement;
@@ -319,10 +317,6 @@ function renderCodeBlockLine(
 
   if (cursor < line.text.length) {
     lineElement.append(document.createTextNode(line.text.slice(cursor)));
-  }
-
-  if (lineElement.childNodes.length === 0) {
-    lineElement.append(document.createElement("br"));
   }
 
   return lineElement;
@@ -429,11 +423,14 @@ class CodeBlockWidget extends WidgetType {
       }
     });
 
-    const content = document.createElement("div");
+    const content = document.createElement("pre");
     content.className = "cm-codeBlockContent";
-    for (const line of this.content.lines) {
+    this.content.lines.forEach((line, index) => {
       content.append(renderCodeBlockLine(line));
-    }
+      if (index < this.content.lines.length - 1) {
+        content.append(document.createTextNode("\n"));
+      }
+    });
 
     root.append(copyButton, content);
     return root;
@@ -446,6 +443,10 @@ function normalizeDiffPath(path: string) {
 
 function resolveInlineDiffPath(file: FileDiffMetadata) {
   return normalizeDiffPath(file.name ?? file.prevName ?? "");
+}
+
+export function normalizeInlineDiffRowText(text: string) {
+  return text.replace(/\r?\n$/, "");
 }
 
 function buildInlineDiffRows(file: FileDiffMetadata): InlineDiffFileData {
@@ -463,7 +464,7 @@ function buildInlineDiffRows(file: FileDiffMetadata): InlineDiffFileData {
             kind: "context",
             oldLineNumber,
             newLineNumber,
-            text: file.additionLines[content.additionLineIndex + index] ?? "",
+            text: normalizeInlineDiffRowText(file.additionLines[content.additionLineIndex + index] ?? ""),
           });
           oldLineNumber += 1;
           newLineNumber += 1;
@@ -475,7 +476,7 @@ function buildInlineDiffRows(file: FileDiffMetadata): InlineDiffFileData {
         rows.push({
           kind: "deletion",
           oldLineNumber,
-          text: file.deletionLines[content.deletionLineIndex + index] ?? "",
+          text: normalizeInlineDiffRowText(file.deletionLines[content.deletionLineIndex + index] ?? ""),
         });
         oldLineNumber += 1;
       }
@@ -484,7 +485,7 @@ function buildInlineDiffRows(file: FileDiffMetadata): InlineDiffFileData {
         rows.push({
           kind: "addition",
           newLineNumber,
-          text: file.additionLines[content.additionLineIndex + index] ?? "",
+          text: normalizeInlineDiffRowText(file.additionLines[content.additionLineIndex + index] ?? ""),
         });
         newLineNumber += 1;
       }
@@ -566,6 +567,23 @@ function extractCommandWidgetCounts(value: string):
       deletions,
     },
   };
+}
+
+function buildCommandWidgetSummaryCopyText(content: {
+  glyph: string;
+  prefix: string;
+  command: string;
+  timingLabel?: string;
+  counts?: {
+    additions: string;
+    deletions: string;
+  };
+}) {
+  return [
+    `${content.glyph} ${content.prefix}${content.counts ? ` (${content.counts.additions}, ${content.counts.deletions})` : ""}`,
+    content.command,
+    content.timingLabel,
+  ].filter((part): part is string => typeof part === "string" && part.length > 0).join(" ");
 }
 
 function parseCommandWidgetText(text: string): {
@@ -663,6 +681,7 @@ class CommandWidgetLine extends WidgetType {
       rawInlineDiff?: string;
       inlineDiffStateMessage?: string;
       inlineDiffStateClass?: string;
+      outputLines?: ReadonlyArray<string>;
       expanded: boolean;
       isFileChange: boolean;
       statusClass?: string;
@@ -684,10 +703,15 @@ class CommandWidgetLine extends WidgetType {
     root.className = [
       "cm-commandWidgetSurface",
       this.content.isFileChange ? "cm-commandWidgetSurfaceFileChange" : "",
+      this.content.expanded && this.content.outputLines?.length ? "cm-commandWidgetSurfaceWithBody" : "",
       this.content.expanded ? "cm-commandWidgetSurfaceExpanded" : "",
       this.content.statusClass ?? "",
     ].filter(Boolean).join(" ");
     root.dataset.commandWidgetSignature = this.content.signature;
+
+    const summary = document.createElement("div");
+    summary.className = "cm-commandWidgetSummary cm-commandWidgetCopyRow";
+    summary.dataset.copyText = buildCommandWidgetSummaryCopyText(this.content);
 
     const lead = document.createElement("span");
     lead.className = "cm-commandWidgetLead";
@@ -702,7 +726,7 @@ class CommandWidgetLine extends WidgetType {
 
     lead.append(glyph, document.createTextNode(" "), prefix);
 
-    root.append(lead);
+    summary.append(lead);
 
     if (this.content.counts) {
       const counts = document.createElement("span");
@@ -719,20 +743,30 @@ class CommandWidgetLine extends WidgetType {
       const close = document.createTextNode(")");
 
       counts.append(open, additions, comma, deletions, close);
-      root.append(counts);
+      summary.append(counts);
     }
 
     const command = document.createElement("span");
     command.className = "cm-commandWidgetCommand";
     command.textContent = this.content.command;
 
-    root.append(command);
+    summary.append(command);
 
     if (this.content.timingLabel) {
       const meta = document.createElement("span");
       meta.className = "cm-commandWidgetMeta";
       meta.textContent = this.content.timingLabel;
-      root.append(meta);
+      summary.append(meta);
+    }
+
+    root.append(summary);
+
+    if (this.content.expanded && this.content.outputLines && this.content.outputLines.length > 0) {
+      const body = document.createElement("pre");
+      body.className = "cm-commandWidgetBody cm-commandWidgetCopyRow";
+      body.dataset.copyText = this.content.outputLines.join("\n");
+      body.textContent = this.content.outputLines.join("\n");
+      root.append(body);
     }
 
     if (
@@ -758,6 +792,8 @@ class CommandWidgetLine extends WidgetType {
             for (const row of hunk.rows) {
               const rowElement = document.createElement("div");
               rowElement.className = `cm-inlineDiffRow cm-inlineDiffRow${row.kind[0]!.toUpperCase()}${row.kind.slice(1)}`;
+              rowElement.classList.add("cm-commandWidgetCopyRow");
+              rowElement.dataset.copyText = `${row.kind === "addition" ? "+" : row.kind === "deletion" ? "-" : " "}${row.text}`;
 
               const newLine = document.createElement("span");
               newLine.className = "cm-inlineDiffLineNumber";
@@ -781,7 +817,8 @@ class CommandWidgetLine extends WidgetType {
         }
       } else if (this.content.rawInlineDiff) {
         const rawFallback = document.createElement("pre");
-        rawFallback.className = "cm-inlineDiffFallback";
+        rawFallback.className = "cm-inlineDiffFallback cm-commandWidgetCopyRow";
+        rawFallback.dataset.copyText = this.content.rawInlineDiff;
         rawFallback.textContent = this.content.rawInlineDiff;
         inlineDiff.append(rawFallback);
       } else if (this.content.inlineDiffStateMessage) {
@@ -957,13 +994,16 @@ function buildTranscriptDocument(
 ): TranscriptDocumentModel {
   const { lines: historyLines, widgetsByLineIndex } = flattenBlocks(blocks, pendingUserInputHighlight);
   const draftLines = draft.length > 0 ? draft.split("\n") : [""];
+  const includePromptSeparator = shouldRenderPromptSeparator(historyLines.length);
   const allLines: AnnotatedLine[] = [
     ...historyLines,
-    {
-      text: "",
-      kind: "promptSeparator",
-      extraClasses: promptSeparatorClassesForInteractionMode(interactionMode),
-    },
+    ...(includePromptSeparator
+      ? [{
+          text: "",
+          kind: "promptSeparator" as const,
+          extraClasses: promptSeparatorClassesForInteractionMode(interactionMode),
+        }]
+      : []),
     { text: draftLines[0] ?? "", kind: "promptInput" },
     ...draftLines.slice(1).map((line) => ({ text: line, kind: "promptInput" as const })),
   ];
@@ -1082,6 +1122,9 @@ function buildTranscriptDocument(
           widget: new CommandWidgetLine({
             signature: line.commandWidgetSignature,
             ...parsed,
+            ...(line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0
+              ? { outputLines: line.commandWidgetOutputLines }
+              : {}),
             ...(inlineDiffFiles && inlineDiffFiles.length > 0 ? { inlineDiffFiles } : {}),
             ...(effectiveInlineDiff && isExpandedCommand && (!inlineDiffFiles || inlineDiffFiles.length === 0)
               ? { rawInlineDiff: effectiveInlineDiff }
@@ -1099,7 +1142,10 @@ function buildTranscriptDocument(
             isFileChange: isFileChangeWidget,
             ...(statusClass ? { statusClass } : {}),
           }),
-          signature: `${line.commandWidgetSignature}:${line.text}:${isExpandedCommand}:${statusClass ?? ""}:${effectiveInlineDiff ?? ""}:${resolvedInlineDiffState?.status ?? ""}`,
+          signature:
+            `${line.commandWidgetSignature}:${line.text}:${isExpandedCommand}:${statusClass ?? ""}:`
+            + `${effectiveInlineDiff ?? ""}:${resolvedInlineDiffState?.status ?? ""}:`
+            + `${line.commandWidgetOutputLines?.join("\n") ?? ""}`,
         });
       }
     }
@@ -1212,7 +1258,7 @@ function buildEditorTheme() {
         color: "#c5ccd3",
         backgroundColor: "transparent",
         fontFamily:
-          '"Cascadia Mono", "Cascadia Code", "Iosevka Term", "JetBrains Mono", Consolas, monospace',
+          '"Cascadia Code", "Cascadia Mono", "Iosevka Term", "JetBrains Mono", Consolas, monospace',
         fontSize: "16px",
       },
       ".cm-scroller": {
@@ -1594,6 +1640,10 @@ function buildEditorTheme() {
         alignItems: "flex-start",
         flexWrap: "wrap",
       },
+      ".cm-commandWidgetSurfaceWithBody": {
+        alignItems: "flex-start",
+        flexWrap: "wrap",
+      },
       ".cm-commandWidgetSurface.cm-line-workItemRunning": {
         borderColor: "rgba(113, 178, 255, 0.44)",
         backgroundColor: "rgba(18, 27, 36, 0.96)",
@@ -1617,6 +1667,13 @@ function buildEditorTheme() {
         gap: "6px",
         flexShrink: "0",
         whiteSpace: "nowrap",
+      },
+      ".cm-commandWidgetSummary": {
+        display: "flex",
+        alignItems: "center",
+        gap: "10px",
+        flex: "1 1 auto",
+        minWidth: "0",
       },
       ".cm-commandWidgetGlyph": {
         color: "#d8e0e8",
@@ -1657,8 +1714,26 @@ function buildEditorTheme() {
         whiteSpace: "pre-wrap",
         overflowWrap: "anywhere",
       },
+      ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetSummary": {
+        flexWrap: "wrap",
+        alignItems: "flex-start",
+      },
       ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetMeta": {
         marginLeft: "auto",
+      },
+      ".cm-commandWidgetBody": {
+        flexBasis: "100%",
+        minWidth: "0",
+        marginTop: "2px",
+        borderRadius: "10px",
+        backgroundColor: "rgba(11, 16, 21, 0.68)",
+        overflow: "hidden",
+        color: "#7a828b",
+        whiteSpace: "pre-wrap",
+        overflowWrap: "anywhere",
+        margin: "2px 0 0",
+        padding: "4px 10px",
+        fontFamily: "inherit",
       },
       ".cm-commandWidgetSurfaceExpanded.cm-commandWidgetSurfaceFileChange .cm-commandWidgetCommand": {
         flex: "1 1 auto",
@@ -1719,7 +1794,6 @@ function buildEditorTheme() {
       },
       ".cm-inlineDiffMarker": {
         color: "#8b97a3",
-        userSelect: "none",
       },
       ".cm-inlineDiffRowAddition .cm-inlineDiffMarker, .cm-inlineDiffRowAddition .cm-inlineDiffContent": {
         color: "#9cf0b4",
@@ -1780,13 +1854,15 @@ function buildEditorTheme() {
       ".cm-codeBlockContent": {
         minWidth: "0",
         paddingRight: "72px",
+        margin: "0",
+        whiteSpace: "pre-wrap",
+        overflowWrap: "anywhere",
       },
       ".cm-codeBlockLine": {
+        display: "inline",
         color: "#c7d0d8",
         fontSize: "13px",
         lineHeight: "1.55",
-        whiteSpace: "pre-wrap",
-        overflowWrap: "anywhere",
       },
       ".cm-codeBlockCopyButton": {
         position: "absolute",
@@ -1893,6 +1969,29 @@ function buildEditorTheme() {
 function getConversationScrollContainer(view: EditorView) {
   const scrollContainer = view.dom.closest(".conversation-scroll");
   return scrollContainer instanceof HTMLElement ? scrollContainer : null;
+}
+
+function serializeCommandWidgetSelection(view: EditorView, selection: Selection | null) {
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    return null;
+  }
+
+  const rows = view.dom.querySelectorAll<HTMLElement>(".cm-commandWidgetCopyRow");
+  const parts: string[] = [];
+  for (const row of rows) {
+    const copyText = row.dataset.copyText;
+    if (!copyText) {
+      continue;
+    }
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      if (selection.getRangeAt(index).intersectsNode(row)) {
+        parts.push(copyText);
+        break;
+      }
+    }
+  }
+
+  return parts.length > 0 ? parts.join("\n") : null;
 }
 
 function preserveConversationScrollPosition(view: EditorView, update: () => void) {
@@ -2002,6 +2101,10 @@ export function promptSeparatorClassesForInteractionMode(
   interactionMode: "default" | "plan",
 ) {
   return interactionMode === "plan" ? ["cm-line-promptSeparatorPlan"] : [];
+}
+
+export function shouldRenderPromptSeparator(historyLineCount: number) {
+  return historyLineCount > 0;
 }
 
 export function shouldRedirectHistoryTypingToPrompt(
@@ -2627,6 +2730,16 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                   return next;
                 });
               });
+              return true;
+            },
+            copy(event, view) {
+              const selection = typeof window !== "undefined" ? window.getSelection() : null;
+              const serializedSelection = serializeCommandWidgetSelection(view, selection);
+              if (!serializedSelection) {
+                return false;
+              }
+              event.preventDefault();
+              event.clipboardData?.setData("text/plain", serializedSelection);
               return true;
             },
             keydown(event, view) {

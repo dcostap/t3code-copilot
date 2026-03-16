@@ -60,6 +60,7 @@ export interface AnnotatedLine {
   readonly kind: LineKind;
   readonly extraClasses?: ReadonlyArray<string>;
   readonly commandWidgetSignature?: string;
+  readonly commandWidgetOutputLines?: ReadonlyArray<string>;
   readonly inlineUnifiedDiff?: string;
   readonly inlineDiffLookup?: InlineDiffLookup;
   readonly inlineDiffChangedFiles?: ReadonlyArray<string>;
@@ -149,7 +150,11 @@ export interface WorkGroupItem {
 }
 
 function workItemStatusClass(item: WorkGroupItem) {
-  switch (item.status) {
+  return statusClassForWorkItemStatus(item.status);
+}
+
+function statusClassForWorkItemStatus(status: WorkGroupItem["status"]) {
+  switch (status) {
     case "running":
       return "cm-line-workItemRunning";
     case "done":
@@ -158,6 +163,18 @@ function workItemStatusClass(item: WorkGroupItem) {
       return "cm-line-workItemError";
     case "declined":
       return "cm-line-workItemDeclined";
+  }
+}
+
+function standaloneExecutionGlyph(status: WorkGroupItem["status"]) {
+  switch (status) {
+    case "running":
+      return "◐";
+    case "done":
+      return "✓";
+    case "error":
+    case "declined":
+      return "✗";
   }
 }
 
@@ -566,6 +583,17 @@ function commandWidgetPrefix(item: WorkGroupItem) {
   }
 }
 
+function humanizeExecutionLabel(label: string) {
+  const normalized = label.trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  if (normalized.length === 0) {
+    return "Tool";
+  }
+  if (!/[A-Z]/.test(normalized)) {
+    return normalized.replace(/\b\w/g, (segment) => segment.toUpperCase());
+  }
+  return normalized;
+}
+
 function isReadFileItem(item: WorkGroupItem) {
   return item.kind === "tool" && /^(read file|read files)$/i.test(item.label.trim());
 }
@@ -596,90 +624,60 @@ function fileActivityWidgetPrefix(item: WorkGroupItem) {
   }
 }
 
-function workItemStatusPrefix(item: WorkGroupItem, now?: string) {
-  switch (item.status) {
-    case "running": {
-      const frames = ["◜", "◠", "◝", "◞", "◡", "◟"] as const;
-      if (!now) {
-        return frames[0];
-      }
-      const nowMs = Date.parse(now);
-      if (!Number.isFinite(nowMs)) {
-        return frames[0];
-      }
-      return frames[Math.floor(nowMs / 100) % frames.length] ?? frames[0];
-    }
-    case "done":
-      return "✓";
-    case "error":
-    case "declined":
-      return "✗";
+function executionWidgetPrefix(item: WorkGroupItem) {
+  if (item.kind === "command") {
+    return commandWidgetPrefix(item);
   }
+  if (item.kind === "file-change") {
+    return fileActivityWidgetPrefix(item);
+  }
+  if (isReadFileItem(item)) {
+    return fileActivityWidgetPrefix(item);
+  }
+  return humanizeExecutionLabel(item.label);
 }
 
-function workItemToLines(
-  item: WorkGroupItem,
-  collapseLabel: boolean,
-  now?: string,
-  startedAt?: string,
-): AnnotatedLine[] {
-  const statusPrefix = workItemStatusPrefix(item, now);
-  const lines: AnnotatedLine[] = [];
-
-  if (!collapseLabel && item.kind !== "command") {
-    lines.push({ text: `  • ${statusPrefix} ${item.label}`, kind: "toolCall" });
+function executionWidgetSubject(item: WorkGroupItem) {
+  if (item.kind === "command") {
+    return item.command ?? item.detail ?? item.label;
   }
-
-  if (item.command) {
-    const exitLabel = item.exitCode !== undefined ? ` [exit ${item.exitCode}]` : "";
-    const isRunning = item.status === "running";
-    const text = isRunning
-      ? `      ${item.command}${exitLabel}`
-      : `      ${statusPrefix} ${item.command}${exitLabel}`;
-    const highlightSpans =
-      isRunning && now
-        ? workingPulseSpans(text, now, startedAt, 6, text.length)
-        : undefined;
-    lines.push({
-      text,
-      kind: "commandExec",
-      extraClasses: [workItemStatusClass(item)],
-      ...(highlightSpans && highlightSpans.length > 0 ? { highlightSpans } : {}),
-    });
+  if (item.kind === "file-change") {
+    return fileActivitySubject(item);
   }
+  if (isReadFileItem(item)) {
+    return fileActivitySubject(item);
+  }
+  const detail = item.detail ?? "";
+  if (!detail.includes("\n")) {
+    return detail;
+  }
+  const firstLine = detail.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  return firstLine.length > 0 ? `${firstLine}...` : "...";
+}
 
-  const detailDuplicatesCommand =
-    typeof item.detail === "string"
-    && typeof item.command === "string"
-    && item.detail.trim() === item.command.trim();
+function executionWidgetOutputLines(item: WorkGroupItem) {
+  const lines: string[] = [];
 
-  if (item.detail && !detailDuplicatesCommand) {
-    lines.push({ text: `      ${item.detail}`, kind: "toolResult" });
+  if (item.kind === "tool" && item.detail && item.detail.includes("\n") && !item.output) {
+    lines.push(...item.detail.split(/\r?\n/));
   }
 
   if (item.output) {
-    lines.push(...prefixWrappedLines(item.output, "commandOutput", "      "));
+    lines.push(...item.output.split(/\r?\n/));
   }
 
-  if (item.changedFiles && item.changedFiles.length > 0) {
+  if (item.changedFiles && item.changedFiles.length > 0 && item.kind !== "file-change") {
     const [firstPath, ...restPaths] = item.changedFiles;
-    lines.push({
-      text: `      changed: ${firstPath}`,
-      kind: "toolResult",
-    });
-    for (const path of restPaths) {
-      lines.push({ text: `        ${path}`, kind: "toolResult" });
+    if (firstPath) {
+      lines.push(`changed: ${firstPath}`);
     }
+    lines.push(...restPaths);
   }
 
-  if (lines.length === 0) {
-    lines.push({ text: `  • ${statusPrefix} ${item.label}`, kind: "toolCall" });
-  }
-
-  return lines;
+  return lines.filter((line) => line.length > 0);
 }
 
-function commandWorkGroupLine(
+function executionWorkGroupLine(
   item: WorkGroupItem,
   options: {
     signature: string;
@@ -688,16 +686,22 @@ function commandWorkGroupLine(
     startedAt?: string;
   },
 ): AnnotatedLine {
+  if (item.kind === "file-change") {
+    return fileActivityWorkGroupLine(item, options);
+  }
+
   const glyph = commandWidgetGlyph(item, options.now);
-  const prefix = commandWidgetPrefix(item);
-  const commandText = item.command ?? item.detail ?? item.label;
-  const exitLabel = item.exitCode !== undefined ? ` [exit ${item.exitCode}]` : "";
+  const prefix = executionWidgetPrefix(item);
+  const subject = executionWidgetSubject(item);
+  const exitLabel = item.kind === "command" && item.exitCode !== undefined ? ` [exit ${item.exitCode}]` : "";
+  const summarySuffix = subject.length > 0 || exitLabel.length > 0 ? `  ${subject}${exitLabel}` : "  ";
   const timingSuffix = options.timingLabel ? `  ${options.timingLabel}` : "";
-  const text = `${glyph} ${prefix}  ${commandText}${exitLabel}${timingSuffix}`;
+  const text = `${glyph} ${prefix}${summarySuffix}${timingSuffix}`;
+  const outputLines = executionWidgetOutputLines(item);
   const prefixStart = glyph.length + 1;
-  const commandStart = prefixStart + prefix.length + 2;
-  const commandEnd = commandStart + commandText.length;
-  const exitStart = commandEnd;
+  const subjectStart = prefixStart + prefix.length + 2;
+  const subjectEnd = subjectStart + subject.length;
+  const exitStart = subjectEnd;
   const exitEnd = exitStart + exitLabel.length;
   const timingStart = options.timingLabel ? text.length - options.timingLabel.length : -1;
   const highlightSpans = [
@@ -709,8 +713,8 @@ function commandWorkGroupLine(
     ...(options.timingLabel
       ? [{ from: timingStart, to: text.length, className: "tok-commandWidgetMeta" }]
       : []),
-    ...(item.status === "running" && options.now
-      ? workingPulseSpans(text, options.now, options.startedAt, commandStart, commandEnd)
+    ...(item.status === "running" && options.now && subject.length > 0
+      ? workingPulseSpans(text, options.now, options.startedAt, subjectStart, subjectEnd)
       : []),
   ];
 
@@ -719,14 +723,8 @@ function commandWorkGroupLine(
     kind: "commandExec",
     extraClasses: [workItemStatusClass(item), "cm-line-commandWidget"],
     commandWidgetSignature: options.signature,
-    ...(item.kind === "file-change" && item.inlineUnifiedDiff
-      ? {
-          inlineUnifiedDiff: item.inlineUnifiedDiff,
-          ...(item.changedFiles ? { inlineDiffChangedFiles: item.changedFiles } : {}),
-        }
-      : {}),
-    ...(item.kind === "file-change" && item.inlineDiffLookup
-      ? { inlineDiffLookup: item.inlineDiffLookup }
+    ...(outputLines.length > 0
+      ? { commandWidgetOutputLines: outputLines }
       : {}),
     ...(highlightSpans.length > 0 ? { highlightSpans } : {}),
   };
@@ -807,37 +805,22 @@ function fileActivityWorkGroupLine(
   };
 }
 
-function commandWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
-  const lastCommandIndex = block.items.length - 1;
+function executionWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
+  const lastItemIndex = block.items.length - 1;
   const timingLabel = capitalizeInlineLabel(formatWorkGroupFooter(block));
 
   return [
     ...block.items.flatMap((item, index) => {
-      const lines: AnnotatedLine[] = [
-        commandWorkGroupLine(item, {
-          signature: `${block.startedAt}:${index}:${item.command ?? item.label}`,
-          ...(index === lastCommandIndex ? { timingLabel } : {}),
+      return [
+        executionWorkGroupLine(item, {
+          signature:
+            `${block.startedAt}:${index}:${item.kind}:`
+            + `${item.command ?? item.detail ?? item.changedFiles?.join("|") ?? item.label}`,
+          ...(index === lastItemIndex ? { timingLabel } : {}),
           ...(block.now ? { now: block.now } : {}),
           startedAt: block.pulseOriginAt ?? block.startedAt,
         }),
       ];
-
-      if (item.output) {
-        lines.push(...prefixWrappedLines(item.output, "commandOutput", "  "));
-      }
-
-      if (item.changedFiles && item.changedFiles.length > 0) {
-        const [firstPath, ...restPaths] = item.changedFiles;
-        lines.push({
-          text: `  changed: ${firstPath}`,
-          kind: "toolResult",
-        });
-        for (const path of restPaths) {
-          lines.push({ text: `    ${path}`, kind: "toolResult" });
-        }
-      }
-
-      return lines;
     }),
     { text: "", kind: "workGroupSeparator" },
   ];
@@ -1006,19 +989,29 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
       return [{ text: block.text, kind: "reasoningSummary" }];
 
     case "tool-call": {
-      const statusIcon = block.status === "running" ? "⟳" : block.status === "done" ? "✓" : block.status === "declined" ? "✗" : "✗";
-      const line = `• ${statusIcon} ${block.label}`;
-      const lines: AnnotatedLine[] = [{ text: line, kind: "toolCall" }];
-      if (block.detail) {
-        lines.push({ text: `  └ ${block.detail}`, kind: "toolResult" });
-      }
-      return lines;
+      const glyph = standaloneExecutionGlyph(block.status);
+      const prefix = humanizeExecutionLabel(block.label);
+      const subject = block.detail ?? "";
+      const text = `${glyph} ${prefix}${subject.length > 0 ? `  ${subject}` : "  "}`;
+      const prefixStart = glyph.length + 1;
+      return [{
+        text,
+        kind: "commandExec",
+        extraClasses: [statusClassForWorkItemStatus(block.status), "cm-line-commandWidget"],
+        commandWidgetSignature: `tool-call:${block.status}:${block.label}:${block.detail ?? ""}`,
+        highlightSpans: [
+          { from: 0, to: glyph.length, className: "tok-commandWidgetGlyph" },
+          { from: prefixStart, to: prefixStart + prefix.length, className: "tok-commandWidgetPrefix" },
+        ],
+      }];
     }
 
     case "tool-result":
       return [
-        { text: `  └ ${block.summary}`, kind: "toolResult" },
-        ...(block.output ? wrapLines(block.output, "toolResult") : []),
+        ...(block.summary.length > 0 && (block.summary !== "Output" || !block.output)
+          ? [{ text: `  ${block.summary}`, kind: "commandOutput" as const }]
+          : []),
+        ...(block.output ? prefixWrappedLines(block.output, "commandOutput", "  ") : []),
       ];
 
     case "command-exec": {
@@ -1033,25 +1026,11 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
     }
 
     case "work-group": {
-      if (block.items.every((item) => item.kind === "command")) {
-        return commandWorkGroupToLines(block);
-      }
-
-      if (block.items.every((item) => item.kind === "file-change" || isReadFileItem(item))) {
+      if (block.items.every((item) => item.kind === "file-change")) {
         return fileActivityWorkGroupToLines(block);
       }
 
-      const headerText = block.title ?? "Working";
-      const collapseSingleItemLabel =
-        block.items.length === 1 && block.title !== undefined && block.items[0]?.label === block.title;
-      return [
-        { text: "", kind: "workGroupSeparator" },
-        { text: headerText, kind: "workGroupHeader" },
-        ...block.items.flatMap((item) =>
-          workItemToLines(item, collapseSingleItemLabel, block.now, block.pulseOriginAt ?? block.startedAt)),
-        { text: formatWorkGroupFooter(block), kind: "workGroupFooter" },
-        { text: "", kind: "workGroupSeparator" },
-      ];
+      return executionWorkGroupToLines(block);
     }
 
     case "file-diff": {
