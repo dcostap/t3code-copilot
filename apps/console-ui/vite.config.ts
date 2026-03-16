@@ -5,6 +5,9 @@ const port = Number(process.env.PORT ?? 5734);
 
 export default defineConfig({
   plugins: [react()],
+  optimizeDeps: {
+    include: ["@pierre/diffs"],
+  },
   server: {
     port,
     strictPort: true,

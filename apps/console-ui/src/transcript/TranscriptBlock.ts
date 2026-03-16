@@ -59,6 +59,10 @@ export interface AnnotatedLine {
   readonly text: string;
   readonly kind: LineKind;
   readonly extraClasses?: ReadonlyArray<string>;
+  readonly commandWidgetSignature?: string;
+  readonly inlineUnifiedDiff?: string;
+  readonly inlineDiffLookup?: InlineDiffLookup;
+  readonly inlineDiffChangedFiles?: ReadonlyArray<string>;
   readonly highlightSpans?: ReadonlyArray<{
     readonly from: number;
     readonly to: number;
@@ -123,6 +127,12 @@ export interface CommandExecBlock {
   readonly output?: string;
 }
 
+export interface InlineDiffLookup {
+  readonly threadId: string;
+  readonly fromTurnCount: number;
+  readonly toTurnCount: number;
+}
+
 export interface WorkGroupItem {
   readonly kind: "tool" | "command" | "file-change";
   readonly label: string;
@@ -134,6 +144,8 @@ export interface WorkGroupItem {
   readonly changedFiles?: ReadonlyArray<string>;
   readonly additions?: number;
   readonly deletions?: number;
+  readonly inlineUnifiedDiff?: string;
+  readonly inlineDiffLookup?: InlineDiffLookup;
 }
 
 function workItemStatusClass(item: WorkGroupItem) {
@@ -217,6 +229,18 @@ export interface WorkingStateBlock {
   readonly now: string;
 }
 
+export interface SendingStateBlock {
+  readonly type: "sending-state";
+  readonly startedAt: string;
+  readonly now: string;
+}
+
+export interface InterruptedStateBlock {
+  readonly type: "interrupted-state";
+  readonly startedAt: string;
+  readonly interruptedAt: string;
+}
+
 export interface DividerBlock {
   readonly type: "divider";
 }
@@ -241,7 +265,9 @@ export type TranscriptBlock =
   | PlanBlock
   | ProposedPlanBlock
   | CheckpointSummaryBlock
+  | SendingStateBlock
   | WorkingStateBlock
+  | InterruptedStateBlock
   | DividerBlock
   | StatusBlock;
 
@@ -499,6 +525,77 @@ function formatWorkGroupFooter(block: WorkGroupBlock) {
   }
 }
 
+function capitalizeInlineLabel(value: string) {
+  if (value.length === 0) {
+    return value;
+  }
+  return `${value[0]!.toUpperCase()}${value.slice(1)}`;
+}
+
+function commandWidgetGlyph(item: WorkGroupItem, now?: string) {
+  switch (item.status) {
+    case "running": {
+      const frames = ["◐", "◓", "◑", "◒"] as const;
+      if (!now) {
+        return frames[0];
+      }
+      const nowMs = Date.parse(now);
+      if (!Number.isFinite(nowMs)) {
+        return frames[0];
+      }
+      return frames[Math.floor(nowMs / 100) % frames.length] ?? frames[0];
+    }
+    case "done":
+      return "✓";
+    case "error":
+    case "declined":
+      return "✗";
+  }
+}
+
+function commandWidgetPrefix(item: WorkGroupItem) {
+  switch (item.status) {
+    case "running":
+      return "Running";
+    case "error":
+      return "Failed";
+    case "declined":
+      return "Declined";
+    default:
+      return "Ran";
+  }
+}
+
+function isReadFileItem(item: WorkGroupItem) {
+  return item.kind === "tool" && /^(read file|read files)$/i.test(item.label.trim());
+}
+
+function fileActivityWidgetPrefix(item: WorkGroupItem) {
+  if (item.kind === "file-change") {
+    switch (item.status) {
+      case "running":
+        return "Editing";
+      case "error":
+        return "Failed";
+      case "declined":
+        return "Declined";
+      default:
+        return "Edited";
+    }
+  }
+
+  switch (item.status) {
+    case "running":
+      return "Reading";
+    case "error":
+      return "Failed";
+    case "declined":
+      return "Declined";
+    default:
+      return "Read";
+  }
+}
+
 function workItemStatusPrefix(item: WorkGroupItem, now?: string) {
   switch (item.status) {
     case "running": {
@@ -582,6 +679,195 @@ function workItemToLines(
   return lines;
 }
 
+function commandWorkGroupLine(
+  item: WorkGroupItem,
+  options: {
+    signature: string;
+    timingLabel?: string;
+    now?: string;
+    startedAt?: string;
+  },
+): AnnotatedLine {
+  const glyph = commandWidgetGlyph(item, options.now);
+  const prefix = commandWidgetPrefix(item);
+  const commandText = item.command ?? item.detail ?? item.label;
+  const exitLabel = item.exitCode !== undefined ? ` [exit ${item.exitCode}]` : "";
+  const timingSuffix = options.timingLabel ? `  ${options.timingLabel}` : "";
+  const text = `${glyph} ${prefix}  ${commandText}${exitLabel}${timingSuffix}`;
+  const prefixStart = glyph.length + 1;
+  const commandStart = prefixStart + prefix.length + 2;
+  const commandEnd = commandStart + commandText.length;
+  const exitStart = commandEnd;
+  const exitEnd = exitStart + exitLabel.length;
+  const timingStart = options.timingLabel ? text.length - options.timingLabel.length : -1;
+  const highlightSpans = [
+    { from: 0, to: glyph.length, className: "tok-commandWidgetGlyph" },
+    { from: prefixStart, to: prefixStart + prefix.length, className: "tok-commandWidgetPrefix" },
+    ...(exitLabel.length > 0
+      ? [{ from: exitStart, to: exitEnd, className: "tok-commandWidgetExit" }]
+      : []),
+    ...(options.timingLabel
+      ? [{ from: timingStart, to: text.length, className: "tok-commandWidgetMeta" }]
+      : []),
+    ...(item.status === "running" && options.now
+      ? workingPulseSpans(text, options.now, options.startedAt, commandStart, commandEnd)
+      : []),
+  ];
+
+  return {
+    text,
+    kind: "commandExec",
+    extraClasses: [workItemStatusClass(item), "cm-line-commandWidget"],
+    commandWidgetSignature: options.signature,
+    ...(item.kind === "file-change" && item.inlineUnifiedDiff
+      ? {
+          inlineUnifiedDiff: item.inlineUnifiedDiff,
+          ...(item.changedFiles ? { inlineDiffChangedFiles: item.changedFiles } : {}),
+        }
+      : {}),
+    ...(item.kind === "file-change" && item.inlineDiffLookup
+      ? { inlineDiffLookup: item.inlineDiffLookup }
+      : {}),
+    ...(highlightSpans.length > 0 ? { highlightSpans } : {}),
+  };
+}
+
+function fileActivitySubject(item: WorkGroupItem) {
+  if (item.kind === "file-change") {
+    const changedFiles = item.changedFiles ?? [];
+    return changedFiles.length === 1
+      ? changedFiles[0]!
+      : changedFiles.length > 1
+        ? `${changedFiles.length} files`
+        : "files";
+  }
+
+  return item.detail ?? item.changedFiles?.[0] ?? item.label;
+}
+
+function fileActivityWorkGroupLine(
+  item: WorkGroupItem,
+  options: {
+    signature: string;
+    timingLabel?: string;
+    now?: string;
+    startedAt?: string;
+  },
+): AnnotatedLine {
+  const glyph = commandWidgetGlyph(item, options.now);
+  const prefix = fileActivityWidgetPrefix(item);
+  const counts = item.kind === "file-change" ? formatEditCounts(item.additions, item.deletions).trimStart() : "";
+  const subject = fileActivitySubject(item);
+  const countsSegment = counts.length > 0 ? ` ${counts}` : "";
+  const timingSuffix = options.timingLabel ? `  ${options.timingLabel}` : "";
+  const text = `${glyph} ${prefix}${countsSegment}  ${subject}${timingSuffix}`;
+  const prefixStart = glyph.length + 1;
+  const countsStart = counts.length > 0 ? prefixStart + prefix.length + 1 : -1;
+  const subjectStart =
+    counts.length > 0 ? countsStart + counts.length + 2 : prefixStart + prefix.length + 2;
+  const subjectEnd = subjectStart + subject.length;
+  const timingStart = options.timingLabel ? text.length - options.timingLabel.length : -1;
+  const commaIndex = counts.indexOf(",");
+  const plusStart = countsStart >= 0 ? countsStart + 1 : -1;
+  const plusEnd = commaIndex === -1 ? -1 : countsStart + commaIndex;
+  const minusStart = commaIndex === -1 ? -1 : countsStart + commaIndex + 2;
+  const minusEnd = countsStart >= 0 ? countsStart + counts.length - 1 : -1;
+  const highlightSpans = [
+    { from: 0, to: glyph.length, className: "tok-commandWidgetGlyph" },
+    { from: prefixStart, to: prefixStart + prefix.length, className: "tok-commandWidgetPrefix" },
+    ...(counts.length > 0 && plusStart >= 0 && plusEnd > plusStart
+      ? [{ from: plusStart, to: plusEnd, className: "tok-added" }]
+      : []),
+    ...(counts.length > 0 && minusStart >= 0 && minusEnd > minusStart
+      ? [{ from: minusStart, to: minusEnd, className: "tok-removed" }]
+      : []),
+    ...(options.timingLabel
+      ? [{ from: timingStart, to: text.length, className: "tok-commandWidgetMeta" }]
+      : []),
+    ...(item.status === "running" && options.now
+      ? workingPulseSpans(text, options.now, options.startedAt, subjectStart, subjectEnd)
+      : []),
+  ];
+
+  return {
+    text,
+    kind: "commandExec",
+    extraClasses: [workItemStatusClass(item), "cm-line-commandWidget"],
+    commandWidgetSignature: options.signature,
+    ...(item.kind === "file-change" && item.inlineUnifiedDiff
+      ? {
+          inlineUnifiedDiff: item.inlineUnifiedDiff,
+          ...(item.changedFiles ? { inlineDiffChangedFiles: item.changedFiles } : {}),
+        }
+      : {}),
+    ...(item.kind === "file-change" && item.inlineDiffLookup
+      ? { inlineDiffLookup: item.inlineDiffLookup }
+      : {}),
+    ...(highlightSpans.length > 0 ? { highlightSpans } : {}),
+  };
+}
+
+function commandWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
+  const lastCommandIndex = block.items.length - 1;
+  const timingLabel = capitalizeInlineLabel(formatWorkGroupFooter(block));
+
+  return [
+    ...block.items.flatMap((item, index) => {
+      const lines: AnnotatedLine[] = [
+        commandWorkGroupLine(item, {
+          signature: `${block.startedAt}:${index}:${item.command ?? item.label}`,
+          ...(index === lastCommandIndex ? { timingLabel } : {}),
+          ...(block.now ? { now: block.now } : {}),
+          startedAt: block.pulseOriginAt ?? block.startedAt,
+        }),
+      ];
+
+      if (item.output) {
+        lines.push(...prefixWrappedLines(item.output, "commandOutput", "  "));
+      }
+
+      if (item.changedFiles && item.changedFiles.length > 0) {
+        const [firstPath, ...restPaths] = item.changedFiles;
+        lines.push({
+          text: `  changed: ${firstPath}`,
+          kind: "toolResult",
+        });
+        for (const path of restPaths) {
+          lines.push({ text: `    ${path}`, kind: "toolResult" });
+        }
+      }
+
+      return lines;
+    }),
+    { text: "", kind: "workGroupSeparator" },
+  ];
+}
+
+function fileActivityWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
+  const lastItemIndex = block.items.length - 1;
+  const timingLabel = capitalizeInlineLabel(formatWorkGroupFooter(block));
+
+  return [
+    ...block.items.flatMap((item, index) => {
+      const lines: AnnotatedLine[] = [
+        fileActivityWorkGroupLine(item, {
+          signature: `${block.startedAt}:${index}:${item.detail ?? item.changedFiles?.join("|") ?? item.label}`,
+          ...(index === lastItemIndex ? { timingLabel } : {}),
+          ...(block.now ? { now: block.now } : {}),
+          startedAt: block.pulseOriginAt ?? block.startedAt,
+        }),
+      ];
+
+      if (item.output) {
+        lines.push(...prefixWrappedLines(item.output, "commandOutput", "  "));
+      }
+
+      return lines;
+    }),
+    { text: "", kind: "workGroupSeparator" },
+  ];
+}
+
 function formatEditCounts(additions?: number, deletions?: number) {
   if (typeof additions !== "number" && typeof deletions !== "number") {
     return "";
@@ -590,66 +876,6 @@ function formatEditCounts(additions?: number, deletions?: number) {
   const safeAdditions = typeof additions === "number" ? additions : 0;
   const safeDeletions = typeof deletions === "number" ? deletions : 0;
   return ` (+${safeAdditions}, -${safeDeletions})`;
-}
-
-function fileChangeItemToLine(item: WorkGroupItem): AnnotatedLine {
-  const changedFiles = item.changedFiles ?? [];
-  const subject =
-    changedFiles.length === 1
-      ? `"${changedFiles[0]}"`
-      : changedFiles.length > 1
-        ? `${changedFiles.length} files`
-        : "files";
-  const counts = formatEditCounts(item.additions, item.deletions);
-  const text = `      ${subject}${counts}`;
-  const highlightSpans =
-    counts.length > 0
-      ? (() => {
-          const countStart = text.length - counts.length;
-          const commaIndex = counts.indexOf(",");
-          const plusStart = countStart + 2;
-          const plusEnd = commaIndex === -1 ? text.length - 1 : countStart + commaIndex;
-          const minusStart = commaIndex === -1 ? text.length - 1 : countStart + commaIndex + 2;
-          const minusEnd = text.length - 1;
-          return [
-            { from: plusStart, to: plusEnd, className: "tok-added" },
-            { from: minusStart, to: minusEnd, className: "tok-removed" },
-          ];
-        })()
-      : undefined;
-
-  return {
-    text,
-    kind: "fileChangeSummary",
-    ...(highlightSpans ? { highlightSpans } : {}),
-  };
-}
-
-function fileChangeWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
-  const headerText =
-    block.status === "running"
-      ? block.items.length === 1
-        ? "Editing file"
-        : "Editing files"
-      : block.status === "error"
-        ? block.items.length === 1
-          ? "Failed to edit file"
-          : "Failed to edit files"
-        : block.status === "declined"
-          ? block.items.length === 1
-            ? "Declined file edit"
-            : "Declined file edits"
-          : block.items.length === 1
-            ? "Edited file"
-            : "Edited files";
-
-  return [
-    { text: "", kind: "workGroupSeparator" },
-    { text: headerText, kind: "workGroupHeader" },
-    ...block.items.map((item) => fileChangeItemToLine(item)),
-    { text: formatWorkGroupFooter(block), kind: "workGroupFooter" },
-    { text: "", kind: "workGroupSeparator" },
-  ];
 }
 
 const DIVIDER_TEXT = "────────────────────────────────────────────────────────────────────────────────";
@@ -686,7 +912,7 @@ function workingPulseIndex(text: string, now: string, startedAt?: string, radius
     return null;
   }
 
-  const pauseMs = 550;
+  const pauseMs = 180;
   const activeMs = 1_900;
   const cycleMs = activeMs + pauseMs;
   const nowMs = Date.parse(now);
@@ -721,9 +947,12 @@ function workingPulseSpans(
   const slice = text.slice(safeStart, safeEnd);
   const baselineChars = 22;
   const baseRadius = 3;
+  const edgeRadius = 2;
+  const midRadius = 1;
   const extraRadius =
     slice.length <= baselineChars ? 0 : Math.max(0, Math.floor((slice.length - baselineChars) / 6));
   const radius = baseRadius + extraRadius;
+  const coreRadius = Math.max(0, radius - edgeRadius - midRadius);
   const center = workingPulseIndex(slice, now, startedAt, radius);
   if (center === null) {
     return [];
@@ -736,9 +965,9 @@ function workingPulseSpans(
     }
     const absOffset = Math.abs(offset);
     const className =
-      absOffset === 0
+      absOffset <= coreRadius
         ? "tok-workingPulseCore"
-        : absOffset === 1
+        : absOffset <= coreRadius + midRadius
           ? "tok-workingPulseMid"
           : "tok-workingPulseEdge";
     return [{ from: safeStart + index, to: safeStart + index + 1, className }];
@@ -804,8 +1033,12 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
     }
 
     case "work-group": {
-      if (block.items.every((item) => item.kind === "file-change")) {
-        return fileChangeWorkGroupToLines(block);
+      if (block.items.every((item) => item.kind === "command")) {
+        return commandWorkGroupToLines(block);
+      }
+
+      if (block.items.every((item) => item.kind === "file-change" || isReadFileItem(item))) {
+        return fileActivityWorkGroupToLines(block);
       }
 
       const headerText = block.title ?? "Working";
@@ -942,9 +1175,12 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
       ];
     }
 
+    case "sending-state":
     case "working-state": {
       const elapsedLabel = formatElapsedDuration(Date.parse(block.now) - Date.parse(block.startedAt));
-      const text = `Working for ${elapsedLabel}`;
+      const text = block.type === "sending-state"
+        ? `Sending prompt for ${elapsedLabel}`
+        : `Working for ${elapsedLabel}`;
       const highlightSpans = workingPulseSpans(text, block.now, block.startedAt);
       return [{
         text,
@@ -954,6 +1190,16 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
               highlightSpans,
             }
           : {}),
+      }];
+    }
+
+    case "interrupted-state": {
+      const elapsedLabel = formatElapsedDuration(
+        Date.parse(block.interruptedAt) - Date.parse(block.startedAt),
+      );
+      return [{
+        text: `Interrupted after ${elapsedLabel}`,
+        kind: "workingLine",
       }];
     }
 

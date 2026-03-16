@@ -370,6 +370,8 @@ describe("threadToTranscriptBlocks", () => {
             changedFiles: ["src/example.ts"],
             additions: 2,
             deletions: 1,
+            inlineUnifiedDiff:
+              "diff --git a/src/example.ts b/src/example.ts\n--- a/src/example.ts\n+++ b/src/example.ts\n@@ -1 +1,3 @@\n-old line\n+new line\n+extra line\n",
           },
         ],
       },
@@ -594,6 +596,87 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("attaches lazy diff lookup metadata to completed file edits when only checkpoint diffs are available", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-file-change-complete"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "File change completed",
+          payload: {
+            itemType: "file_change",
+            title: "File change",
+            status: "completed",
+            data: {
+              item: {
+                type: "fileChange",
+                id: "call_file_change_lookup_1",
+                changes: [
+                  {
+                    path: "src/example.ts",
+                  },
+                ],
+                status: "completed",
+              },
+            },
+          },
+          turnId: TurnId.makeUnsafe("turn-file-change"),
+          sequence: 1,
+          createdAt: "2026-03-13T10:57:31.931Z",
+        },
+      ],
+      checkpoints: [
+        {
+          turnId: TurnId.makeUnsafe("turn-file-change"),
+          checkpointTurnCount: 4,
+          checkpointRef: CheckpointRef.makeUnsafe("checkpoint:thread-1:4"),
+          status: "ready",
+          files: [
+            {
+              path: "src/example.ts",
+              kind: "modified",
+              additions: 2,
+              deletions: 1,
+            },
+          ],
+          assistantMessageId: null,
+          completedAt: "2026-03-13T10:57:32.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "work-group",
+        title: "File change",
+        status: "done",
+        startedAt: "2026-03-13T10:57:31.931Z",
+        endedAt: "2026-03-13T10:57:31.931Z",
+        items: [
+          {
+            kind: "file-change",
+            label: "File change",
+            status: "done",
+            changedFiles: ["src/example.ts"],
+            inlineDiffLookup: {
+              threadId: thread!.id,
+              fromTurnCount: 3,
+              toTurnCount: 4,
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
   it("appends a transient working-state block while the turn is running", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
@@ -629,6 +712,42 @@ describe("threadToTranscriptBlocks", () => {
         type: "working-state",
         startedAt: "2026-03-12T09:00:01.000Z",
         now: "2026-03-12T09:00:04.500Z",
+      },
+    ]);
+  });
+
+  it("appends an interrupted-state block with the frozen elapsed time when a running turn is interrupted", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [],
+      latestTurn: {
+        turnId: TurnId.makeUnsafe("turn-interrupted"),
+        state: "interrupted",
+        requestedAt: "2026-03-12T09:00:00.000Z",
+        startedAt: "2026-03-12T09:00:01.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      session: {
+        ...thread!.session!,
+        status: "stopped",
+        activeTurnId: null,
+        updatedAt: "2026-03-12T09:00:04.500Z",
+      },
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "interrupted-state",
+        startedAt: "2026-03-12T09:00:01.000Z",
+        interruptedAt: "2026-03-12T09:00:04.500Z",
       },
     ]);
   });

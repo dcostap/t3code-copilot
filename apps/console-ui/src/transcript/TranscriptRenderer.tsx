@@ -9,6 +9,7 @@ import {
   type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
 } from "react";
+import { parsePatchFiles, type FileDiffMetadata } from "@pierre/diffs";
 import { defaultKeymap } from "@codemirror/commands";
 import {
   Annotation,
@@ -25,6 +26,7 @@ import type { ComposerImageAttachment } from "../composerAttachments";
 import {
   blockToLines,
   type AnnotatedLine,
+  type InlineDiffLookup,
   type LineKind,
   type TranscriptBlock,
   type TranscriptImageAttachment,
@@ -32,8 +34,10 @@ import {
 
 interface PositionedLine {
   readonly from: number;
+  readonly to: number;
   readonly kind: LineKind;
   readonly extraClasses?: ReadonlyArray<string>;
+  readonly commandWidgetSignature?: string;
 }
 
 interface PositionedMark {
@@ -47,6 +51,11 @@ interface TranscriptDocumentModel {
   readonly lines: ReadonlyArray<PositionedLine>;
   readonly marks: ReadonlyArray<PositionedMark>;
   readonly widgets: ReadonlyArray<PositionedWidget>;
+  readonly replacements: ReadonlyArray<PositionedReplacement>;
+  readonly fileChangeWidgetSignatures: ReadonlySet<string>;
+  readonly inlineDiffLookupsBySignature: ReadonlyMap<string, InlineDiffLookup>;
+  readonly inlineDiffContentBySignature: ReadonlyMap<string, string>;
+  readonly defaultExpandedInlineDiffSignatures: ReadonlyMap<string, InlineDiffLookup>;
   readonly separatorStart: number;
   readonly promptStart: number;
 }
@@ -56,6 +65,42 @@ interface PositionedWidget {
   readonly side: -1 | 1;
   readonly widget: WidgetType;
   readonly signature: string;
+}
+
+interface PositionedReplacement {
+  readonly from: number;
+  readonly to: number;
+  readonly widget: WidgetType;
+  readonly signature: string;
+}
+
+interface CodeBlockWidgetLineData {
+  readonly text: string;
+  readonly highlightSpans?: ReadonlyArray<{
+    readonly from: number;
+    readonly to: number;
+    readonly className: string;
+  }>;
+}
+
+interface InlineDiffRowData {
+  readonly kind: "metadata" | "context" | "addition" | "deletion";
+  readonly oldLineNumber?: number;
+  readonly newLineNumber?: number;
+  readonly text: string;
+}
+
+interface InlineDiffHunkData {
+  readonly header: string;
+  readonly rows: ReadonlyArray<InlineDiffRowData>;
+}
+
+interface InlineDiffFileData {
+  readonly path: string;
+  readonly previousPath?: string;
+  readonly additions: number;
+  readonly deletions: number;
+  readonly hunks: ReadonlyArray<InlineDiffHunkData>;
 }
 
 interface StoredSelection {
@@ -81,7 +126,13 @@ interface TranscriptRendererProps {
   onAddImageFiles?(files: ReadonlyArray<File>): void;
   onDraftChange?(value: string): void;
   onRemoveImage?(attachmentId: string): void;
+  resolveInlineDiff?(lookup: InlineDiffLookup): Promise<string | null>;
   onSubmit?(value: string): Promise<void> | void;
+}
+
+interface InlineDiffResolutionState {
+  readonly status: "loading" | "ready" | "error";
+  readonly diff?: string;
 }
 
 export type TranscriptRegion = "prompt" | "history";
@@ -212,6 +263,590 @@ class ImageAttachmentTileWidget extends WidgetType {
   }
 }
 
+async function copyTextToClipboard(text: string) {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) {
+    throw new Error("Clipboard copy failed");
+  }
+}
+
+function renderCodeBlockLine(
+  line: CodeBlockWidgetLineData,
+) {
+  const lineElement = document.createElement("div");
+  lineElement.className = "cm-codeBlockLine";
+
+  if (!line.highlightSpans || line.highlightSpans.length === 0) {
+    if (line.text.length === 0) {
+      lineElement.append(document.createElement("br"));
+    } else {
+      lineElement.textContent = line.text;
+    }
+    return lineElement;
+  }
+
+  const orderedSpans = line.highlightSpans.toSorted((left, right) => left.from - right.from);
+  let cursor = 0;
+
+  for (const span of orderedSpans) {
+    const from = Math.max(0, Math.min(line.text.length, span.from));
+    const to = Math.max(from, Math.min(line.text.length, span.to));
+    if (from > cursor) {
+      lineElement.append(document.createTextNode(line.text.slice(cursor, from)));
+    }
+    if (to > from) {
+      const highlighted = document.createElement("span");
+      highlighted.className = `cm-codeToken ${span.className}`;
+      highlighted.textContent = line.text.slice(from, to);
+      lineElement.append(highlighted);
+    }
+    cursor = Math.max(cursor, to);
+  }
+
+  if (cursor < line.text.length) {
+    lineElement.append(document.createTextNode(line.text.slice(cursor)));
+  }
+
+  if (lineElement.childNodes.length === 0) {
+    lineElement.append(document.createElement("br"));
+  }
+
+  return lineElement;
+}
+
+class CodeBlockWidget extends WidgetType {
+  constructor(
+    private readonly content: {
+      signature: string;
+      code: string;
+      lines: ReadonlyArray<CodeBlockWidgetLineData>;
+    },
+  ) {
+    super();
+  }
+
+  override eq(other: CodeBlockWidget) {
+    return JSON.stringify(this.content) === JSON.stringify(other.content);
+  }
+
+  override toDOM() {
+    const root = document.createElement("div");
+    root.className = "cm-codeBlockSurface";
+
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "cm-codeBlockCopyButton";
+    copyButton.setAttribute("title", "Copy code block");
+    copyButton.setAttribute("aria-label", "Copy code block");
+
+    const copyButtonLabel = document.createElement("span");
+    copyButtonLabel.className = "cm-codeBlockCopyButtonLabel";
+    copyButtonLabel.textContent = "Copy";
+
+    const copyButtonStatus = document.createElement("span");
+    copyButtonStatus.className = "cm-codeBlockCopyButtonStatus";
+    copyButtonStatus.setAttribute("aria-hidden", "true");
+
+    copyButton.append(copyButtonLabel, copyButtonStatus);
+
+    const copiedFeedbackDurationMs = 520;
+    const copyButtonExitDurationMs = 320;
+    let feedbackTimer: number | undefined;
+    let contentResetTimer: number | undefined;
+    const clearContentResetTimer = () => {
+      if (contentResetTimer !== undefined) {
+        window.clearTimeout(contentResetTimer);
+        contentResetTimer = undefined;
+      }
+    };
+    const clearFeedbackTimer = () => {
+      if (feedbackTimer !== undefined) {
+        window.clearTimeout(feedbackTimer);
+        feedbackTimer = undefined;
+      }
+    };
+    const resetCopyButtonContent = () => {
+      clearContentResetTimer();
+      copyButton.classList.remove("cm-codeBlockCopyButtonCopied", "cm-codeBlockCopyButtonFailed");
+      copyButtonStatus.textContent = "";
+    };
+    const shouldDelayContentReset = () =>
+      !root.matches(":hover") && !root.matches(":focus-within");
+    const releaseCopyFeedback = () => {
+      clearFeedbackTimer();
+      root.classList.remove("cm-codeBlockSurfaceCopyFeedbackActive");
+      if (!shouldDelayContentReset()) {
+        resetCopyButtonContent();
+        return;
+      }
+      clearContentResetTimer();
+      contentResetTimer = window.setTimeout(() => {
+        resetCopyButtonContent();
+      }, copyButtonExitDurationMs);
+    };
+
+    const applyCopyFeedback = (variant: "copied" | "failed") => {
+      clearFeedbackTimer();
+      clearContentResetTimer();
+      root.classList.add("cm-codeBlockSurfaceCopyFeedbackActive");
+      copyButton.classList.remove("cm-codeBlockCopyButtonCopied", "cm-codeBlockCopyButtonFailed");
+      void copyButton.offsetWidth;
+      copyButton.classList.add(
+        variant === "copied" ? "cm-codeBlockCopyButtonCopied" : "cm-codeBlockCopyButtonFailed",
+      );
+      copyButtonStatus.textContent = variant === "copied" ? "\u2713" : "!";
+      feedbackTimer = window.setTimeout(() => {
+        releaseCopyFeedback();
+      }, variant === "copied" ? copiedFeedbackDurationMs : 1400);
+    };
+
+    copyButton.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    copyButton.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        await copyTextToClipboard(this.content.code);
+        applyCopyFeedback("copied");
+      } catch {
+        applyCopyFeedback("failed");
+      }
+    });
+
+    const content = document.createElement("div");
+    content.className = "cm-codeBlockContent";
+    for (const line of this.content.lines) {
+      content.append(renderCodeBlockLine(line));
+    }
+
+    root.append(copyButton, content);
+    return root;
+  }
+}
+
+function normalizeDiffPath(path: string) {
+  return path.startsWith("a/") || path.startsWith("b/") ? path.slice(2) : path;
+}
+
+function resolveInlineDiffPath(file: FileDiffMetadata) {
+  return normalizeDiffPath(file.name ?? file.prevName ?? "");
+}
+
+function buildInlineDiffRows(file: FileDiffMetadata): InlineDiffFileData {
+  const additions = file.hunks.reduce((total, hunk) => total + hunk.additionLines, 0);
+  const deletions = file.hunks.reduce((total, hunk) => total + hunk.deletionLines, 0);
+  const hunks: InlineDiffHunkData[] = file.hunks.map((hunk) => {
+    const rows: InlineDiffRowData[] = [];
+    let oldLineNumber = hunk.deletionStart;
+    let newLineNumber = hunk.additionStart;
+
+    for (const content of hunk.hunkContent) {
+      if (content.type === "context") {
+        for (let index = 0; index < content.lines; index += 1) {
+          rows.push({
+            kind: "context",
+            oldLineNumber,
+            newLineNumber,
+            text: file.additionLines[content.additionLineIndex + index] ?? "",
+          });
+          oldLineNumber += 1;
+          newLineNumber += 1;
+        }
+        continue;
+      }
+
+      for (let index = 0; index < content.deletions; index += 1) {
+        rows.push({
+          kind: "deletion",
+          oldLineNumber,
+          text: file.deletionLines[content.deletionLineIndex + index] ?? "",
+        });
+        oldLineNumber += 1;
+      }
+
+      for (let index = 0; index < content.additions; index += 1) {
+        rows.push({
+          kind: "addition",
+          newLineNumber,
+          text: file.additionLines[content.additionLineIndex + index] ?? "",
+        });
+        newLineNumber += 1;
+      }
+    }
+
+    return {
+      header: hunk.hunkContext ? `${hunk.hunkSpecs ?? "@@"} ${hunk.hunkContext}` : (hunk.hunkSpecs ?? "@@"),
+      rows,
+    };
+  });
+
+  return {
+    path: resolveInlineDiffPath(file),
+    ...(file.prevName ? { previousPath: normalizeDiffPath(file.prevName) } : {}),
+    additions,
+    deletions,
+    hunks,
+  };
+}
+
+const inlineDiffCache = new Map<string, ReadonlyArray<InlineDiffFileData>>();
+
+function parseInlineDiffFiles(
+  unifiedDiff: string,
+  changedFiles?: ReadonlyArray<string>,
+): ReadonlyArray<InlineDiffFileData> {
+  const normalizedPatch = unifiedDiff.replace(/\r\n/g, "\n").trim();
+  if (normalizedPatch.length === 0) {
+    return [];
+  }
+
+  const normalizedPaths = changedFiles?.map((path) => normalizeDiffPath(path)) ?? [];
+  const cacheKey = `${normalizedPaths.join("|")}::${normalizedPatch}`;
+  const cached = inlineDiffCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const parsed = parsePatchFiles(normalizedPatch);
+    const files = parsed.flatMap((patch) => patch.files);
+    const allowedPaths = new Set(normalizedPaths);
+    const filteredFiles = allowedPaths.size > 0
+      ? files.filter((file) => {
+          const nextPath = resolveInlineDiffPath(file);
+          const previousPath = file.prevName ? normalizeDiffPath(file.prevName) : null;
+          return allowedPaths.has(nextPath) || (previousPath !== null && allowedPaths.has(previousPath));
+        })
+      : files;
+    const inlineFiles = filteredFiles.map((file) => buildInlineDiffRows(file));
+    inlineDiffCache.set(cacheKey, inlineFiles);
+    return inlineFiles;
+  } catch {
+    inlineDiffCache.set(cacheKey, []);
+    return [];
+  }
+}
+
+function extractCommandWidgetCounts(value: string):
+  | {
+      base: string;
+      counts: {
+        additions: string;
+        deletions: string;
+      };
+    }
+  | null {
+  const match = /^(?<base>[\s\S]*?) \((?<add>\+\d+), (?<remove>-\d+)\)$/.exec(value);
+  const groups = match?.groups;
+  const additions = groups?.add;
+  const deletions = groups?.remove;
+  if (!groups || !additions || !deletions) {
+    return null;
+  }
+  return {
+    base: groups.base ?? value,
+    counts: {
+      additions,
+      deletions,
+    },
+  };
+}
+
+function parseCommandWidgetText(text: string): {
+  glyph: string;
+  prefix: string;
+  command: string;
+  timingLabel?: string;
+  counts?: {
+    additions: string;
+    deletions: string;
+  };
+} | null {
+  const firstSpace = text.indexOf(" ");
+  if (firstSpace <= 0) {
+    return null;
+  }
+
+  const glyph = text.slice(0, firstSpace);
+  const prefixAndCommand = text.slice(firstSpace + 1);
+  const firstDivider = prefixAndCommand.indexOf("  ");
+  if (firstDivider <= 0) {
+    return null;
+  }
+
+  let prefix = prefixAndCommand.slice(0, firstDivider);
+  let command = prefixAndCommand.slice(firstDivider + 2);
+  let timingLabel: string | undefined;
+  let counts:
+    | {
+        additions: string;
+        deletions: string;
+      }
+    | undefined;
+
+  const prefixCounts = extractCommandWidgetCounts(prefix);
+  if (prefixCounts) {
+    prefix = prefixCounts.base;
+    counts = prefixCounts.counts;
+  }
+
+  for (const marker of ["  Completed in ", "  Running for ", "  Failed after ", "  Declined after "]) {
+    const timingIndex = command.lastIndexOf(marker);
+    if (timingIndex === -1) {
+      continue;
+    }
+    timingLabel = command.slice(timingIndex + 2);
+    command = command.slice(0, timingIndex);
+    break;
+  }
+
+  if (!counts) {
+    const countsPrefixMatch = /^\((?<add>\+\d+), (?<remove>-\d+)\)\s+(?<base>[\s\S]*)$/.exec(command);
+    const countsPrefixGroups = countsPrefixMatch?.groups;
+    const prefixAdditions = countsPrefixGroups?.add;
+    const prefixDeletions = countsPrefixGroups?.remove;
+    if (countsPrefixGroups && prefixAdditions && prefixDeletions) {
+      command = countsPrefixGroups.base ?? command;
+      counts = {
+        additions: prefixAdditions,
+        deletions: prefixDeletions,
+      };
+    }
+  }
+
+  if (!counts) {
+  const commandCounts = extractCommandWidgetCounts(command);
+    if (commandCounts) {
+      command = commandCounts.base;
+      counts = commandCounts.counts;
+    }
+  }
+
+  return {
+    glyph,
+    prefix,
+    command,
+    ...(timingLabel ? { timingLabel } : {}),
+    ...(counts ? { counts } : {}),
+  };
+}
+
+class CommandWidgetLine extends WidgetType {
+  constructor(
+    private readonly content: {
+      signature: string;
+      glyph: string;
+      prefix: string;
+      command: string;
+      timingLabel?: string;
+      counts?: {
+        additions: string;
+        deletions: string;
+      };
+      inlineDiffFiles?: ReadonlyArray<InlineDiffFileData>;
+      rawInlineDiff?: string;
+      inlineDiffStateMessage?: string;
+      inlineDiffStateClass?: string;
+      expanded: boolean;
+      isFileChange: boolean;
+      statusClass?: string;
+    },
+  ) {
+    super();
+  }
+
+  override eq(other: CommandWidgetLine) {
+    return JSON.stringify(this.content) === JSON.stringify(other.content);
+  }
+
+  override ignoreEvent() {
+    return false;
+  }
+
+  override toDOM() {
+    const root = document.createElement("div");
+    root.className = [
+      "cm-commandWidgetSurface",
+      this.content.isFileChange ? "cm-commandWidgetSurfaceFileChange" : "",
+      this.content.expanded ? "cm-commandWidgetSurfaceExpanded" : "",
+      this.content.statusClass ?? "",
+    ].filter(Boolean).join(" ");
+    root.dataset.commandWidgetSignature = this.content.signature;
+
+    const lead = document.createElement("span");
+    lead.className = "cm-commandWidgetLead";
+
+    const glyph = document.createElement("span");
+    glyph.className = "cm-commandWidgetGlyph";
+    glyph.textContent = this.content.glyph;
+
+    const prefix = document.createElement("span");
+    prefix.className = "cm-commandWidgetPrefix";
+    prefix.textContent = this.content.prefix;
+
+    lead.append(glyph, document.createTextNode(" "), prefix);
+
+    root.append(lead);
+
+    if (this.content.counts) {
+      const counts = document.createElement("span");
+      counts.className = "cm-commandWidgetCounts";
+
+      const open = document.createTextNode(" (");
+      const additions = document.createElement("span");
+      additions.className = "cm-commandWidgetCountAdded";
+      additions.textContent = this.content.counts.additions;
+      const comma = document.createTextNode(", ");
+      const deletions = document.createElement("span");
+      deletions.className = "cm-commandWidgetCountRemoved";
+      deletions.textContent = this.content.counts.deletions;
+      const close = document.createTextNode(")");
+
+      counts.append(open, additions, comma, deletions, close);
+      root.append(counts);
+    }
+
+    const command = document.createElement("span");
+    command.className = "cm-commandWidgetCommand";
+    command.textContent = this.content.command;
+
+    root.append(command);
+
+    if (this.content.timingLabel) {
+      const meta = document.createElement("span");
+      meta.className = "cm-commandWidgetMeta";
+      meta.textContent = this.content.timingLabel;
+      root.append(meta);
+    }
+
+    if (
+      this.content.expanded
+      && (
+        this.content.inlineDiffFiles?.length
+        || this.content.rawInlineDiff
+        || this.content.inlineDiffStateMessage
+      )
+    ) {
+      const inlineDiff = document.createElement("div");
+      inlineDiff.className = [
+        "cm-commandWidgetInlineDiff",
+        this.content.inlineDiffStateClass ?? "",
+      ].filter(Boolean).join(" ");
+
+      if (this.content.inlineDiffFiles && this.content.inlineDiffFiles.length > 0) {
+        for (const file of this.content.inlineDiffFiles) {
+          const fileRoot = document.createElement("section");
+          fileRoot.className = "cm-inlineDiffFile";
+
+          for (const hunk of file.hunks) {
+            for (const row of hunk.rows) {
+              const rowElement = document.createElement("div");
+              rowElement.className = `cm-inlineDiffRow cm-inlineDiffRow${row.kind[0]!.toUpperCase()}${row.kind.slice(1)}`;
+
+              const newLine = document.createElement("span");
+              newLine.className = "cm-inlineDiffLineNumber";
+              newLine.textContent = row.newLineNumber?.toString() ?? "";
+
+              const marker = document.createElement("span");
+              marker.className = "cm-inlineDiffMarker";
+              marker.textContent =
+                row.kind === "addition" ? "+" : row.kind === "deletion" ? "-" : row.kind === "context" ? " " : "@";
+
+              const content = document.createElement("span");
+              content.className = "cm-inlineDiffContent";
+              content.textContent = row.text.length > 0 ? row.text : " ";
+
+              rowElement.append(newLine, marker, content);
+              fileRoot.append(rowElement);
+            }
+          }
+
+          inlineDiff.append(fileRoot);
+        }
+      } else if (this.content.rawInlineDiff) {
+        const rawFallback = document.createElement("pre");
+        rawFallback.className = "cm-inlineDiffFallback";
+        rawFallback.textContent = this.content.rawInlineDiff;
+        inlineDiff.append(rawFallback);
+      } else if (this.content.inlineDiffStateMessage) {
+        const stateMessage = document.createElement("div");
+        stateMessage.className = "cm-inlineDiffStateMessage";
+        stateMessage.textContent = this.content.inlineDiffStateMessage;
+        inlineDiff.append(stateMessage);
+      }
+
+      root.append(inlineDiff);
+    }
+
+    return root;
+  }
+}
+
+function buildCodeBlockReplacements(
+  allLines: ReadonlyArray<AnnotatedLine>,
+  positioned: ReadonlyArray<PositionedLine>,
+) {
+  const replacements: PositionedReplacement[] = [];
+
+  for (let index = 0; index < allLines.length; index += 1) {
+    if (allLines[index]?.kind !== "codeFenceSeparator" || allLines[index + 1]?.kind !== "codeFenceHeader") {
+      continue;
+    }
+
+    let closingIndex = index + 2;
+    while (closingIndex < allLines.length && allLines[closingIndex]?.kind === "codeFenceBody") {
+      closingIndex += 1;
+    }
+
+    if (allLines[closingIndex]?.kind !== "codeFenceSeparator") {
+      continue;
+    }
+
+    const startLine = positioned[index];
+    const endLine = positioned[closingIndex];
+    if (!startLine || !endLine) {
+      continue;
+    }
+
+    const languageLabel = allLines[index + 1]?.text ?? "code";
+    const language = languageLabel.startsWith("code · ") ? languageLabel.slice("code · ".length) : "";
+    const codeLines = allLines.slice(index + 2, closingIndex).map((line) =>
+      line.highlightSpans ? { text: line.text, highlightSpans: line.highlightSpans } : { text: line.text });
+    const code = codeLines.map((line) => line.text).join("\n");
+
+    replacements.push({
+      from: startLine.from,
+      to: endLine.to,
+      widget: new CodeBlockWidget({
+        signature: `${startLine.from}:${endLine.to}:${language}:${code}`,
+        code,
+        lines: codeLines,
+      }),
+      signature: `${startLine.from}:${endLine.to}:${language}:${code}`,
+    });
+
+    index = closingIndex;
+  }
+
+  return replacements;
+}
+
 function flattenBlocks(
   blocks: ReadonlyArray<TranscriptBlock>,
   pendingUserInputHighlight?: {
@@ -228,14 +863,21 @@ function flattenBlocks(
   let seenVisibleBlock = false;
 
   for (const block of blocks) {
-    const blockLines = blockToLines(block).map((line, lineIndex) => {
+    const rawBlockLines = blockToLines(block);
+    const leadingUserPromptSeparatorCount =
+      !seenVisibleBlock && block.type === "user-message"
+        ? rawBlockLines.findIndex((line) => line.kind !== "userPromptSeparator")
+        : -1;
+    const hiddenUserPromptSeparatorCount =
+      leadingUserPromptSeparatorCount === -1 ? rawBlockLines.length : leadingUserPromptSeparatorCount;
+    const blockLines = rawBlockLines.map((line, lineIndex) => {
       let nextLine = line;
 
       if (
         !seenVisibleBlock
         && block.type === "user-message"
-        && lineIndex === 0
         && line.kind === "userPromptSeparator"
+        && lineIndex < hiddenUserPromptSeparatorCount
       ) {
         nextLine = {
           ...line,
@@ -304,6 +946,9 @@ function buildTranscriptDocument(
   blocks: ReadonlyArray<TranscriptBlock>,
   draft: string,
   interactionMode: "default" | "plan",
+  expandedCommandSignatures: ReadonlySet<string>,
+  collapsedFileChangeSignatures: ReadonlySet<string>,
+  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>,
   pendingUserInputHighlight?: {
     readonly requestId: string;
     readonly questionIndex: number;
@@ -330,13 +975,45 @@ function buildTranscriptDocument(
   const positioned: PositionedLine[] = [];
   const marks: PositionedMark[] = [];
   const widgets: PositionedWidget[] = [];
+  const replacements: PositionedReplacement[] = [];
+  const fileChangeWidgetSignatures = new Set<string>();
+  const inlineDiffLookupsBySignature = new Map<string, InlineDiffLookup>();
+  const inlineDiffContentBySignature = new Map<string, string>();
+  const defaultExpandedInlineDiffSignatures = new Map<string, InlineDiffLookup>();
 
   allLines.forEach((line, index) => {
     const from = offset;
+    const lineEnd = from + line.text.length;
+    const isFileChangeWidget =
+      line.commandWidgetSignature !== undefined
+      && (
+        line.inlineUnifiedDiff !== undefined
+        || line.inlineDiffLookup !== undefined
+        || line.inlineDiffChangedFiles !== undefined
+      );
+    if (isFileChangeWidget && line.commandWidgetSignature) {
+      fileChangeWidgetSignatures.add(line.commandWidgetSignature);
+    }
+    const isExpandedCommand =
+      line.commandWidgetSignature !== undefined
+      && (
+        isFileChangeWidget
+          ? !collapsedFileChangeSignatures.has(line.commandWidgetSignature)
+          : expandedCommandSignatures.has(line.commandWidgetSignature)
+      );
     positioned.push({
       from,
+      to: lineEnd,
       kind: line.kind,
-      ...(line.extraClasses ? { extraClasses: line.extraClasses } : {}),
+      ...(line.extraClasses || line.commandWidgetSignature
+        ? {
+            extraClasses: [
+              ...(line.extraClasses ?? []),
+              ...(isExpandedCommand ? ["cm-line-commandExecExpanded"] : []),
+            ],
+          }
+        : {}),
+      ...(line.commandWidgetSignature ? { commandWidgetSignature: line.commandWidgetSignature } : {}),
     });
     if (line.highlightSpans) {
       for (const span of line.highlightSpans) {
@@ -350,7 +1027,6 @@ function buildTranscriptDocument(
         });
       }
     }
-    const lineEnd = from + line.text.length;
     text += line.text;
 
     if (line.kind === "promptSeparator" && separatorStart === -1) {
@@ -371,17 +1047,80 @@ function buildTranscriptDocument(
         signature: widget.signature,
       });
     }
+    if (line.commandWidgetSignature) {
+      if (line.inlineDiffLookup) {
+        inlineDiffLookupsBySignature.set(line.commandWidgetSignature, line.inlineDiffLookup);
+        if (isFileChangeWidget && isExpandedCommand) {
+          defaultExpandedInlineDiffSignatures.set(line.commandWidgetSignature, line.inlineDiffLookup);
+        }
+      }
+      const parsed = parseCommandWidgetText(line.text);
+      if (parsed) {
+        const statusClass = (line.extraClasses ?? []).find((entry) => entry.startsWith("cm-line-workItem"));
+        const resolvedInlineDiffState = resolvedInlineDiffBySignature.get(line.commandWidgetSignature);
+        const effectiveInlineDiff =
+          line.inlineUnifiedDiff
+          ?? (resolvedInlineDiffState?.status === "ready" ? resolvedInlineDiffState.diff : undefined);
+        if (effectiveInlineDiff) {
+          inlineDiffContentBySignature.set(line.commandWidgetSignature, effectiveInlineDiff);
+        }
+        const inlineDiffFiles =
+          effectiveInlineDiff && isExpandedCommand
+            ? parseInlineDiffFiles(effectiveInlineDiff, line.inlineDiffChangedFiles)
+            : undefined;
+        const inlineDiffStateMessage =
+          isExpandedCommand && !effectiveInlineDiff
+            ? resolvedInlineDiffState?.status === "loading"
+              ? "Loading diff..."
+              : resolvedInlineDiffState?.status === "error"
+                ? "Diff unavailable."
+                : undefined
+            : undefined;
+        replacements.push({
+          from,
+          to: lineEnd,
+          widget: new CommandWidgetLine({
+            signature: line.commandWidgetSignature,
+            ...parsed,
+            ...(inlineDiffFiles && inlineDiffFiles.length > 0 ? { inlineDiffFiles } : {}),
+            ...(effectiveInlineDiff && isExpandedCommand && (!inlineDiffFiles || inlineDiffFiles.length === 0)
+              ? { rawInlineDiff: effectiveInlineDiff }
+              : {}),
+            ...(inlineDiffStateMessage
+              ? {
+                  inlineDiffStateMessage,
+                  inlineDiffStateClass:
+                    resolvedInlineDiffState?.status === "loading"
+                      ? "cm-commandWidgetInlineDiffLoading"
+                      : "cm-commandWidgetInlineDiffError",
+                }
+              : {}),
+            expanded: isExpandedCommand,
+            isFileChange: isFileChangeWidget,
+            ...(statusClass ? { statusClass } : {}),
+          }),
+          signature: `${line.commandWidgetSignature}:${line.text}:${isExpandedCommand}:${statusClass ?? ""}:${effectiveInlineDiff ?? ""}:${resolvedInlineDiffState?.status ?? ""}`,
+        });
+      }
+    }
     if (index < allLines.length - 1) {
       text += "\n";
       offset += 1;
     }
   });
 
+  replacements.push(...buildCodeBlockReplacements(allLines, positioned));
+
   return {
     text,
     lines: positioned,
     marks,
     widgets,
+    replacements,
+    fileChangeWidgetSignatures,
+    inlineDiffLookupsBySignature,
+    inlineDiffContentBySignature,
+    defaultExpandedInlineDiffSignatures,
     separatorStart: separatorStart === -1 ? promptStart === -1 ? text.length : promptStart : separatorStart,
     promptStart: promptStart === -1 ? text.length : promptStart,
   };
@@ -391,6 +1130,7 @@ function buildDecorations(
   lines: ReadonlyArray<PositionedLine>,
   marks: ReadonlyArray<PositionedMark>,
   widgets: ReadonlyArray<PositionedWidget>,
+  replacements: ReadonlyArray<PositionedReplacement>,
   promptStart: number,
 ) {
   const ranges = lines.map((line) =>
@@ -408,6 +1148,11 @@ function buildDecorations(
       Decoration.widget({ widget, side }).range(position),
     ),
   );
+  ranges.push(
+    ...replacements.map(({ from, to, widget }) =>
+      Decoration.replace({ widget, block: true }).range(from, to),
+    ),
+  );
   ranges.push(Decoration.line({ class: "cm-line-promptStart" }).range(promptStart));
   return Decoration.set(ranges, true);
 }
@@ -422,7 +1167,10 @@ function buildDecorationSignature(docModel: TranscriptDocumentModel) {
   const widgetSignature = docModel.widgets
     .map((widget) => `${widget.position}:${widget.side}:${widget.signature}`)
     .join("|");
-  return `${docModel.promptStart}::${lineSignature}::${markSignature}::${widgetSignature}`;
+  const replacementSignature = docModel.replacements
+    .map((replacement) => `${replacement.from}:${replacement.to}:${replacement.signature}`)
+    .join("|");
+  return `${docModel.promptStart}::${lineSignature}::${markSignature}::${widgetSignature}::${replacementSignature}`;
 }
 
 function computeMinimalDocChange(currentText: string, nextText: string) {
@@ -459,6 +1207,8 @@ function buildEditorTheme() {
     {
       "&": {
         height: "auto",
+        width: "100%",
+        minWidth: "0",
         color: "#c5ccd3",
         backgroundColor: "transparent",
         fontFamily:
@@ -466,11 +1216,18 @@ function buildEditorTheme() {
         fontSize: "16px",
       },
       ".cm-scroller": {
-        overflow: "visible",
+        overflowX: "hidden",
+        overflowY: "visible",
+        width: "100%",
+        minWidth: "0",
         padding: "18px 0 18px",
         lineHeight: "1.3",
       },
       ".cm-content": {
+        boxSizing: "border-box",
+        width: "100%",
+        minWidth: "0",
+        maxWidth: "100%",
         padding: "0 22px 18px",
         caretColor: "#cfd6dd",
       },
@@ -499,6 +1256,10 @@ function buildEditorTheme() {
         outline: "none",
       },
       ".cm-line": {
+        boxSizing: "border-box",
+        width: "100%",
+        minWidth: "0",
+        maxWidth: "100%",
         padding: "0",
         whiteSpace: "pre-wrap",
       },
@@ -528,17 +1289,13 @@ function buildEditorTheme() {
         color: "#d8dde2",
       },
       ".cm-line-codeFenceSeparator": {
-        color: "#4f5861",
+        color: "transparent",
       },
       ".cm-line-codeFenceHeader": {
-        color: "#8aa5c2",
-        fontSize: "12px",
-        textTransform: "uppercase",
-        paddingTop: "2px",
+        color: "transparent",
       },
       ".cm-line-codeFenceBody": {
-        color: "#c7d0d8",
-        backgroundColor: "rgba(22, 29, 36, 0.82)",
+        color: "transparent",
       },
       ".cm-line-blockquote": {
         color: "#aeb6bf",
@@ -566,10 +1323,14 @@ function buildEditorTheme() {
       ".cm-codeToken.tok-removed": { color: "#ff7575" },
       ".cm-line-list": { color: "#c7ccd1" },
       ".cm-line-userPromptSeparator": {
-        // TODO: This drawn separator currently contributes to subtle wheel-scroll jank.
-        // Revisit with a lower-churn implementation once transcript rendering is stabilized.
         position: "relative",
-        minHeight: "40px",
+        height: "0",
+        minHeight: "0",
+        lineHeight: "0",
+        fontSize: "16px",
+        paddingTop: "1.3em",
+        paddingBottom: "1.3em",
+        overflow: "visible",
       },
       ".cm-line-userPromptSeparator::before": {
         content: '""',
@@ -581,7 +1342,12 @@ function buildEditorTheme() {
         transform: "translateY(-50%)",
       },
       ".cm-line-userPromptSeparator.cm-line-userPromptSeparatorHidden": {
+        height: "0",
         minHeight: "0",
+        lineHeight: "0",
+        fontSize: "0",
+        paddingTop: "0",
+        paddingBottom: "0",
       },
       ".cm-line-userPromptSeparator.cm-line-userPromptSeparatorHidden::before": {
         display: "none",
@@ -608,7 +1374,13 @@ function buildEditorTheme() {
       },
       ".cm-line-planSeparator": {
         position: "relative",
-        minHeight: "10px",
+        height: "0",
+        minHeight: "0",
+        lineHeight: "0",
+        fontSize: "16px",
+        paddingTop: "1.3em",
+        paddingBottom: "1.3em",
+        overflow: "visible",
       },
       ".cm-line-planSeparator::before": {
         content: '""',
@@ -645,7 +1417,13 @@ function buildEditorTheme() {
       },
       ".cm-line-checkpointSeparator": {
         position: "relative",
-        minHeight: "10px",
+        height: "0",
+        minHeight: "0",
+        lineHeight: "0",
+        fontSize: "16px",
+        paddingTop: "1.3em",
+        paddingBottom: "1.3em",
+        overflow: "visible",
       },
       ".cm-line-checkpointSeparator::before": {
         content: '""',
@@ -713,7 +1491,13 @@ function buildEditorTheme() {
       },
       ".cm-line-promptSeparator": {
         position: "relative",
-        minHeight: "12px",
+        height: "0",
+        minHeight: "0",
+        lineHeight: "0",
+        fontSize: "16px",
+        paddingTop: "1.3em",
+        paddingBottom: "1.3em",
+        overflow: "visible",
       },
       ".cm-line-promptSeparator::before": {
         content: '""',
@@ -723,9 +1507,6 @@ function buildEditorTheme() {
         top: "50%",
         borderTop: "1px solid rgba(230, 236, 242, 0.34)",
         transform: "translateY(-50%)",
-      },
-      ".cm-line-promptSeparator.cm-line-promptSeparatorPlan": {
-        minHeight: "16px",
       },
       ".cm-line-promptSeparator.cm-line-promptSeparatorPlan::before": {
         content: '"──── Plan mode "',
@@ -781,7 +1562,327 @@ function buildEditorTheme() {
         backgroundColor: "rgba(93, 72, 31, 0.22)",
       },
       ".cm-line-commandExec": {
-        color: "#8d949b",
+        minWidth: "0",
+      },
+      ".cm-commandWidgetSurface": {
+        color: "#ced5dc",
+        display: "flex",
+        alignItems: "center",
+        gap: "10px",
+        boxSizing: "border-box",
+        width: "100%",
+        maxWidth: "100%",
+        minWidth: "0",
+        fontSize: "12px",
+        lineHeight: "1.45",
+        padding: "5px 10px",
+        margin: "2px 0",
+        border: "1px solid rgba(123, 135, 146, 0.32)",
+        borderRadius: "10px",
+        backgroundColor: "rgba(17, 23, 29, 0.9)",
+        cursor: "pointer",
+        overflow: "hidden",
+        transition:
+          "max-height 180ms ease, background-color 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease",
+      },
+      ".cm-commandWidgetSurface:hover": {
+        backgroundColor: "rgba(22, 31, 38, 0.98)",
+        borderColor: "rgba(168, 180, 191, 0.48)",
+        boxShadow: "inset 0 0 0 1px rgba(205, 214, 223, 0.05)",
+      },
+      ".cm-commandWidgetSurfaceExpanded": {
+        alignItems: "flex-start",
+        flexWrap: "wrap",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemRunning": {
+        borderColor: "rgba(113, 178, 255, 0.44)",
+        backgroundColor: "rgba(18, 27, 36, 0.96)",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemDone": {
+        borderColor: "rgba(128, 146, 160, 0.34)",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemError": {
+        color: "#f0cbcb",
+        borderColor: "rgba(214, 108, 108, 0.42)",
+        backgroundColor: "rgba(41, 22, 24, 0.94)",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemDeclined": {
+        color: "#e0d1ae",
+        borderColor: "rgba(194, 154, 79, 0.38)",
+        backgroundColor: "rgba(40, 31, 17, 0.94)",
+      },
+      ".cm-commandWidgetLead": {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "6px",
+        flexShrink: "0",
+        whiteSpace: "nowrap",
+      },
+      ".cm-commandWidgetGlyph": {
+        color: "#d8e0e8",
+        fontWeight: "700",
+        flexShrink: "0",
+      },
+      ".cm-commandWidgetPrefix": {
+        color: "#a7b0b8",
+        fontWeight: "600",
+        flexShrink: "0",
+      },
+      ".cm-commandWidgetCommand": {
+        flex: "1 1 auto",
+        minWidth: "0",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      },
+      ".cm-commandWidgetMeta": {
+        color: "#7f8891",
+        flexShrink: "0",
+        whiteSpace: "nowrap",
+      },
+      ".cm-commandWidgetCounts": {
+        color: "#9aa4ad",
+      },
+      ".cm-commandWidgetCountAdded": {
+        color: "#63f28a",
+      },
+      ".cm-commandWidgetCountRemoved": {
+        color: "#ff7575",
+      },
+      ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetCommand": {
+        flex: "0 0 100%",
+        width: "100%",
+        overflow: "visible",
+        textOverflow: "clip",
+        whiteSpace: "pre-wrap",
+        overflowWrap: "anywhere",
+      },
+      ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetMeta": {
+        marginLeft: "auto",
+      },
+      ".cm-commandWidgetSurfaceExpanded.cm-commandWidgetSurfaceFileChange .cm-commandWidgetCommand": {
+        flex: "1 1 auto",
+        width: "auto",
+        minWidth: "0",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      },
+      ".cm-commandWidgetSurfaceExpanded.cm-commandWidgetSurfaceFileChange .cm-commandWidgetMeta": {
+        marginLeft: "0",
+      },
+      ".cm-commandWidgetInlineDiff": {
+        flexBasis: "100%",
+        minWidth: "0",
+        marginTop: "0",
+        paddingTop: "0",
+        borderTop: "none",
+      },
+      ".cm-inlineDiffStateMessage": {
+        padding: "4px 0 0",
+        color: "#a3adb7",
+        fontSize: "12px",
+      },
+      ".cm-commandWidgetInlineDiffError .cm-inlineDiffStateMessage": {
+        color: "#d8a6a6",
+      },
+      ".cm-inlineDiffFile": {
+        minWidth: "0",
+        overflow: "hidden",
+        borderRadius: "10px",
+        backgroundColor: "rgba(11, 16, 21, 0.74)",
+      },
+      ".cm-inlineDiffFile + .cm-inlineDiffFile": {
+        marginTop: "6px",
+      },
+      ".cm-inlineDiffRow": {
+        display: "grid",
+        gridTemplateColumns: "52px 12px minmax(0, 1fr)",
+        columnGap: "8px",
+        alignItems: "start",
+        minWidth: "0",
+        padding: "0 10px",
+      },
+      ".cm-inlineDiffRowContext": {
+        backgroundColor: "rgba(20, 26, 32, 0.58)",
+      },
+      ".cm-inlineDiffRowAddition": {
+        backgroundColor: "rgba(20, 60, 38, 0.5)",
+      },
+      ".cm-inlineDiffRowDeletion": {
+        backgroundColor: "rgba(66, 26, 29, 0.5)",
+      },
+      ".cm-inlineDiffLineNumber": {
+        color: "#72808d",
+        textAlign: "right",
+        userSelect: "none",
+      },
+      ".cm-inlineDiffMarker": {
+        color: "#8b97a3",
+        userSelect: "none",
+      },
+      ".cm-inlineDiffRowAddition .cm-inlineDiffMarker, .cm-inlineDiffRowAddition .cm-inlineDiffContent": {
+        color: "#9cf0b4",
+      },
+      ".cm-inlineDiffRowDeletion .cm-inlineDiffMarker, .cm-inlineDiffRowDeletion .cm-inlineDiffContent": {
+        color: "#ffb1b1",
+      },
+      ".cm-inlineDiffContent": {
+        minWidth: "0",
+        whiteSpace: "pre-wrap",
+        overflowWrap: "anywhere",
+      },
+      ".cm-inlineDiffFallback": {
+        margin: "0",
+        padding: "10px 12px",
+        color: "#c6d0d8",
+        backgroundColor: "rgba(11, 16, 21, 0.74)",
+        borderRadius: "10px",
+        whiteSpace: "pre-wrap",
+        overflowWrap: "anywhere",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetGlyph": {
+        color: "#8cc8ff",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetPrefix": {
+        color: "#82bff2",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemDone .cm-commandWidgetPrefix": {
+        color: "#c8d0d8",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemDone .cm-commandWidgetGlyph": {
+        color: "#d8e6d8",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemError .cm-commandWidgetPrefix": {
+        color: "#ff9d9d",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemError .cm-commandWidgetGlyph": {
+        color: "#ff9d9d",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemDeclined .cm-commandWidgetPrefix": {
+        color: "#f0c36a",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemDeclined .cm-commandWidgetGlyph": {
+        color: "#f0c36a",
+      },
+      ".cm-codeBlockSurface": {
+        position: "relative",
+        boxSizing: "border-box",
+        width: "100%",
+        maxWidth: "100%",
+        minWidth: "0",
+        margin: "6px 0",
+        padding: "14px 16px",
+        borderRadius: "12px",
+        backgroundColor: "rgba(22, 29, 36, 0.9)",
+        overflow: "hidden",
+      },
+      ".cm-codeBlockContent": {
+        minWidth: "0",
+        paddingRight: "72px",
+      },
+      ".cm-codeBlockLine": {
+        color: "#c7d0d8",
+        fontSize: "13px",
+        lineHeight: "1.55",
+        whiteSpace: "pre-wrap",
+        overflowWrap: "anywhere",
+      },
+      ".cm-codeBlockCopyButton": {
+        position: "absolute",
+        top: "10px",
+        right: "10px",
+        display: "inline-grid",
+        placeItems: "center",
+        appearance: "none",
+        border: "1px solid rgba(160, 172, 183, 0.22)",
+        borderRadius: "999px",
+        backgroundColor: "rgba(37, 47, 57, 0.95)",
+        color: "#b6c0c9",
+        padding: "4px 10px",
+        fontSize: "11px",
+        lineHeight: "1.2",
+        fontFamily: "inherit",
+        cursor: "pointer",
+        opacity: "0",
+        transform: "translateY(-4px) scale(0.96)",
+        pointerEvents: "none",
+        transition:
+          "opacity 320ms ease, transform 180ms ease",
+        transitionDelay: "0ms, 0ms",
+      },
+      ".cm-codeBlockCopyButtonLabel": {
+        display: "block",
+        gridArea: "1 / 1",
+        transition: "opacity 120ms ease",
+      },
+      ".cm-codeBlockCopyButtonStatus": {
+        display: "inline-block",
+        gridArea: "1 / 1",
+        textAlign: "center",
+        opacity: "0",
+        transform: "scale(0.85)",
+        transition: "opacity 120ms ease, transform 160ms ease",
+      },
+      ".cm-codeBlockSurface:hover .cm-codeBlockCopyButton": {
+        opacity: "1",
+        transform: "translateY(0) scale(1)",
+        pointerEvents: "auto",
+        transitionDelay: "100ms, 100ms",
+      },
+      ".cm-codeBlockSurface:focus-within .cm-codeBlockCopyButton": {
+        opacity: "1",
+        transform: "translateY(0) scale(1)",
+        pointerEvents: "auto",
+        transitionDelay: "0ms, 0ms",
+      },
+      ".cm-codeBlockSurfaceCopyFeedbackActive .cm-codeBlockCopyButton": {
+        opacity: "1",
+        transform: "translateY(0) scale(1)",
+        pointerEvents: "auto",
+        transitionDelay: "0ms, 0ms",
+      },
+      ".cm-codeBlockCopyButton:hover": {
+        backgroundColor: "rgba(48, 60, 71, 0.98)",
+        borderColor: "rgba(190, 200, 210, 0.34)",
+        color: "#e0e7ed",
+      },
+      ".cm-codeBlockCopyButtonCopied": {
+        backgroundColor: "rgba(48, 60, 71, 0.98)",
+        borderColor: "rgba(190, 200, 210, 0.34)",
+        color: "#e0e7ed",
+        animation: "cm-codeBlockCopyFeedback 110ms ease",
+      },
+      ".cm-codeBlockCopyButtonCopied .cm-codeBlockCopyButtonLabel": {
+        opacity: "0",
+      },
+      ".cm-codeBlockCopyButtonCopied .cm-codeBlockCopyButtonStatus": {
+        opacity: "1",
+        transform: "scale(1)",
+      },
+      ".cm-codeBlockCopyButtonFailed": {
+        backgroundColor: "rgba(84, 34, 40, 0.98)",
+        borderColor: "rgba(224, 112, 126, 0.48)",
+        color: "#ffe1e4",
+        animation: "cm-codeBlockCopyFeedback 220ms ease",
+      },
+      ".cm-codeBlockCopyButtonFailed .cm-codeBlockCopyButtonLabel": {
+        opacity: "0",
+      },
+      ".cm-codeBlockCopyButtonFailed .cm-codeBlockCopyButtonStatus": {
+        opacity: "1",
+        transform: "scale(1)",
+      },
+      "@keyframes cm-codeBlockCopyFeedback": {
+        "0%": {
+          transform: "translateY(0) scale(0.92)",
+        },
+        "55%": {
+          transform: "translateY(0) scale(1.05)",
+        },
+        "100%": {
+          transform: "translateY(0) scale(1)",
+        },
       },
       ".cm-line-commandOutput": { color: "#7a828b" },
     },
@@ -792,6 +1893,25 @@ function buildEditorTheme() {
 function getConversationScrollContainer(view: EditorView) {
   const scrollContainer = view.dom.closest(".conversation-scroll");
   return scrollContainer instanceof HTMLElement ? scrollContainer : null;
+}
+
+function preserveConversationScrollPosition(view: EditorView, update: () => void) {
+  const scrollContainer = getConversationScrollContainer(view);
+  if (!scrollContainer) {
+    update();
+    return;
+  }
+
+  const { scrollTop, scrollLeft } = scrollContainer;
+  update();
+  requestAnimationFrame(() => {
+    scrollContainer.scrollTop = scrollTop;
+    scrollContainer.scrollLeft = scrollLeft;
+    requestAnimationFrame(() => {
+      scrollContainer.scrollTop = scrollTop;
+      scrollContainer.scrollLeft = scrollLeft;
+    });
+  });
 }
 
 function isConversationScrollNearBottom(view: EditorView, thresholdPx = 24) {
@@ -894,6 +2014,14 @@ export function shouldRedirectHistoryTypingToPrompt(
   return event.key.length === 1;
 }
 
+export function shouldKeepCursorPaddingForTransactions(
+  transactions: ReadonlyArray<{
+    isUserEvent(event: string): boolean;
+  }>,
+) {
+  return transactions.some((transaction) => transaction.isUserEvent("select.keyboard"));
+}
+
 function clampStoredSelectionToPrompt(
   state: EditorState,
   selection: StoredSelection,
@@ -939,18 +2067,29 @@ function storePromptSelection(
   };
 }
 
-function resolvePromptSelection(
-  state: EditorState,
+export function resolvePromptSelectionForDocument(
+  promptStart: number,
+  docLength: number,
   stored: StoredPromptSelection | null,
 ): StoredSelection {
-  const promptStart = state.field(promptStartField);
-  const maxOffset = Math.max(0, state.doc.length - promptStart);
+  const maxOffset = Math.max(0, docLength - promptStart);
   const anchorOffset = Math.min(stored?.anchorOffset ?? maxOffset, maxOffset);
   const headOffset = Math.min(stored?.headOffset ?? maxOffset, maxOffset);
   return {
     anchor: promptStart + anchorOffset,
     head: promptStart + headOffset,
   };
+}
+
+function resolvePromptSelection(
+  state: EditorState,
+  stored: StoredPromptSelection | null,
+): StoredSelection {
+  return resolvePromptSelectionForDocument(
+    state.field(promptStartField),
+    state.doc.length,
+    stored,
+  );
 }
 
 function resolveHistorySelection(
@@ -974,6 +2113,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       onAddImageFiles,
       onDraftChange,
       onRemoveImage,
+      resolveInlineDiff,
       onSubmit,
       submitDisabled = false,
     },
@@ -990,10 +2130,22 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const draftRef = useRef("");
     const onSubmitRef = useRef(onSubmit);
     const onDraftChangeRef = useRef(onDraftChange);
+    const resolveInlineDiffRef = useRef(resolveInlineDiff);
     const submitDisabledRef = useRef(submitDisabled);
     const composerAttachmentsRef = useRef(composerAttachments);
+    const expandedCommandSignaturesRef = useRef<ReadonlySet<string>>(new Set());
+    const collapsedFileChangeSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const appliedDecorationSignatureRef = useRef("");
     const dragDepthRef = useRef(0);
+    const [expandedCommandSignatures, setExpandedCommandSignatures] = useState<ReadonlySet<string>>(
+      () => new Set(),
+    );
+    const [collapsedFileChangeSignatures, setCollapsedFileChangeSignatures] = useState<ReadonlySet<string>>(
+      () => new Set(),
+    );
+    const [resolvedInlineDiffBySignature, setResolvedInlineDiffBySignature] = useState<
+      ReadonlyMap<string, InlineDiffResolutionState>
+    >(() => new Map());
     const [isDraggingImages, setIsDraggingImages] = useState(false);
     const [draft, setDraft] = useState("");
 
@@ -1001,15 +2153,91 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       draftRef.current = draft;
       onSubmitRef.current = onSubmit;
       onDraftChangeRef.current = onDraftChange;
+      resolveInlineDiffRef.current = resolveInlineDiff;
       submitDisabledRef.current = submitDisabled;
       composerAttachmentsRef.current = composerAttachments;
-    }, [composerAttachments, draft, onDraftChange, onSubmit, submitDisabled]);
+      expandedCommandSignaturesRef.current = expandedCommandSignatures;
+      collapsedFileChangeSignaturesRef.current = collapsedFileChangeSignatures;
+    }, [
+      collapsedFileChangeSignatures,
+      composerAttachments,
+      draft,
+      expandedCommandSignatures,
+      onDraftChange,
+      onSubmit,
+      resolveInlineDiff,
+      submitDisabled,
+    ]);
 
     const docModel = useMemo(
-      () => buildTranscriptDocument(blocks, draft, interactionMode, pendingUserInputHighlight),
-      [blocks, draft, interactionMode, pendingUserInputHighlight],
+      () =>
+        buildTranscriptDocument(
+          blocks,
+          draft,
+          interactionMode,
+          expandedCommandSignatures,
+          collapsedFileChangeSignatures,
+          resolvedInlineDiffBySignature,
+          pendingUserInputHighlight,
+        ),
+      [blocks, draft, expandedCommandSignatures, collapsedFileChangeSignatures, interactionMode, pendingUserInputHighlight, resolvedInlineDiffBySignature],
     );
     const initialDocModelRef = useRef(docModel);
+    const docModelRef = useRef(docModel);
+
+    useEffect(() => {
+      docModelRef.current = docModel;
+    }, [docModel]);
+
+    const requestInlineDiff = useCallback((signature: string, lookup: InlineDiffLookup) => {
+      const resolver = resolveInlineDiffRef.current;
+      if (!resolver) {
+        return;
+      }
+
+      let shouldFetch = false;
+      setResolvedInlineDiffBySignature((current) => {
+        const existing = current.get(signature);
+        if (existing?.status === "loading" || existing?.status === "ready") {
+          return current;
+        }
+        const next = new Map(current);
+        next.set(signature, { status: "loading" });
+        shouldFetch = true;
+        return next;
+      });
+
+      if (!shouldFetch) {
+        return;
+      }
+
+      void resolver(lookup)
+        .then((diff) => {
+          const normalizedDiff = diff?.trim();
+          setResolvedInlineDiffBySignature((current) => {
+            const next = new Map(current);
+            if (normalizedDiff && normalizedDiff.length > 0) {
+              next.set(signature, { status: "ready", diff: normalizedDiff });
+            } else {
+              next.set(signature, { status: "error" });
+            }
+            return next;
+          });
+        })
+        .catch(() => {
+          setResolvedInlineDiffBySignature((current) => {
+            const next = new Map(current);
+            next.set(signature, { status: "error" });
+            return next;
+          });
+        });
+    }, []);
+
+    useEffect(() => {
+      for (const [signature, lookup] of docModel.defaultExpandedInlineDiffSignatures) {
+        requestInlineDiff(signature, lookup);
+      }
+    }, [docModel.defaultExpandedInlineDiffSignatures, requestInlineDiff]);
 
     const focusPromptRegion = useCallback((view: EditorView) => {
       activeRegionRef.current = "prompt";
@@ -1117,6 +2345,37 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         activeRegionRef.current = nextRegion;
       },
       [storeSelectionForRegion],
+    );
+
+    const resolveCommandWidgetSignatureFromMouseEvent = useCallback(
+      (_view: EditorView, event: MouseEvent) => {
+        const target = event.target;
+        if (!(target instanceof Node)) {
+          return null;
+        }
+
+        const commandSurface =
+          target instanceof Element
+            ? target.closest(".cm-commandWidgetSurface")
+            : target.parentElement?.closest(".cm-commandWidgetSurface");
+        if (commandSurface instanceof HTMLElement && commandSurface.dataset.commandWidgetSignature) {
+          return commandSurface.dataset.commandWidgetSignature;
+        }
+
+        const commandLine =
+          target instanceof Element
+            ? target.closest(".cm-line-commandWidget")
+            : target.parentElement?.closest(".cm-line-commandWidget");
+        if (!(commandLine instanceof HTMLElement)) {
+          return null;
+        }
+
+        const linePosition = _view.posAtDOM(commandLine, 0);
+        const lineFrom = _view.state.doc.lineAt(linePosition).from;
+        const line = docModelRef.current.lines.find((entry) => entry.from === lineFrom);
+        return line?.commandWidgetSignature ?? null;
+      },
+      [],
     );
 
     useImperativeHandle(ref, () => ({
@@ -1275,6 +2534,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                 initialDocModel.lines,
                 initialDocModel.marks,
                 initialDocModel.widgets,
+                initialDocModel.replacements,
                 initialDocModel.promptStart,
               ),
             ),
@@ -1298,7 +2558,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             };
             storeSelectionForRegion(update.state, activeRegionRef.current, currentSelection);
 
-            if (update.selectionSet || update.docChanged) {
+            if (update.selectionSet && shouldKeepCursorPaddingForTransactions(update.transactions)) {
               requestAnimationFrame(() => {
                 keepCursorWithinViewportPadding(update.view);
               });
@@ -1314,16 +2574,60 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                 selection: EditorSelection.range(nextSelection.anchor, nextSelection.head),
                 annotations: syncAnnotation.of(true),
               });
-
-              requestAnimationFrame(() => {
-                keepCursorWithinViewportPadding(view);
-              });
             },
             mousedown(_event, view) {
+              if (resolveCommandWidgetSignatureFromMouseEvent(view, _event)) {
+                _event.preventDefault();
+                return true;
+              }
               updateActiveRegionFromPointer(view, _event);
-              requestAnimationFrame(() => {
-                keepCursorWithinViewportPadding(view);
+              return false;
+            },
+            click(event, view) {
+              const signature = resolveCommandWidgetSignatureFromMouseEvent(view, event);
+              if (!signature) {
+                return false;
+              }
+              event.preventDefault();
+              preserveConversationScrollPosition(view, () => {
+                if (docModelRef.current.fileChangeWidgetSignatures.has(signature)) {
+                  const shouldExpand = collapsedFileChangeSignaturesRef.current.has(signature);
+                  if (shouldExpand && !docModelRef.current.inlineDiffContentBySignature.has(signature)) {
+                    const inlineDiffLookup = docModelRef.current.inlineDiffLookupsBySignature.get(signature);
+                    if (inlineDiffLookup) {
+                      requestInlineDiff(signature, inlineDiffLookup);
+                    }
+                  }
+                  setCollapsedFileChangeSignatures((current) => {
+                    const next = new Set(current);
+                    if (next.has(signature)) {
+                      next.delete(signature);
+                    } else {
+                      next.add(signature);
+                    }
+                    return next;
+                  });
+                  return;
+                }
+
+                const shouldExpand = !expandedCommandSignaturesRef.current.has(signature);
+                if (shouldExpand && !docModelRef.current.inlineDiffContentBySignature.has(signature)) {
+                  const inlineDiffLookup = docModelRef.current.inlineDiffLookupsBySignature.get(signature);
+                  if (inlineDiffLookup) {
+                    requestInlineDiff(signature, inlineDiffLookup);
+                  }
+                }
+                setExpandedCommandSignatures((current) => {
+                  const next = new Set(current);
+                  if (next.has(signature)) {
+                    next.delete(signature);
+                  } else {
+                    next.add(signature);
+                  }
+                  return next;
+                });
               });
+              return true;
             },
             keydown(event, view) {
               if (activeRegionRef.current !== "history") {
@@ -1373,7 +2677,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         view.destroy();
         viewRef.current = null;
       };
-    }, [focusPromptRegion, redirectHistoryTypingToPrompt, storeSelectionForRegion, updateActiveRegionFromPointer]);
+    }, [
+      focusPromptRegion,
+      requestInlineDiff,
+      redirectHistoryTypingToPrompt,
+      resolveCommandWidgetSignatureFromMouseEvent,
+      storeSelectionForRegion,
+      updateActiveRegionFromPointer,
+    ]);
 
     useEffect(() => {
       const view = viewRef.current;
@@ -1396,12 +2707,34 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       const minimalDocChange = isTextStable ? null : computeMinimalDocChange(currentText, docModel.text);
 
       syncingViewRef.current = true;
+      const syncedPromptSelection =
+        activeRegionRef.current === "prompt"
+          ? resolvePromptSelectionForDocument(
+              docModel.promptStart,
+              docModel.text.length,
+              promptSelectionRef.current,
+            )
+          : null;
       view.dispatch({
         ...(minimalDocChange ? { changes: minimalDocChange } : {}),
+        ...(syncedPromptSelection
+          ? {
+              selection: EditorSelection.range(
+                syncedPromptSelection.anchor,
+                syncedPromptSelection.head,
+              ),
+            }
+          : {}),
         effects: [
           decorationsCompartment.reconfigure(
             EditorView.decorations.of(
-              buildDecorations(docModel.lines, docModel.marks, docModel.widgets, docModel.promptStart),
+              buildDecorations(
+                docModel.lines,
+                docModel.marks,
+                docModel.widgets,
+                docModel.replacements,
+                docModel.promptStart,
+              ),
             ),
           ),
           setPromptStartEffect.of(docModel.promptStart),

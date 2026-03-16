@@ -70,6 +70,11 @@ export interface ConsoleDataState {
   getThreadEvents(threadId: string | null): ReadonlyArray<OrchestrationEvent>;
   getPendingUserInputs(threadId: string | null): ReadonlyArray<ConsolePendingUserInput>;
   getProjectForThread(threadId: string | null): OrchestrationProject | null;
+  getTurnDiff(input: {
+    threadId: ThreadId;
+    fromTurnCount: number;
+    toTurnCount: number;
+  }): Promise<string>;
   isThreadTurnRunning(threadId: string | null): boolean;
   canSubmitPromptForThread(threadId: string | null): boolean;
   submitPrompt(input: {
@@ -1146,6 +1151,15 @@ export function useConsoleData(): ConsoleDataState {
     }
   }, [assertLiveCommandReady, backend, threads]);
 
+  const getTurnDiff = useCallback(async (input: {
+    threadId: ThreadId;
+    fromTurnCount: number;
+    toTurnCount: number;
+  }) => {
+    const result = await backend.getTurnDiff(input);
+    return result.diff;
+  }, [backend]);
+
   return {
     connectionState,
     snapshot,
@@ -1168,6 +1182,7 @@ export function useConsoleData(): ConsoleDataState {
     getThreadEvents,
     getPendingUserInputs,
     getProjectForThread,
+    getTurnDiff,
     isThreadTurnRunning,
     canSubmitPromptForThread,
     submitPrompt,

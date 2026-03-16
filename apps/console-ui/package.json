@@ -22,6 +22,7 @@
     "@codemirror/view": "^6.0.0",
     "@lezer/common": "^1.0.0",
     "@lezer/highlight": "^1.0.0",
+    "@pierre/diffs": "^1.1.0-beta.16",
     "@t3tools/contracts": "workspace:*",
     "effect": "catalog:",
     "react": "^19.0.0",

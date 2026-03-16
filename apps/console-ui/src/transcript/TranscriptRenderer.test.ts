@@ -4,8 +4,10 @@ import { EditorState } from "@codemirror/state";
 import {
   getHistorySelectionLimitForPromptStart,
   promptSeparatorClassesForInteractionMode,
+  resolvePromptSelectionForDocument,
   resolveTranscriptRegionForPointer,
   resolveTranscriptRegionForPosition,
+  shouldKeepCursorPaddingForTransactions,
   shouldRedirectHistoryTypingToPrompt,
 } from "./TranscriptRenderer";
 
@@ -56,6 +58,30 @@ describe("promptSeparatorClassesForInteractionMode", () => {
   });
 });
 
+describe("resolvePromptSelectionForDocument", () => {
+  it("preserves the prompt-relative caret when history growth shifts promptStart", () => {
+    expect(
+      resolvePromptSelectionForDocument(42, 47, {
+        anchorOffset: 3,
+        headOffset: 3,
+      }),
+    ).toEqual({ anchor: 45, head: 45 });
+  });
+
+  it("falls back to the end of the prompt when no stored selection exists", () => {
+    expect(resolvePromptSelectionForDocument(12, 16, null)).toEqual({ anchor: 16, head: 16 });
+  });
+
+  it("clamps stale offsets to the new prompt bounds", () => {
+    expect(
+      resolvePromptSelectionForDocument(30, 32, {
+        anchorOffset: 8,
+        headOffset: 8,
+      }),
+    ).toEqual({ anchor: 32, head: 32 });
+  });
+});
+
 describe("shouldRedirectHistoryTypingToPrompt", () => {
   it("redirects plain printable keys", () => {
     expect(
@@ -72,6 +98,32 @@ describe("shouldRedirectHistoryTypingToPrompt", () => {
     ).toBe(false);
     expect(
       shouldRedirectHistoryTypingToPrompt({ key: "Enter", ctrlKey: false, metaKey: false, altKey: false }),
+    ).toBe(false);
+  });
+});
+
+describe("shouldKeepCursorPaddingForTransactions", () => {
+  it("applies viewport padding for keyboard selection changes", () => {
+    expect(
+      shouldKeepCursorPaddingForTransactions([
+        {
+          isUserEvent(event: string) {
+            return event === "select.keyboard";
+          },
+        },
+      ]),
+    ).toBe(true);
+  });
+
+  it("ignores pointer-driven selection changes", () => {
+    expect(
+      shouldKeepCursorPaddingForTransactions([
+        {
+          isUserEvent() {
+            return false;
+          },
+        },
+      ]),
     ).toBe(false);
   });
 });
