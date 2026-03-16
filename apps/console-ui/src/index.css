@@ -175,37 +175,8 @@ body {
   background: transparent;
 }
 
-.conversation-pane--active .conversation-pane__header {
-  border-color: rgba(87, 150, 214, 0.3);
-  color: #d6dbe0;
-}
-
 .conversation-pane--active .transcript-shell {
   border-color: rgba(87, 150, 214, 0.28);
-}
-
-.conversation-pane__header {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 12px 8px;
-  border-bottom: 1px solid rgba(95, 103, 111, 0.16);
-  color: #76808a;
-  font-size: 12px;
-  line-height: 1.2;
-}
-
-.conversation-pane__label {
-  flex-shrink: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.conversation-pane__meta {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .transcript-shell {
@@ -213,7 +184,7 @@ body {
 }
 
 .conversation-pane .transcript-shell {
-  height: calc(100% - 26px);
+  height: 100%;
   overflow: auto;
   border: 1px solid rgba(95, 103, 111, 0.14);
   border-bottom: 0;

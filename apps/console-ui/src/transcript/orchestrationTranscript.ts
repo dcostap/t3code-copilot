@@ -6,6 +6,7 @@ import type {
 
 import type {
   TranscriptBlock,
+  InlineDiffLookup,
   UserInputRequestBlock,
   WorkGroupItem,
 } from "./TranscriptBlock";
@@ -303,6 +304,61 @@ function extractFileChangeStats(
   };
 }
 
+function buildSyntheticUnifiedDiffHeader(
+  path: string,
+  kindRecord: Record<string, unknown> | null,
+) {
+  const kindType = (asString(kindRecord?.type) ?? "update").toLowerCase();
+  const movePath = asString(kindRecord?.move_path);
+  const diffOldPath = movePath ?? path;
+  const diffNewPath = path;
+  const oldPath =
+    kindType === "new" || kindType === "create" || kindType === "add"
+      ? "/dev/null"
+      : `a/${diffOldPath}`;
+  const newPath =
+    kindType === "delete" || kindType === "remove"
+      ? "/dev/null"
+      : `b/${diffNewPath}`;
+  return [
+    `diff --git a/${diffOldPath} b/${diffNewPath}`,
+    `--- ${oldPath}`,
+    `+++ ${newPath}`,
+  ].join("\n");
+}
+
+function extractFileChangeUnifiedDiff(payload: Record<string, unknown> | null): string | null {
+  const item = asRecord(asRecord(payload?.data)?.item);
+  const changes = Array.isArray(item?.changes) ? item.changes : [];
+  if (changes.length === 0) {
+    return null;
+  }
+
+  const patches: string[] = [];
+  for (const change of changes) {
+    const record = asRecord(change);
+    const diff = asString(record?.diff)?.replace(/\r\n/g, "\n").trim();
+    const path =
+      asString(record?.path) ??
+      asString(record?.filePath) ??
+      asString(record?.relativePath) ??
+      asString(record?.filename);
+    if (!diff || !path) {
+      continue;
+    }
+
+    if (diff.startsWith("diff --git ")) {
+      patches.push(`${diff}\n`);
+      continue;
+    }
+
+    const kindRecord = asRecord(record?.kind);
+    patches.push(`${buildSyntheticUnifiedDiffHeader(path, kindRecord)}\n${diff}\n`);
+  }
+
+  return patches.length > 0 ? patches.join("\n") : null;
+}
+
 function uniqueStrings(values: ReadonlyArray<string>) {
   return [...new Set(values)];
 }
@@ -469,6 +525,7 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
   const status = resolveActivityStatus(payload?.status, activity.kind);
   const label = asString(payload?.title) ?? activity.summary;
   const fileChangeStats = itemType === "file_change" ? extractFileChangeStats(payload) : null;
+  const fileChangeUnifiedDiff = itemType === "file_change" ? extractFileChangeUnifiedDiff(payload) : null;
   const itemId = extractWorkItemId(payload);
 
   if (itemType === "file_change") {
@@ -482,6 +539,7 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
       ...(fileChangeStats?.changedFiles?.length ? { changedFiles: fileChangeStats.changedFiles } : changedFiles.length > 0 ? { changedFiles } : {}),
       ...(typeof fileChangeStats?.additions === "number" ? { additions: fileChangeStats.additions } : {}),
       ...(typeof fileChangeStats?.deletions === "number" ? { deletions: fileChangeStats.deletions } : {}),
+      ...(fileChangeUnifiedDiff ? { inlineUnifiedDiff: fileChangeUnifiedDiff } : {}),
     };
   }
 
@@ -564,6 +622,7 @@ function workGroupStatus(items: ReadonlyArray<WorkGroupItem>): "running" | "done
 
 function workItemsToBlock(
   items: ReadonlyArray<{ activity: OrchestrationThreadActivity; item: PendingWorkItem }>,
+  inlineDiffLookupByTurnId: ReadonlyMap<string, InlineDiffLookup>,
   now?: string,
   pulseOriginAt?: string,
 ): TranscriptBlock | null {
@@ -574,23 +633,36 @@ function workItemsToBlock(
   const mergedItems: PendingWorkItem[] = [];
   const mergedIndexByKey = new Map<string, number>();
   for (const entry of items) {
-    const existingIndex = mergedIndexByKey.get(entry.item.mergeKey);
+    const inlineDiffLookup =
+      entry.item.kind === "file-change"
+      && !entry.item.inlineUnifiedDiff
+      && entry.activity.turnId
+        ? inlineDiffLookupByTurnId.get(entry.activity.turnId)
+        : undefined;
+    const itemWithInlineDiffLookup =
+      inlineDiffLookup
+        ? {
+            ...entry.item,
+            inlineDiffLookup,
+          }
+        : entry.item;
+    const existingIndex = mergedIndexByKey.get(itemWithInlineDiffLookup.mergeKey);
     if (existingIndex !== undefined) {
       const existing = mergedItems[existingIndex];
-      if (existing && canMergeWorkItems(existing, entry.item)) {
-        mergedItems[existingIndex] = mergeWorkItems(existing, entry.item);
+      if (existing && canMergeWorkItems(existing, itemWithInlineDiffLookup)) {
+        mergedItems[existingIndex] = mergeWorkItems(existing, itemWithInlineDiffLookup);
         continue;
       }
     }
 
     const previous = mergedItems.at(-1);
-    if (previous && canMergeWorkItems(previous, entry.item)) {
-      mergedItems[mergedItems.length - 1] = mergeWorkItems(previous, entry.item);
-      mergedIndexByKey.set(entry.item.mergeKey, mergedItems.length - 1);
+    if (previous && canMergeWorkItems(previous, itemWithInlineDiffLookup)) {
+      mergedItems[mergedItems.length - 1] = mergeWorkItems(previous, itemWithInlineDiffLookup);
+      mergedIndexByKey.set(itemWithInlineDiffLookup.mergeKey, mergedItems.length - 1);
       continue;
     }
-    mergedIndexByKey.set(entry.item.mergeKey, mergedItems.length);
-    mergedItems.push(entry.item);
+    mergedIndexByKey.set(itemWithInlineDiffLookup.mergeKey, mergedItems.length);
+    mergedItems.push(itemWithInlineDiffLookup);
   }
 
   const startedAt = items[0]?.activity.createdAt;
@@ -1001,6 +1073,16 @@ export function threadToTranscriptBlocks(
   }
 
   const blocks: TranscriptBlock[] = [];
+  const inlineDiffLookupByTurnId = new Map<string, InlineDiffLookup>(
+    thread.checkpoints.map((checkpoint) => [
+      checkpoint.turnId,
+      {
+        threadId: thread.id,
+        fromTurnCount: Math.max(0, checkpoint.checkpointTurnCount - 1),
+        toTurnCount: checkpoint.checkpointTurnCount,
+      },
+    ]),
+  );
   let pendingWorkItems: Array<{ activity: OrchestrationThreadActivity; item: PendingWorkItem }> = [];
   let pendingWorkTurnId: OrchestrationThreadActivity["turnId"] = null;
   const activePulseOriginAt =
@@ -1010,7 +1092,12 @@ export function threadToTranscriptBlocks(
     ?? thread.updatedAt;
 
   const flushWorkItems = () => {
-    const block = workItemsToBlock(pendingWorkItems, options.now, activePulseOriginAt);
+    const block = workItemsToBlock(
+      pendingWorkItems,
+      inlineDiffLookupByTurnId,
+      options.now,
+      activePulseOriginAt,
+    );
     if (block) {
       blocks.push(block);
     }
@@ -1063,6 +1150,20 @@ export function threadToTranscriptBlocks(
       type: "working-state",
       startedAt,
       now,
+    });
+  } else if (thread.latestTurn?.state === "interrupted") {
+    const startedAt =
+      thread.latestTurn.startedAt
+      ?? thread.latestTurn.requestedAt
+      ?? thread.updatedAt;
+    const interruptedAt =
+      thread.session?.updatedAt
+      ?? thread.latestTurn.completedAt
+      ?? thread.updatedAt;
+    blocks.push({
+      type: "interrupted-state",
+      startedAt,
+      interruptedAt,
     });
   }
 

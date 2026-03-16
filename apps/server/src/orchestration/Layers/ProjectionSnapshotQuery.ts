@@ -35,6 +35,7 @@ import { ProjectionThreadMessage } from "../../persistence/Services/ProjectionTh
 import { ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
+import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import {
   ProjectionSnapshotQuery,
@@ -99,6 +100,36 @@ function maxIso(left: string | null, right: string): string {
   return left > right ? left : right;
 }
 
+function reconcileProjectedSession(
+  session: OrchestrationSession | null,
+  activeProviderSessionThreadIds: ReadonlySet<string>,
+): OrchestrationSession | null {
+  if (!session || session.status !== "running" || activeProviderSessionThreadIds.has(session.threadId)) {
+    return session;
+  }
+
+  return {
+    ...session,
+    status: "stopped",
+    activeTurnId: null,
+  };
+}
+
+function reconcileLatestTurn(
+  latestTurn: OrchestrationLatestTurn | null,
+  threadId: string,
+  activeProviderSessionThreadIds: ReadonlySet<string>,
+): OrchestrationLatestTurn | null {
+  if (!latestTurn || latestTurn.state !== "running" || activeProviderSessionThreadIds.has(threadId)) {
+    return latestTurn;
+  }
+
+  return {
+    ...latestTurn,
+    state: "interrupted",
+  };
+}
+
 function computeSnapshotSequence(
   stateRows: ReadonlyArray<Schema.Schema.Type<typeof ProjectionStateDbRowSchema>>,
 ): number {
@@ -132,6 +163,7 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const providerService = yield* ProviderService;
 
   const listProjectRows = SqlSchema.findAll({
     Request: Schema.Void,
@@ -311,9 +343,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   const getSnapshot: ProjectionSnapshotQueryShape["getSnapshot"] = () =>
-    sql
-      .withTransaction(
-        Effect.gen(function* () {
+    providerService
+      .listSessions()
+      .pipe(
+        Effect.map((sessions) => new Set(sessions.map((session) => session.threadId))),
+        Effect.orElseSucceed(() => new Set<string>()),
+        Effect.flatMap((activeProviderSessionThreadIds) =>
+          sql.withTransaction(
+            Effect.gen(function* () {
           const [
             projectRows,
             threadRows,
@@ -531,6 +568,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           }));
 
           const threads: Array<OrchestrationThread> = threadRows.map((row) => {
+            const session = reconcileProjectedSession(
+              sessionsByThread.get(row.threadId) ?? null,
+              activeProviderSessionThreadIds,
+            );
+            const latestTurn = reconcileLatestTurn(
+              latestTurnByThread.get(row.threadId) ?? null,
+              row.threadId,
+              activeProviderSessionThreadIds,
+            );
             const threadBase: OrchestrationThread = {
               id: row.threadId,
               projectId: row.projectId,
@@ -540,7 +586,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               interactionMode: row.interactionMode,
               branch: row.branch,
               worktreePath: row.worktreePath,
-              latestTurn: latestTurnByThread.get(row.threadId) ?? null,
+              latestTurn,
               createdAt: row.createdAt,
               updatedAt: row.updatedAt,
               deletedAt: row.deletedAt,
@@ -548,7 +594,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
               activities: activitiesByThread.get(row.threadId) ?? [],
               checkpoints: checkpointsByThread.get(row.threadId) ?? [],
-              session: sessionsByThread.get(row.threadId) ?? null,
+              session,
             };
             return row.modelOptions !== null
               ? Object.assign({}, threadBase, { modelOptions: row.modelOptions })
@@ -567,7 +613,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               toPersistenceDecodeError("ProjectionSnapshotQuery.getSnapshot:decodeReadModel"),
             ),
           );
-        }),
+            }),
+          ),
+        ),
       )
       .pipe(
         Effect.mapError((error) => {

@@ -4,6 +4,7 @@ import { Effect, Layer } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { ProviderService, type ProviderServiceShape } from "../../provider/Services/ProviderService.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -14,8 +15,24 @@ const asMessageId = (value: string): MessageId => MessageId.makeUnsafe(value);
 const asEventId = (value: string): EventId => EventId.makeUnsafe(value);
 const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.makeUnsafe(value);
 
+const providerLayer = Layer.succeed(ProviderService, {
+  listSessions: () =>
+    Effect.succeed([{
+      provider: "codex",
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: ThreadId.makeUnsafe("thread-1"),
+      activeTurnId: TurnId.makeUnsafe("turn-1"),
+      createdAt: "2026-02-24T00:00:06.000Z",
+      updatedAt: "2026-02-24T00:00:07.000Z",
+    }]),
+} as unknown as ProviderServiceShape);
+
 const projectionSnapshotLayer = it.layer(
-  OrchestrationProjectionSnapshotQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+  OrchestrationProjectionSnapshotQueryLive.pipe(
+    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(providerLayer),
+  ),
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
@@ -284,6 +301,183 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             activeTurnId: asTurnId("turn-1"),
             lastError: null,
             updatedAt: "2026-02-24T00:00:07.000Z",
+          },
+        },
+      ]);
+    }),
+  );
+
+  it.effect("marks missing live running sessions as interrupted in the snapshot", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_thread_proposed_plans`;
+      yield* sql`DELETE FROM projection_thread_sessions`;
+      yield* sql`DELETE FROM projection_turns`;
+      yield* sql`DELETE FROM projection_state`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'project-2',
+          'Project 2',
+          '/tmp/project-2',
+          'gpt-5-codex',
+          '[]',
+          '2026-02-25T00:00:00.000Z',
+          '2026-02-25T00:00:01.000Z',
+          NULL
+        )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'thread-2',
+          'project-2',
+          'Thread 2',
+          'gpt-5-codex',
+          NULL,
+          NULL,
+          'turn-2',
+          '2026-02-25T00:00:02.000Z',
+          '2026-02-25T00:00:03.000Z',
+          NULL
+        )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id,
+          status,
+          provider_name,
+          provider_session_id,
+          provider_thread_id,
+          runtime_mode,
+          active_turn_id,
+          last_error,
+          updated_at
+        )
+        VALUES (
+          'thread-2',
+          'running',
+          'codex',
+          'provider-session-2',
+          'provider-thread-2',
+          'approval-required',
+          'turn-2',
+          NULL,
+          '2026-02-25T00:00:07.000Z'
+        )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id,
+          turn_id,
+          pending_message_id,
+          assistant_message_id,
+          state,
+          requested_at,
+          started_at,
+          completed_at,
+          checkpoint_turn_count,
+          checkpoint_ref,
+          checkpoint_status,
+          checkpoint_files_json
+        )
+        VALUES (
+          'thread-2',
+          'turn-2',
+          NULL,
+          NULL,
+          'running',
+          '2026-02-25T00:00:04.000Z',
+          '2026-02-25T00:00:05.000Z',
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          '[]'
+        )
+      `;
+
+      let sequence = 20;
+      for (const projector of Object.values(ORCHESTRATION_PROJECTOR_NAMES)) {
+        yield* sql`
+          INSERT INTO projection_state (
+            projector,
+            last_applied_sequence,
+            updated_at
+          )
+          VALUES (
+            ${projector},
+            ${sequence},
+            '2026-02-25T00:00:08.000Z'
+          )
+        `;
+        sequence += 1;
+      }
+
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      assert.deepEqual(snapshot.threads, [
+        {
+          id: ThreadId.makeUnsafe("thread-2"),
+          projectId: asProjectId("project-2"),
+          title: "Thread 2",
+          model: "gpt-5-codex",
+          interactionMode: "default",
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          latestTurn: {
+            turnId: asTurnId("turn-2"),
+            state: "interrupted",
+            requestedAt: "2026-02-25T00:00:04.000Z",
+            startedAt: "2026-02-25T00:00:05.000Z",
+            completedAt: null,
+            assistantMessageId: null,
+          },
+          createdAt: "2026-02-25T00:00:02.000Z",
+          updatedAt: "2026-02-25T00:00:03.000Z",
+          deletedAt: null,
+          messages: [],
+          proposedPlans: [],
+          activities: [],
+          checkpoints: [],
+          session: {
+            threadId: ThreadId.makeUnsafe("thread-2"),
+            status: "stopped",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-02-25T00:00:07.000Z",
           },
         },
       ]);

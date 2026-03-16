@@ -173,34 +173,76 @@ describe("blockToLines", () => {
             changedFiles: ["C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt"],
             additions: 3,
             deletions: 0,
+            inlineUnifiedDiff:
+              'diff --git a/C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt b/C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt\n--- a/C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt\n+++ b/C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt\n@@ -1 +1,3 @@\n-old line\n+new line\n+extra line\n',
           },
         ],
       }),
     ).toEqual([
       {
-        text: "",
-        kind: "workGroupSeparator",
-      },
-      {
-        text: "Edited file",
-        kind: "workGroupHeader",
-      },
-      {
-        text: '      "C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt" (+3, -0)',
-        kind: "fileChangeSummary",
+        text: '✓ Edited (+3, -0)  C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt  Completed in 0.0s',
+        kind: "commandExec",
+        extraClasses: ["cm-line-workItemDone", "cm-line-commandWidget"],
+        commandWidgetSignature:
+          '2026-03-13T10:57:31.912Z:0:C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt',
+        inlineUnifiedDiff: 'diff --git a/C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt b/C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt\n--- a/C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt\n+++ b/C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt\n@@ -1 +1,3 @@\n-old line\n+new line\n+extra line\n',
+        inlineDiffChangedFiles: ["C:\\Users\\Dario Costa\\Desktop\\lorem-ipsum.txt"],
         highlightSpans: [
-          { from: 54, to: 56, className: "tok-added" },
-          { from: 58, to: 60, className: "tok-removed" },
+          { from: 0, to: 1, className: "tok-commandWidgetGlyph" },
+          { from: 2, to: 8, className: "tok-commandWidgetPrefix" },
+          { from: 10, to: 12, className: "tok-added" },
+          { from: 14, to: 16, className: "tok-removed" },
+          { from: 65, to: 82, className: "tok-commandWidgetMeta" },
         ],
       },
+      { text: "", kind: "workGroupSeparator" },
+    ]);
+  });
+
+  it("preserves lazy diff lookup metadata on edited-file widgets", () => {
+    expect(
+      blockToLines({
+        type: "work-group",
+        title: "File change",
+        status: "done",
+        startedAt: "2026-03-13T10:57:31.912Z",
+        endedAt: "2026-03-13T10:57:31.931Z",
+        items: [
+          {
+            kind: "file-change",
+            label: "File change",
+            status: "done",
+            changedFiles: ["src/example.ts"],
+            additions: 2,
+            deletions: 1,
+            inlineDiffLookup: {
+              threadId: "thread-1",
+              fromTurnCount: 0,
+              toTurnCount: 1,
+            },
+          },
+        ],
+      }),
+    ).toEqual([
       {
-        text: "completed in 0.0s",
-        kind: "workGroupFooter",
+        text: '✓ Edited (+2, -1)  src/example.ts  Completed in 0.0s',
+        kind: "commandExec",
+        extraClasses: ["cm-line-workItemDone", "cm-line-commandWidget"],
+        commandWidgetSignature: "2026-03-13T10:57:31.912Z:0:src/example.ts",
+        inlineDiffLookup: {
+          threadId: "thread-1",
+          fromTurnCount: 0,
+          toTurnCount: 1,
+        },
+        highlightSpans: [
+          { from: 0, to: 1, className: "tok-commandWidgetGlyph" },
+          { from: 2, to: 8, className: "tok-commandWidgetPrefix" },
+          { from: 10, to: 12, className: "tok-added" },
+          { from: 14, to: 16, className: "tok-removed" },
+          { from: 35, to: 52, className: "tok-commandWidgetMeta" },
+        ],
       },
-      {
-        text: "",
-        kind: "workGroupSeparator",
-      },
+      { text: "", kind: "workGroupSeparator" },
     ]);
   });
 
@@ -220,6 +262,8 @@ describe("blockToLines", () => {
             changedFiles: ["src/one.ts"],
             additions: 2,
             deletions: 1,
+            inlineUnifiedDiff:
+              'diff --git a/src/one.ts b/src/one.ts\n--- a/src/one.ts\n+++ b/src/one.ts\n@@ -1 +1,2 @@\n-old one\n+new one\n+extra one\n',
           },
           {
             kind: "file-change",
@@ -228,29 +272,74 @@ describe("blockToLines", () => {
             changedFiles: ["src/two.ts"],
             additions: 4,
             deletions: 0,
+            inlineUnifiedDiff:
+              'diff --git a/src/two.ts b/src/two.ts\n--- a/src/two.ts\n+++ b/src/two.ts\n@@ -3 +3 @@\n-old two\n+new two\n',
           },
         ],
       }),
     ).toEqual([
+      {
+        text: '✓ Edited (+2, -1)  src/one.ts',
+        kind: "commandExec",
+        extraClasses: ["cm-line-workItemDone", "cm-line-commandWidget"],
+        commandWidgetSignature: "2026-03-13T10:57:31.912Z:0:src/one.ts",
+        inlineUnifiedDiff: 'diff --git a/src/one.ts b/src/one.ts\n--- a/src/one.ts\n+++ b/src/one.ts\n@@ -1 +1,2 @@\n-old one\n+new one\n+extra one\n',
+        inlineDiffChangedFiles: ["src/one.ts"],
+        highlightSpans: [
+          { from: 0, to: 1, className: "tok-commandWidgetGlyph" },
+          { from: 2, to: 8, className: "tok-commandWidgetPrefix" },
+          { from: 10, to: 12, className: "tok-added" },
+          { from: 14, to: 16, className: "tok-removed" },
+        ],
+      },
+      {
+        text: '✓ Edited (+4, -0)  src/two.ts  Completed in 0.6s',
+        kind: "commandExec",
+        extraClasses: ["cm-line-workItemDone", "cm-line-commandWidget"],
+        commandWidgetSignature: "2026-03-13T10:57:31.912Z:1:src/two.ts",
+        inlineUnifiedDiff: 'diff --git a/src/two.ts b/src/two.ts\n--- a/src/two.ts\n+++ b/src/two.ts\n@@ -3 +3 @@\n-old two\n+new two\n',
+        inlineDiffChangedFiles: ["src/two.ts"],
+        highlightSpans: [
+          { from: 0, to: 1, className: "tok-commandWidgetGlyph" },
+          { from: 2, to: 8, className: "tok-commandWidgetPrefix" },
+          { from: 10, to: 12, className: "tok-added" },
+          { from: 14, to: 16, className: "tok-removed" },
+          { from: 31, to: 48, className: "tok-commandWidgetMeta" },
+        ],
+      },
       { text: "", kind: "workGroupSeparator" },
-      { text: "Edited files", kind: "workGroupHeader" },
+    ]);
+  });
+
+  it("renders read-file work groups as read widgets", () => {
+    expect(
+      blockToLines({
+        type: "work-group",
+        title: "Read file",
+        status: "done",
+        startedAt: "2026-03-13T10:57:31.912Z",
+        endedAt: "2026-03-13T10:57:32.512Z",
+        items: [
+          {
+            kind: "tool",
+            label: "Read file",
+            status: "done",
+            detail: "src/example.ts",
+          },
+        ],
+      }),
+    ).toEqual([
       {
-        text: '      "src/one.ts" (+2, -1)',
-        kind: "fileChangeSummary",
+        text: "✓ Read  src/example.ts  Completed in 0.6s",
+        kind: "commandExec",
+        extraClasses: ["cm-line-workItemDone", "cm-line-commandWidget"],
+        commandWidgetSignature: "2026-03-13T10:57:31.912Z:0:src/example.ts",
         highlightSpans: [
-          { from: 20, to: 22, className: "tok-added" },
-          { from: 24, to: 26, className: "tok-removed" },
+          { from: 0, to: 1, className: "tok-commandWidgetGlyph" },
+          { from: 2, to: 6, className: "tok-commandWidgetPrefix" },
+          { from: 24, to: 41, className: "tok-commandWidgetMeta" },
         ],
       },
-      {
-        text: '      "src/two.ts" (+4, -0)',
-        kind: "fileChangeSummary",
-        highlightSpans: [
-          { from: 20, to: 22, className: "tok-added" },
-          { from: 24, to: 26, className: "tok-removed" },
-        ],
-      },
-      { text: "completed in 0.6s", kind: "workGroupFooter" },
       { text: "", kind: "workGroupSeparator" },
     ]);
   });
@@ -274,14 +363,18 @@ describe("blockToLines", () => {
         ],
       }),
     ).toEqual([
-      { text: "", kind: "workGroupSeparator" },
-      { text: "Command run", kind: "workGroupHeader" },
       {
-        text: '      ✓ "C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command \'Write-Output $env:USERPROFILE\'',
+        text: '✓ Ran  "C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command \'Write-Output $env:USERPROFILE\'  Completed in 0.6s',
         kind: "commandExec",
-        extraClasses: ["cm-line-workItemDone"],
+        extraClasses: ["cm-line-workItemDone", "cm-line-commandWidget"],
+        commandWidgetSignature:
+          '2026-03-13T10:57:31.912Z:0:"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command \'Write-Output $env:USERPROFILE\'',
+        highlightSpans: [
+          { from: 0, to: 1, className: "tok-commandWidgetGlyph" },
+          { from: 2, to: 5, className: "tok-commandWidgetPrefix" },
+          { from: 90, to: 107, className: "tok-commandWidgetMeta" },
+        ],
       },
-      { text: "completed in 0.6s", kind: "workGroupFooter" },
       { text: "", kind: "workGroupSeparator" },
     ]);
   });
@@ -305,21 +398,113 @@ describe("blockToLines", () => {
         ],
       }),
     ).toEqual([
-      { text: "", kind: "workGroupSeparator" },
-      { text: "Command run", kind: "workGroupHeader" },
       {
-        text: "      Get-Location",
+        text: "◓ Running  Get-Location  Running for 0.2s",
         kind: "commandExec",
-        extraClasses: ["cm-line-workItemRunning"],
+        extraClasses: ["cm-line-workItemRunning", "cm-line-commandWidget"],
+        commandWidgetSignature: "1970-01-01T00:00:00.000Z:0:Get-Location",
         highlightSpans: [
-          { from: 6, to: 7, className: "tok-workingPulseMid" },
-          { from: 7, to: 8, className: "tok-workingPulseCore" },
-          { from: 8, to: 9, className: "tok-workingPulseMid" },
-          { from: 9, to: 10, className: "tok-workingPulseEdge" },
-          { from: 10, to: 11, className: "tok-workingPulseEdge" },
+          { from: 0, to: 1, className: "tok-commandWidgetGlyph" },
+          { from: 2, to: 9, className: "tok-commandWidgetPrefix" },
+          { from: 25, to: 41, className: "tok-commandWidgetMeta" },
+          { from: 11, to: 12, className: "tok-workingPulseMid" },
+          { from: 12, to: 13, className: "tok-workingPulseCore" },
+          { from: 13, to: 14, className: "tok-workingPulseMid" },
+          { from: 14, to: 15, className: "tok-workingPulseEdge" },
+          { from: 15, to: 16, className: "tok-workingPulseEdge" },
         ],
       },
-      { text: "running for 0.2s", kind: "workGroupFooter" },
+      { text: "", kind: "workGroupSeparator" },
+    ]);
+  });
+
+  it("widens the solid pulse core for longer running commands", () => {
+    expect(
+      blockToLines({
+        type: "work-group",
+        title: "Command run",
+        status: "running",
+        startedAt: "1970-01-01T00:00:00.000Z",
+        endedAt: "1970-01-01T00:00:00.180Z",
+        now: "1970-01-01T00:00:00.180Z",
+        items: [
+          {
+            kind: "command",
+            label: "Command run",
+            status: "running",
+            command: "abcdefghijklmnopqrstuvwxyzAB",
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        text: "◓ Running  abcdefghijklmnopqrstuvwxyzAB  Running for 0.2s",
+        kind: "commandExec",
+        extraClasses: ["cm-line-workItemRunning", "cm-line-commandWidget"],
+        commandWidgetSignature: "1970-01-01T00:00:00.000Z:0:abcdefghijklmnopqrstuvwxyzAB",
+        highlightSpans: [
+          { from: 0, to: 1, className: "tok-commandWidgetGlyph" },
+          { from: 2, to: 9, className: "tok-commandWidgetPrefix" },
+          { from: 41, to: 57, className: "tok-commandWidgetMeta" },
+          { from: 11, to: 12, className: "tok-workingPulseEdge" },
+          { from: 12, to: 13, className: "tok-workingPulseMid" },
+          { from: 13, to: 14, className: "tok-workingPulseCore" },
+          { from: 14, to: 15, className: "tok-workingPulseCore" },
+          { from: 15, to: 16, className: "tok-workingPulseCore" },
+          { from: 16, to: 17, className: "tok-workingPulseMid" },
+          { from: 17, to: 18, className: "tok-workingPulseEdge" },
+          { from: 18, to: 19, className: "tok-workingPulseEdge" },
+        ],
+      },
+      { text: "", kind: "workGroupSeparator" },
+    ]);
+  });
+
+  it("adds the elapsed label to the last command when a command group contains multiple entries", () => {
+    expect(
+      blockToLines({
+        type: "work-group",
+        title: "Command run",
+        status: "done",
+        startedAt: "2026-03-13T12:00:00.000Z",
+        endedAt: "2026-03-13T12:00:00.300Z",
+        items: [
+          {
+            kind: "command",
+            label: "Command run",
+            status: "done",
+            command: "Get-Location",
+          },
+          {
+            kind: "command",
+            label: "Command run",
+            status: "done",
+            command: "git status --short",
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        text: "✓ Ran  Get-Location",
+        kind: "commandExec",
+        extraClasses: ["cm-line-workItemDone", "cm-line-commandWidget"],
+        commandWidgetSignature: "2026-03-13T12:00:00.000Z:0:Get-Location",
+        highlightSpans: [
+          { from: 0, to: 1, className: "tok-commandWidgetGlyph" },
+          { from: 2, to: 5, className: "tok-commandWidgetPrefix" },
+        ],
+      },
+      {
+        text: "✓ Ran  git status --short  Completed in 0.3s",
+        kind: "commandExec",
+        extraClasses: ["cm-line-workItemDone", "cm-line-commandWidget"],
+        commandWidgetSignature: "2026-03-13T12:00:00.000Z:1:git status --short",
+        highlightSpans: [
+          { from: 0, to: 1, className: "tok-commandWidgetGlyph" },
+          { from: 2, to: 5, className: "tok-commandWidgetPrefix" },
+          { from: 27, to: 44, className: "tok-commandWidgetMeta" },
+        ],
+      },
       { text: "", kind: "workGroupSeparator" },
     ]);
   });
@@ -508,6 +693,44 @@ describe("blockToLines", () => {
           { from: 3, to: 4, className: "tok-workingPulseEdge" },
           { from: 4, to: 5, className: "tok-workingPulseEdge" },
         ],
+      },
+    ]);
+  });
+
+  it("renders a sending-state block with elapsed time and pulse highlights", () => {
+    expect(
+      blockToLines({
+        type: "sending-state",
+        startedAt: "1970-01-01T00:00:00.000Z",
+        now: "1970-01-01T00:00:00.180Z",
+      }),
+    ).toEqual([
+      {
+        text: "Sending prompt for 0.2s",
+        kind: "workingLine",
+        highlightSpans: [
+          { from: 0, to: 1, className: "tok-workingPulseEdge" },
+          { from: 1, to: 2, className: "tok-workingPulseMid" },
+          { from: 2, to: 3, className: "tok-workingPulseCore" },
+          { from: 3, to: 4, className: "tok-workingPulseMid" },
+          { from: 4, to: 5, className: "tok-workingPulseEdge" },
+          { from: 5, to: 6, className: "tok-workingPulseEdge" },
+        ],
+      },
+    ]);
+  });
+
+  it("renders an interrupted-state block with frozen elapsed time", () => {
+    expect(
+      blockToLines({
+        type: "interrupted-state",
+        startedAt: "1970-01-01T00:00:00.000Z",
+        interruptedAt: "1970-01-01T00:00:01.250Z",
+      }),
+    ).toEqual([
+      {
+        text: "Interrupted after 1.3s",
+        kind: "workingLine",
       },
     ]);
   });

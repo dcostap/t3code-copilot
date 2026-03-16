@@ -2,6 +2,7 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   MODEL_OPTIONS_BY_PROVIDER,
   REASONING_EFFORT_OPTIONS_BY_PROVIDER,
+  type ThreadId,
   type ProviderKind,
 } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -60,6 +61,7 @@ export function App() {
   const getPendingUserInputs = consoleData.getPendingUserInputs;
   const getProjectForThread = consoleData.getProjectForThread;
   const getThreadEvents = consoleData.getThreadEvents;
+  const getTurnDiff = consoleData.getTurnDiff;
   const isThreadTurnRunning = consoleData.isThreadTurnRunning;
   const canSubmitPromptForThread = consoleData.canSubmitPromptForThread;
   const createThread = consoleData.createThread;
@@ -80,6 +82,9 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [pendingPromptSendStartedAtByThreadId, setPendingPromptSendStartedAtByThreadId] = useState<
+    Record<string, string>
+  >({});
   const [composerAttachmentsByPaneId, setComposerAttachmentsByPaneId] = useState<
     Record<string, ReadonlyArray<ComposerImageAttachment>>
   >({});
@@ -118,6 +123,9 @@ export function App() {
   );
   const activePendingUserInput = activePendingUserInputs[0] ?? null;
   const activeThreadTurnRunning = activeThreadId ? isThreadTurnRunning(activeThreadId) : false;
+  const activePendingPromptSendStartedAt = activeThreadId
+    ? (pendingPromptSendStartedAtByThreadId[activeThreadId] ?? null)
+    : null;
   const activePendingQuestionIndex = activePendingUserInput
     ? (pendingUserInputQuestionIndexByRequestId[activePendingUserInput.requestId] ?? 0)
     : 0;
@@ -173,8 +181,15 @@ export function App() {
     return activeModelStatus?.defaultReasoningEffort ?? null;
   }, [activeProvider, activeThread, consoleData.serverConfig?.providers]);
 
+  const anyThreadTurnRunning = useMemo(
+    () => consoleData.threads.some((thread) => isThreadTurnRunning(thread.id)),
+    [consoleData.threads, isThreadTurnRunning],
+  );
+  const hasLiveTranscriptTimer =
+    anyThreadTurnRunning || Object.keys(pendingPromptSendStartedAtByThreadId).length > 0;
+
   useEffect(() => {
-    if (!activeThreadTurnRunning) {
+    if (!hasLiveTranscriptTimer) {
       setNowIso(new Date().toISOString());
       return;
     }
@@ -196,7 +211,25 @@ export function App() {
     return () => {
       window.cancelAnimationFrame(animationFrameId);
     };
-  }, [activeThreadTurnRunning]);
+  }, [hasLiveTranscriptTimer]);
+
+  useEffect(() => {
+    setPendingPromptSendStartedAtByThreadId((existing) => {
+      let changed = false;
+      const next: Record<string, string> = {};
+
+      for (const [threadId, startedAt] of Object.entries(existing)) {
+        const thread = consoleData.threads.find((candidate) => candidate.id === threadId);
+        if (!thread || isThreadTurnRunning(threadId)) {
+          changed = true;
+          continue;
+        }
+        next[threadId] = startedAt;
+      }
+
+      return changed ? next : existing;
+    });
+  }, [consoleData.threads, isThreadTurnRunning]);
 
   useEffect(() => {
     const openRequestIds = new Set(
@@ -401,12 +434,29 @@ export function App() {
         if (!threadId) {
           throw new Error("No orchestration thread is available.");
         }
-        await submitPrompt({
-          threadId,
-          ...(preferredProvider ? { provider: preferredProvider } : {}),
-          prompt: value,
-          attachments: await Promise.all(attachmentSnapshot.map(toUploadImageAttachment)),
-        });
+        const sendingStartedAt = new Date().toISOString();
+        setPendingPromptSendStartedAtByThreadId((existing) => ({
+          ...existing,
+          [threadId]: sendingStartedAt,
+        }));
+        try {
+          await submitPrompt({
+            threadId,
+            ...(preferredProvider ? { provider: preferredProvider } : {}),
+            prompt: value,
+            attachments: await Promise.all(attachmentSnapshot.map(toUploadImageAttachment)),
+          });
+        } catch (submitError) {
+          setPendingPromptSendStartedAtByThreadId((existing) => {
+            if (!(threadId in existing)) {
+              return existing;
+            }
+            const next = { ...existing };
+            delete next[threadId];
+            return next;
+          });
+          throw submitError;
+        }
         for (const attachment of attachmentSnapshot) {
           revokeComposerImageAttachmentPreview(attachment);
         }
@@ -428,15 +478,33 @@ export function App() {
     ],
   );
   const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
-  const activeThreadNow = activeThreadTurnRunning ? nowIso : undefined;
+  const activeThreadNow =
+    activeThreadId && (activeThreadTurnRunning || activePendingPromptSendStartedAt !== null)
+      ? nowIso
+      : undefined;
   const blocks = useMemo(() => {
     if (activeThread) {
-      return threadToTranscriptBlocks(activeThread, {
+      const nextBlocks = threadToTranscriptBlocks(activeThread, {
         resolveAttachmentPreviewUrl: (attachmentId) =>
           `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
         orchestrationEvents: getThreadEvents(activeThread.id),
         ...(activeThreadNow ? { now: activeThreadNow } : {}),
       });
+      if (
+        activePendingPromptSendStartedAt !== null
+        && activeThreadNow
+        && !activeThreadTurnRunning
+      ) {
+        return [
+          ...nextBlocks,
+          {
+            type: "sending-state" as const,
+            startedAt: activePendingPromptSendStartedAt,
+            now: activeThreadNow,
+          },
+        ];
+      }
+      return nextBlocks;
     }
     if (activeSession) {
       return [{ type: "status" as const, text: "Loading session history..." }];
@@ -445,7 +513,16 @@ export function App() {
       return [{ type: "status" as const, text: `Connection error: ${consoleData.error}` }];
     }
     return [{ type: "status" as const, text: "Waiting for orchestration snapshot..." }];
-  }, [activeSession, activeThread, activeThreadNow, attachmentPreviewBaseUrl, consoleData.error, getThreadEvents]);
+  }, [
+    activePendingPromptSendStartedAt,
+    activeSession,
+    activeThread,
+    activeThreadNow,
+    activeThreadTurnRunning,
+    attachmentPreviewBaseUrl,
+    consoleData.error,
+    getThreadEvents,
+  ]);
 
   const handleCreateSession = useCallback(async (preferredProvider: ProviderKind) => {
     const sessionCwd =
@@ -543,18 +620,41 @@ export function App() {
       const pendingShortcut = pendingQuestion
         ? resolvePendingUserInputShortcut(draft, pendingQuestion.options)
         : null;
-      const paneNow = threadId && isThreadTurnRunning(threadId) ? nowIso : undefined;
-      const blocks = thread
-        ? threadToTranscriptBlocks(thread, {
-            resolveAttachmentPreviewUrl: (attachmentId) =>
-              `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
-            orchestrationEvents: getThreadEvents(thread.id),
-            ...(paneNow ? { now: paneNow } : {}),
-          })
-        : [{
-            type: "status" as const,
-            text: history?.pending ? "Loading session history..." : "History unavailable in this session.",
-          }];
+       const panePendingPromptSendStartedAt = threadId
+         ? (pendingPromptSendStartedAtByThreadId[threadId] ?? null)
+         : null;
+       const paneNow =
+         threadId && (isThreadTurnRunning(threadId) || panePendingPromptSendStartedAt !== null)
+           ? nowIso
+           : undefined;
+       const blocks = thread
+         ? (() => {
+             const nextBlocks = threadToTranscriptBlocks(thread, {
+               resolveAttachmentPreviewUrl: (attachmentId) =>
+                 `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
+               orchestrationEvents: getThreadEvents(thread.id),
+               ...(paneNow ? { now: paneNow } : {}),
+             });
+             if (
+               panePendingPromptSendStartedAt !== null
+               && paneNow
+               && !isThreadTurnRunning(threadId)
+             ) {
+               return [
+                 ...nextBlocks,
+                 {
+                   type: "sending-state" as const,
+                   startedAt: panePendingPromptSendStartedAt,
+                   now: paneNow,
+                 },
+               ];
+             }
+             return nextBlocks;
+           })()
+         : [{
+             type: "status" as const,
+             text: history?.pending ? "Loading session history..." : "History unavailable in this session.",
+           }];
 
       return {
         pane,
@@ -585,6 +685,7 @@ export function App() {
     getThreadEvents,
     isThreadTurnRunning,
     nowIso,
+    pendingPromptSendStartedAtByThreadId,
     pendingUserInputAnswersByRequestId,
     pendingUserInputQuestionIndexByRequestId,
   ]);
@@ -1033,15 +1134,6 @@ export function App() {
                   }
                   onMouseDownCapture={() => activatePane(paneView.pane.id)}
                 >
-                  <div className="conversation-pane__header">
-                    <span className="conversation-pane__label">Pane {paneView.index + 1}</span>
-                    <span className="conversation-pane__meta">
-                      {paneView.thread?.title ??
-                        `${paneView.history?.preferredProvider === "copilot" ? "Copilot" : "Codex"} · ${
-                          paneView.history?.pending ? "Loading thread..." : "History unavailable"
-                        }`}
-                    </span>
-                  </div>
                   <div className="transcript-shell">
                     <TranscriptRenderer
                       ref={(handle) => {
@@ -1064,6 +1156,12 @@ export function App() {
                       onAddImageFiles={(files) => handleAddImageFilesForPane(paneView.pane.id, files)}
                       onDraftChange={(value) => setComposerDraftForPane(paneView.pane.id, value)}
                       onRemoveImage={(attachmentId) => handleRemoveImageForPane(paneView.pane.id, attachmentId)}
+                      resolveInlineDiff={(lookup) =>
+                        getTurnDiff({
+                          threadId: lookup.threadId as ThreadId,
+                          fromTurnCount: lookup.fromTurnCount,
+                          toTurnCount: lookup.toTurnCount,
+                        })}
                       onSubmit={(value) =>
                         handleSubmit(
                           paneView.pane.id,
@@ -1090,6 +1188,12 @@ export function App() {
                 blocks={blocks}
                 composerAttachments={composerAttachments}
                 interactionMode={activeThread?.interactionMode ?? "default"}
+                resolveInlineDiff={(lookup) =>
+                  getTurnDiff({
+                    threadId: lookup.threadId as ThreadId,
+                    fromTurnCount: lookup.fromTurnCount,
+                    toTurnCount: lookup.toTurnCount,
+                  })}
                 {...(activePendingUserInput && activePendingQuestion
                   ? {
                       pendingUserInputHighlight: {

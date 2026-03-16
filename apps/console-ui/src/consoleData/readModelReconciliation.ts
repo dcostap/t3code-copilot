@@ -1,5 +1,7 @@
 import type { OrchestrationEvent, OrchestrationReadModel, OrchestrationThread } from "@t3tools/contracts";
 
+const MAX_THREAD_MESSAGES = 2_000;
+
 function updateThread(
   snapshot: OrchestrationReadModel,
   threadId: string,
@@ -84,6 +86,53 @@ export function reconcileReadModelWithEvents(
         }));
         latestAppliedSequence = event.sequence;
         latestUpdatedAt = event.payload.updatedAt;
+        break;
+      }
+
+      case "thread.message-sent": {
+        nextSnapshot = updateThread(nextSnapshot, event.payload.threadId, (thread) => {
+          const existingMessage = thread.messages.find((entry) => entry.id === event.payload.messageId);
+          const nextMessage = {
+            id: event.payload.messageId,
+            role: event.payload.role,
+            text: event.payload.text,
+            turnId: event.payload.turnId,
+            streaming: event.payload.streaming,
+            createdAt: event.payload.createdAt,
+            updatedAt: event.payload.updatedAt,
+            ...(event.payload.attachments !== undefined
+              ? { attachments: event.payload.attachments }
+              : {}),
+          };
+          const messages = existingMessage
+            ? thread.messages.map((entry) =>
+                entry.id === event.payload.messageId
+                  ? {
+                      ...entry,
+                      text: event.payload.streaming
+                        ? `${entry.text}${event.payload.text}`
+                        : event.payload.text.length > 0
+                          ? event.payload.text
+                          : entry.text,
+                      streaming: event.payload.streaming,
+                      updatedAt: event.payload.updatedAt,
+                      turnId: event.payload.turnId,
+                      ...(event.payload.attachments !== undefined
+                        ? { attachments: event.payload.attachments }
+                        : {}),
+                    }
+                  : entry,
+              )
+            : [...thread.messages, nextMessage];
+
+          return {
+            ...thread,
+            messages: messages.slice(-MAX_THREAD_MESSAGES),
+            updatedAt: event.occurredAt,
+          };
+        });
+        latestAppliedSequence = event.sequence;
+        latestUpdatedAt = event.occurredAt;
         break;
       }
 
