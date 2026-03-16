@@ -322,6 +322,14 @@ function isHistoryAvailable(
   return threadsById.has(history.threadId);
 }
 
+function hasRenderableHistory(
+  history: ConsoleHistoryRef,
+  threadsById: ReadonlyMap<string, OrchestrationThread>,
+  nowMs: number,
+) {
+  return isHistoryAvailable(history, threadsById) || isPendingHistoryStillFresh(history, nowMs);
+}
+
 function reconcilePersistedSessionShape(
   session: ConsoleWorkspaceSession,
   threadsById: ReadonlyMap<string, OrchestrationThread>,
@@ -460,6 +468,8 @@ export function reconcileWorkspaceState(input: {
     (input.preferredThreadId ? findThreadById(input.threads, input.preferredThreadId) : null) ??
     input.threads[0] ??
     null;
+  const threadsById = new Map(input.threads.map((thread) => [thread.id, thread] as const));
+  const nowMs = Date.now();
 
   let sessions = input.state.sessions
     .map((session) => reconcileSessionWithThreads(session, input.threads, input.projects))
@@ -493,13 +503,13 @@ export function reconcileWorkspaceState(input: {
   const activeSession = activeSessionId
     ? (sessions.find((session) => session.id === activeSessionId) ?? null)
     : null;
-  const activeSessionHasAvailableThread =
+  const activeSessionHasRenderableHistory =
     activeSession !== null &&
-    activeSession.histories.some((history) => input.threads.some((thread) => thread.id === history.threadId));
+    activeSession.histories.some((history) => hasRenderableHistory(history, threadsById, nowMs));
 
   if (
     activeSessionId &&
-    (!sessions.some((session) => session.id === activeSessionId) || !activeSessionHasAvailableThread)
+    (!sessions.some((session) => session.id === activeSessionId) || !activeSessionHasRenderableHistory)
   ) {
     activeSessionId =
       (preferredThread

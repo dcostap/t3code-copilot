@@ -196,6 +196,46 @@ describe("reconcileWorkspaceState", () => {
     expect(state.sessions[0]?.histories[0]?.threadId).toBe("thread:pending");
   });
 
+  it("keeps an active pending session selected while older sessions remain available", () => {
+    const existingThread = makeThread({
+      id: "thread:existing",
+      createdAt: "2026-03-12T10:00:00.000Z",
+    });
+    const existingSession = createSessionFromHistoryRef(
+      {
+        threadId: existingThread.id,
+        preferredProvider: "codex",
+        cwd: project.workspaceRoot,
+        projectId: project.id,
+        createdAt: existingThread.createdAt,
+      },
+      [],
+    );
+    const pendingSession = createSessionFromHistoryRef(
+      {
+        threadId: "thread:pending" as OrchestrationThread["id"],
+        preferredProvider: "copilot",
+        cwd: project.workspaceRoot,
+        projectId: project.id,
+        createdAt: new Date().toISOString(),
+        pending: true,
+      },
+      [existingSession],
+    );
+
+    const state = reconcileWorkspaceState({
+      state: {
+        sessions: [existingSession, pendingSession],
+        activeSessionId: pendingSession.id,
+      },
+      threads: [existingThread],
+      projects: [project],
+      preferredThreadId: existingThread.id,
+    });
+
+    expect(state.activeSessionId).toBe(pendingSession.id);
+  });
+
   it("falls back to the preferred thread session when the active session is invalid", () => {
     const firstThread = makeThread({
       id: "thread:1",

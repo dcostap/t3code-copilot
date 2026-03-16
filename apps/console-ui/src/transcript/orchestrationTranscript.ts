@@ -513,12 +513,76 @@ function isWorkActivityType(itemType: string | null) {
     || itemType === "image_view";
 }
 
+function extractToolInvocationDetail(payload: Record<string, unknown> | null): string | null {
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+
+  const formatRecord = (record: Record<string, unknown> | null): string | null => {
+    if (!record) {
+      return null;
+    }
+
+    const nestedInput =
+      formatRecord(asRecord(record.input))
+      ?? formatRecord(asRecord(record.arguments))
+      ?? formatRecord(asRecord(record.args))
+      ?? formatRecord(asRecord(record.params));
+    if (nestedInput) {
+      return nestedInput;
+    }
+
+    const pattern = asString(record.pattern);
+    const path = asString(record.path);
+    if (pattern) {
+      return path ? `${pattern} ${path}` : pattern;
+    }
+
+    for (const key of ["query", "url", "path", "filePath", "relativePath", "filename", "command", "prompt"]) {
+      const value = asString(record[key]);
+      if (value) {
+        return value;
+      }
+    }
+
+    const entries = Object.entries(record)
+      .filter(([key, value]) =>
+        typeof value === "string"
+        && value.trim().length > 0
+        && ![
+          "toolName",
+          "mcpToolName",
+          "mcpServerName",
+          "title",
+          "detail",
+          "summary",
+          "content",
+          "output",
+          "stdout",
+          "stderr",
+          "status",
+        ].includes(key))
+      .slice(0, 3)
+      .map(([key, value]) => `${key}=${String(value).trim()}`);
+    return entries.length > 0 ? entries.join(" ") : null;
+  };
+
+  return (
+    formatRecord(asRecord(item?.input))
+    ?? formatRecord(asRecord(data?.input))
+    ?? formatRecord(asRecord(data?.arguments))
+    ?? formatRecord(asRecord(data?.args))
+    ?? formatRecord(item)
+    ?? formatRecord(data)
+  );
+}
+
 function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkItem | null {
   const payload = asRecord(activity.payload);
   const itemType = asString(payload?.itemType);
   const command = extractCommand(payload);
   const exitCode = extractExitCode(payload);
   const detail = asString(payload?.detail);
+  const toolInvocationDetail = extractToolInvocationDetail(payload);
   const rawOutput = extractOutput(payload);
   const output = rawOutput === detail ? null : rawOutput;
   const changedFiles = extractChangedFiles(payload);
@@ -527,6 +591,7 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
   const fileChangeStats = itemType === "file_change" ? extractFileChangeStats(payload) : null;
   const fileChangeUnifiedDiff = itemType === "file_change" ? extractFileChangeUnifiedDiff(payload) : null;
   const itemId = extractWorkItemId(payload);
+  const toolDetail = toolInvocationDetail ?? detail;
 
   if (itemType === "file_change") {
     return {
@@ -568,7 +633,7 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
     label,
     status,
     mergeKey: `${itemType ?? "tool"}:${label}`,
-    ...(detail ? { detail } : {}),
+    ...(toolDetail ? { detail: toolDetail } : {}),
     ...(output ? { output } : {}),
     ...(changedFiles.length > 0 ? { changedFiles } : {}),
   };
@@ -585,10 +650,15 @@ function mergeWorkItems(previous: PendingWorkItem, next: PendingWorkItem): Pendi
   const changedFiles = previous.changedFiles || next.changedFiles
     ? uniqueStrings([...(previous.changedFiles ?? []), ...(next.changedFiles ?? [])])
     : null;
+  const detail =
+    previous.kind === "tool" && previous.detail
+      ? previous.detail
+      : next.detail ?? previous.detail;
 
   return {
     ...previous,
     ...next,
+    ...(detail ? { detail } : {}),
     ...(changedFiles ? { changedFiles } : {}),
   };
 }

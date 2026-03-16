@@ -3,8 +3,10 @@ import { EditorState } from "@codemirror/state";
 
 import {
   getHistorySelectionLimitForPromptStart,
+  normalizeInlineDiffRowText,
   promptSeparatorClassesForInteractionMode,
   resolvePromptSelectionForDocument,
+  shouldRenderPromptSeparator,
   resolveTranscriptRegionForPointer,
   resolveTranscriptRegionForPosition,
   shouldKeepCursorPaddingForTransactions,
@@ -55,6 +57,28 @@ describe("promptSeparatorClassesForInteractionMode", () => {
   it("adds the plan-mode separator class only in plan mode", () => {
     expect(promptSeparatorClassesForInteractionMode("default")).toEqual([]);
     expect(promptSeparatorClassesForInteractionMode("plan")).toEqual(["cm-line-promptSeparatorPlan"]);
+  });
+});
+
+describe("normalizeInlineDiffRowText", () => {
+  it("removes a trailing line terminator without touching the diff content", () => {
+    expect(normalizeInlineDiffRowText("+added line\n")).toBe("+added line");
+    expect(normalizeInlineDiffRowText(" context line\r\n")).toBe(" context line");
+  });
+
+  it("preserves intentional blank diff lines as empty strings", () => {
+    expect(normalizeInlineDiffRowText("\n")).toBe("");
+    expect(normalizeInlineDiffRowText("\r\n")).toBe("");
+  });
+});
+
+describe("shouldRenderPromptSeparator", () => {
+  it("hides the separator when there is no transcript history above the prompt", () => {
+    expect(shouldRenderPromptSeparator(0)).toBe(false);
+  });
+
+  it("shows the separator once there is transcript history above the prompt", () => {
+    expect(shouldRenderPromptSeparator(1)).toBe(true);
   });
 });
 
