@@ -180,14 +180,17 @@ body {
 }
 
 .transcript-shell {
+  width: 100%;
+  max-width: 1000px;
+  margin: 0 auto;
   padding: 0 6px;
 }
 
 .conversation-pane .transcript-shell {
   height: 100%;
   overflow: auto;
-  border: 1px solid rgba(95, 103, 111, 0.14);
-  border-bottom: 0;
+  border-left: 1px solid rgba(95, 103, 111, 0.14);
+  border-right: 1px solid rgba(95, 103, 111, 0.14);
   background: transparent;
 }
 
@@ -317,9 +320,9 @@ body {
   inset: 0;
   z-index: 10;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 24px;
+  padding: 48px 24px 24px;
   background: rgba(8, 10, 13, 0.42);
   backdrop-filter: blur(1px);
 }
@@ -436,6 +439,9 @@ body {
 /* ── Status bar ───────────────────────────────────────── */
 
 .status-line {
+  width: 100%;
+  max-width: 1000px;
+  margin: 0 auto;
   padding: 6px 12px 10px;
   background: transparent;
   border: 0;

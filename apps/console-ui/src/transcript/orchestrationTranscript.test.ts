@@ -144,21 +144,85 @@ describe("threadToTranscriptBlocks", () => {
     });
 
     expect(derived).toEqual([
-      {
+      expect.objectContaining({
         type: "work-group",
         title: "Search workspace",
         status: "done",
         startedAt: "2026-03-11T09:00:00.000Z",
         endedAt: "2026-03-11T09:00:02.000Z",
         items: [
-          {
+          expect.objectContaining({
+            kind: "tool",
+            label: "Search workspace",
+            status: "done",
+            detail: expect.any(String),
+          }),
+        ],
+      }),
+    ]);
+  });
+
+  it("keeps matching web search work grouped across turn boundaries", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-web-search-start"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "Search workspace started",
+          payload: {
+            itemType: "web_search",
+            title: "Search workspace",
+            status: "inProgress",
+            data: { query: "transcript renderer" },
+          },
+          turnId: TurnId.makeUnsafe("turn-web-search-1"),
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:00.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-web-search-complete"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "Search workspace complete",
+          payload: {
+            itemType: "web_search",
+            title: "Search workspace",
+            status: "completed",
+            detail: "Matched App.tsx and TranscriptRenderer.tsx.",
+            data: { query: "transcript renderer" },
+          },
+          turnId: TurnId.makeUnsafe("turn-web-search-2"),
+          sequence: 2,
+          createdAt: "2026-03-11T09:00:02.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      expect.objectContaining({
+        type: "work-group",
+        title: "Search workspace",
+        status: "done",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        endedAt: "2026-03-11T09:00:02.000Z",
+        items: [
+          expect.objectContaining({
             kind: "tool",
             label: "Search workspace",
             status: "done",
             detail: "Matched App.tsx and TranscriptRenderer.tsx.",
-          },
+          }),
         ],
-      },
+      }),
     ]);
   });
 

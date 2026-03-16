@@ -4,9 +4,16 @@ import { EditorState } from "@codemirror/state";
 import {
   getHistorySelectionLimitForPromptStart,
   normalizeInlineDiffRowText,
+  prefixCopiedLinesInOrder,
+  prefixCopiedUserMessageStarts,
   promptSeparatorClassesForInteractionMode,
+  resolveCommandWidgetCopyRowFromNode,
+  resolveCommandWidgetToggleSignatureFromEventTarget,
+  resolveTranscriptLinkUrl,
   resolvePromptSelectionForDocument,
   shouldRenderPromptSeparator,
+  shouldUseCustomCommandWidgetCopy,
+  shouldIgnoreCommandWidgetEvent,
   resolveTranscriptRegionForPointer,
   resolveTranscriptRegionForPosition,
   shouldKeepCursorPaddingForTransactions,
@@ -57,6 +64,218 @@ describe("promptSeparatorClassesForInteractionMode", () => {
   it("adds the plan-mode separator class only in plan mode", () => {
     expect(promptSeparatorClassesForInteractionMode("default")).toEqual([]);
     expect(promptSeparatorClassesForInteractionMode("plan")).toEqual(["cm-line-promptSeparatorPlan"]);
+  });
+});
+
+describe("resolveTranscriptLinkUrl", () => {
+  it("passes through http urls and resolves absolute windows file paths", () => {
+    expect(resolveTranscriptLinkUrl({ kind: "url", target: "https://example.com/docs" })).toBe(
+      "https://example.com/docs",
+    );
+    expect(resolveTranscriptLinkUrl({ kind: "file", target: "C:\\Users\\Dario Costa\\Desktop\\report.xlsx" })).toBe(
+      "file:///C:/Users/Dario%20Costa/Desktop/report.xlsx",
+    );
+  });
+
+  it("resolves relative file paths against the session cwd", () => {
+    expect(
+      resolveTranscriptLinkUrl(
+        { kind: "file", target: "src\\App.tsx" },
+        "C:\\Projects\\t3code-copilot",
+      ),
+    ).toBe("file:///C:/Projects/t3code-copilot/src/App.tsx");
+  });
+});
+
+describe("resolveCommandWidgetToggleSignatureFromEventTarget", () => {
+  it("returns the widget signature only for rail targets", () => {
+    const surface = { dataset: { commandWidgetSignature: "cmd-1" } };
+    const rail = {
+      closest(selector: string) {
+        if (selector === ".cm-commandWidgetRail") {
+          return rail;
+        }
+        if (selector === ".cm-commandWidgetSurface") {
+          return surface;
+        }
+        return null;
+      },
+    };
+    const railVisual = { parentElement: rail };
+    const body = {
+      closest() {
+        return null;
+      },
+    };
+
+    expect(resolveCommandWidgetToggleSignatureFromEventTarget(railVisual)).toBe("cmd-1");
+    expect(resolveCommandWidgetToggleSignatureFromEventTarget(body)).toBeNull();
+  });
+});
+
+describe("shouldIgnoreCommandWidgetEvent", () => {
+  it("lets native selection handle command widget body mouse events", () => {
+    const diffContent = {
+      closest() {
+        return null;
+      },
+    };
+
+    expect(shouldIgnoreCommandWidgetEvent({ type: "mousedown", target: diffContent })).toBe(true);
+  });
+
+  it("keeps rail toggles and widget copy serialization routed through the editor", () => {
+    const surface = { dataset: { commandWidgetSignature: "cmd-3" } };
+    const rail = {
+      closest(selector: string) {
+        if (selector === ".cm-commandWidgetRail") {
+          return rail;
+        }
+        if (selector === ".cm-commandWidgetSurface") {
+          return surface;
+        }
+        return null;
+      },
+    };
+    const body = {};
+
+    expect(shouldIgnoreCommandWidgetEvent({ type: "mousedown", target: rail })).toBe(false);
+    expect(shouldIgnoreCommandWidgetEvent({ type: "copy", target: body })).toBe(false);
+  });
+});
+
+describe("resolveCommandWidgetCopyRowFromNode", () => {
+  it("finds the nearest copy row from nested widget content", () => {
+    const row = {
+      dataset: { copyText: "row" },
+      closest(selector: string) {
+        return selector === ".cm-commandWidgetCopyRow" ? row : null;
+      },
+    };
+    const nested = { parentElement: row };
+
+    expect(resolveCommandWidgetCopyRowFromNode(nested)).toBe(row);
+  });
+
+  it("returns null for transcript content outside widget rows", () => {
+    const textNodeParent = {
+      closest() {
+        return null;
+      },
+    };
+    const textNodeLike = { parentElement: textNodeParent };
+
+    expect(resolveCommandWidgetCopyRowFromNode(textNodeLike)).toBeNull();
+  });
+});
+
+describe("shouldUseCustomCommandWidgetCopy", () => {
+  it("uses custom widget copy only when the full selection stays inside widget rows", () => {
+    const rowStart = {
+      closest(selector: string) {
+        return selector === ".cm-commandWidgetCopyRow" ? rowStart : null;
+      },
+    };
+    const rowEnd = {
+      closest(selector: string) {
+        return selector === ".cm-commandWidgetCopyRow" ? rowEnd : null;
+      },
+    };
+
+    expect(
+      shouldUseCustomCommandWidgetCopy({
+        rangeCount: 1,
+        isCollapsed: false,
+        getRangeAt() {
+          return { startContainer: rowStart, endContainer: rowEnd };
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("falls back to normal copy for mixed transcript and widget selections", () => {
+    const widgetNode = {
+      closest(selector: string) {
+        return selector === ".cm-commandWidgetCopyRow" ? widgetNode : null;
+      },
+    };
+    const plainTranscriptNode = {
+      closest() {
+        return null;
+      },
+    };
+
+    expect(
+      shouldUseCustomCommandWidgetCopy({
+        rangeCount: 1,
+        isCollapsed: false,
+        getRangeAt() {
+          return { startContainer: plainTranscriptNode, endContainer: widgetNode };
+        },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("prefixCopiedUserMessageStarts", () => {
+  it("adds a > prefix when the copied selection includes the start of a history user prompt line", () => {
+    const state = EditorState.create({
+      doc: "Hello there\nSecond line",
+      selection: { anchor: 0, head: "Hello there\nSecond line".length },
+    });
+
+    expect(
+      prefixCopiedUserMessageStarts(
+        "Hello there\nSecond line",
+        state,
+        [{ from: 0, extraClasses: ["cm-line-userMessageStart"] }, { from: "Hello there\n".length }],
+      ),
+    ).toBe("> Hello there\nSecond line");
+  });
+
+  it("does not prefix when the selection starts mid-line after the first word", () => {
+    const state = EditorState.create({
+      doc: "Hello there",
+      selection: { anchor: 6, head: "Hello there".length },
+    });
+
+    expect(
+      prefixCopiedUserMessageStarts(
+        "there",
+        state,
+        [{ from: 0, extraClasses: ["cm-line-userMessageStart"] }],
+      ),
+    ).toBe("there");
+  });
+
+  it("still prefixes user prompt lines inside larger copied selections", () => {
+    const state = EditorState.create({
+      doc: "before\nHello there\nwidget backing text\nafter",
+      selection: { anchor: 0, head: "before\nHello there\nwidget backing text\nafter".length },
+    });
+
+    expect(
+      prefixCopiedUserMessageStarts(
+        "before\nHello there\nvisible widget\nafter",
+        state,
+        [
+          { from: 0 },
+          { from: "before\n".length, extraClasses: ["cm-line-userMessageStart"] },
+        ],
+      ),
+    ).toBe("before\n> Hello there\nvisible widget\nafter");
+  });
+});
+
+describe("prefixCopiedLinesInOrder", () => {
+  it("prefixes matching copied lines in order without changing unrelated lines", () => {
+    expect(
+      prefixCopiedLinesInOrder(
+        "before\nHello there\nwidget line\nAfter",
+        ["Hello there"],
+        "> ",
+      ),
+    ).toBe("before\n> Hello there\nwidget line\nAfter");
   });
 });
 

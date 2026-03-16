@@ -44,6 +44,10 @@ interface PositionedMark {
   readonly from: number;
   readonly to: number;
   readonly className: string;
+  readonly link?: {
+    readonly kind: "url" | "file";
+    readonly target: string;
+  };
 }
 
 interface TranscriptDocumentModel {
@@ -74,6 +78,8 @@ interface PositionedReplacement {
   readonly signature: string;
 }
 
+type UserMessageCopyLine = Pick<PositionedLine, "from" | "extraClasses">;
+
 interface CodeBlockWidgetLineData {
   readonly text: string;
   readonly highlightSpans?: ReadonlyArray<{
@@ -88,6 +94,12 @@ interface InlineDiffRowData {
   readonly oldLineNumber?: number;
   readonly newLineNumber?: number;
   readonly text: string;
+}
+
+interface InlineTextHighlightSpan {
+  readonly from: number;
+  readonly to: number;
+  readonly className: string;
 }
 
 interface InlineDiffHunkData {
@@ -116,6 +128,7 @@ interface StoredPromptSelection {
 interface TranscriptRendererProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
   readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
+  readonly cwd?: string | null;
   readonly interactionMode?: "default" | "plan";
   readonly pendingUserInputHighlight?: {
     readonly requestId: string;
@@ -322,6 +335,242 @@ function renderCodeBlockLine(
   return lineElement;
 }
 
+function renderHighlightedInlineText(
+  text: string,
+  highlightSpans?: ReadonlyArray<InlineTextHighlightSpan>,
+) {
+  const root = document.createElement("span");
+
+  if (!highlightSpans || highlightSpans.length === 0) {
+    root.textContent = text;
+    return root;
+  }
+
+  const orderedSpans = highlightSpans.toSorted((left, right) => left.from - right.from);
+  let cursor = 0;
+
+  for (const span of orderedSpans) {
+    const from = Math.max(0, Math.min(text.length, span.from));
+    const to = Math.max(from, Math.min(text.length, span.to));
+    if (from > cursor) {
+      root.append(document.createTextNode(text.slice(cursor, from)));
+    }
+    if (to > from) {
+      const highlighted = document.createElement("span");
+      highlighted.className = `cm-codeToken ${span.className}`;
+      highlighted.textContent = text.slice(from, to);
+      root.append(highlighted);
+    }
+    cursor = Math.max(cursor, to);
+  }
+
+  if (cursor < text.length) {
+    root.append(document.createTextNode(text.slice(cursor)));
+  }
+
+  return root;
+}
+
+function windowsPathToFileUrl(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    return encodeURI(`file:///${normalized}`);
+  }
+  if (normalized.startsWith("//")) {
+    return encodeURI(`file:${normalized}`);
+  }
+  return encodeURI(`file://${normalized}`);
+}
+
+export function resolveTranscriptLinkUrl(
+  link: {
+    kind: "url" | "file";
+    target: string;
+  },
+  cwd?: string | null,
+) {
+  if (link.kind === "url") {
+    return link.target;
+  }
+
+  const normalizedTarget = link.target.replace(/\//g, "\\");
+  if (/^[A-Za-z]:\\/.test(normalizedTarget) || normalizedTarget.startsWith("\\\\")) {
+    return windowsPathToFileUrl(normalizedTarget);
+  }
+  if (!cwd) {
+    return null;
+  }
+
+  try {
+    const baseUrl = new URL(windowsPathToFileUrl(cwd.endsWith("\\") ? cwd : `${cwd}\\`));
+    return new URL(link.target.replace(/\\/g, "/"), baseUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
+function resolveInteractiveMarkAtPosition(
+  marks: ReadonlyArray<PositionedMark>,
+  position: number | null,
+) {
+  if (position === null) {
+    return null;
+  }
+  return marks.find((mark) => mark.link && position >= mark.from && position < mark.to) ?? null;
+}
+
+function resolveInteractiveMarkFromMouseEvent(
+  view: EditorView,
+  event: MouseEvent,
+  marks: ReadonlyArray<PositionedMark>,
+) {
+  return resolveInteractiveMarkAtPosition(
+    marks,
+    view.posAtCoords({
+      x: event.clientX,
+      y: event.clientY,
+    }),
+  );
+}
+
+export function resolveCommandWidgetToggleSignatureFromEventTarget(target: unknown) {
+  if (!target || typeof target !== "object") {
+    return null;
+  }
+
+  const targetElement =
+    "closest" in target && typeof target.closest === "function"
+      ? target
+      : "parentElement" in target && target.parentElement && typeof target.parentElement === "object"
+        ? target.parentElement
+        : null;
+  if (!targetElement || !("closest" in targetElement) || typeof targetElement.closest !== "function") {
+    return null;
+  }
+
+  const commandRail = targetElement.closest(".cm-commandWidgetRail");
+  if (!commandRail || typeof commandRail !== "object") {
+    return null;
+  }
+
+  const commandSurface =
+    "closest" in commandRail && typeof commandRail.closest === "function"
+      ? commandRail.closest(".cm-commandWidgetSurface")
+      : null;
+  if (!commandSurface || typeof commandSurface !== "object" || !("dataset" in commandSurface)) {
+    return null;
+  }
+
+  const signature = commandSurface.dataset?.commandWidgetSignature;
+  if (typeof signature === "string" && signature.length > 0) {
+    return signature;
+  }
+
+  return null;
+}
+
+export function shouldIgnoreCommandWidgetEvent(
+  event: Pick<Event, "type"> & { target: unknown },
+) {
+  if (event.type === "copy") {
+    return false;
+  }
+  return resolveCommandWidgetToggleSignatureFromEventTarget(event.target) === null;
+}
+
+export function resolveCommandWidgetCopyRowFromNode(target: unknown) {
+  if (!target || typeof target !== "object") {
+    return null;
+  }
+
+  const targetElement =
+    "closest" in target && typeof target.closest === "function"
+      ? target
+      : "parentElement" in target && target.parentElement && typeof target.parentElement === "object"
+        ? target.parentElement
+        : null;
+  if (!targetElement || !("closest" in targetElement) || typeof targetElement.closest !== "function") {
+    return null;
+  }
+
+  const row = targetElement.closest(".cm-commandWidgetCopyRow");
+  return row && typeof row === "object" ? row : null;
+}
+
+export function shouldUseCustomCommandWidgetCopy(
+  selection:
+    | {
+        rangeCount: number;
+        isCollapsed: boolean;
+        getRangeAt(index: number): {
+          startContainer: unknown;
+          endContainer: unknown;
+        };
+      }
+    | null,
+) {
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    return false;
+  }
+
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const range = selection.getRangeAt(index);
+    if (!resolveCommandWidgetCopyRowFromNode(range.startContainer)) {
+      return false;
+    }
+    if (!resolveCommandWidgetCopyRowFromNode(range.endContainer)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function openTranscriptLink(
+  link: {
+    kind: "url" | "file";
+    target: string;
+  },
+  cwd?: string | null,
+) {
+  const resolved = resolveTranscriptLinkUrl(link, cwd);
+  if (!resolved) {
+    return false;
+  }
+
+  if (typeof window !== "undefined" && window.desktopBridge) {
+    return window.desktopBridge.openExternal(resolved);
+  }
+
+  if (typeof window !== "undefined") {
+    window.open(resolved, "_blank", "noopener,noreferrer");
+    return true;
+  }
+
+  return false;
+}
+
+function renderAnimatedCommandText(text: string) {
+  const root = document.createElement("span");
+  root.className = "cm-commandWidgetAnimatedText";
+  const perCharacterDelaySeconds =
+    text.length <= 48
+      ? 0.028
+      : text.length >= 120
+        ? 0.04
+        : 0.028 + ((text.length - 48) / (120 - 48)) * 0.012;
+
+  Array.from(text).forEach((char, index) => {
+    const charElement = document.createElement("span");
+    charElement.className = "cm-commandWidgetCommandChar";
+    charElement.textContent = char === " " ? "\u00A0" : char;
+    charElement.style.animationDelay = `${index * perCharacterDelaySeconds}s`;
+    root.append(charElement);
+  });
+
+  return root;
+}
+
 class CodeBlockWidget extends WidgetType {
   constructor(
     private readonly content: {
@@ -358,7 +607,7 @@ class CodeBlockWidget extends WidgetType {
     copyButton.append(copyButtonLabel, copyButtonStatus);
 
     const copiedFeedbackDurationMs = 520;
-    const copyButtonExitDurationMs = 320;
+    const copyButtonExitDurationMs = 160;
     let feedbackTimer: number | undefined;
     let contentResetTimer: number | undefined;
     const clearContentResetTimer = () => {
@@ -590,6 +839,10 @@ function parseCommandWidgetText(text: string): {
   glyph: string;
   prefix: string;
   command: string;
+  commandRange?: {
+    from: number;
+    to: number;
+  };
   timingLabel?: string;
   counts?: {
     additions: string;
@@ -610,6 +863,8 @@ function parseCommandWidgetText(text: string): {
 
   let prefix = prefixAndCommand.slice(0, firstDivider);
   let command = prefixAndCommand.slice(firstDivider + 2);
+  let rawCommandStart = firstSpace + 1 + firstDivider + 2;
+  let rawCommandEnd = text.length;
   let timingLabel: string | undefined;
   let counts:
     | {
@@ -631,6 +886,7 @@ function parseCommandWidgetText(text: string): {
     }
     timingLabel = command.slice(timingIndex + 2);
     command = command.slice(0, timingIndex);
+    rawCommandEnd = rawCommandStart + timingIndex;
     break;
   }
 
@@ -640,7 +896,9 @@ function parseCommandWidgetText(text: string): {
     const prefixAdditions = countsPrefixGroups?.add;
     const prefixDeletions = countsPrefixGroups?.remove;
     if (countsPrefixGroups && prefixAdditions && prefixDeletions) {
+      const consumedPrefixLength = countsPrefixMatch?.[0].length - (countsPrefixGroups.base?.length ?? command.length);
       command = countsPrefixGroups.base ?? command;
+      rawCommandStart += consumedPrefixLength;
       counts = {
         additions: prefixAdditions,
         deletions: prefixDeletions,
@@ -649,17 +907,30 @@ function parseCommandWidgetText(text: string): {
   }
 
   if (!counts) {
-  const commandCounts = extractCommandWidgetCounts(command);
+    const commandCounts = extractCommandWidgetCounts(command);
     if (commandCounts) {
+      const removedSuffixLength = command.length - commandCounts.base.length;
       command = commandCounts.base;
+      rawCommandEnd -= removedSuffixLength;
       counts = commandCounts.counts;
     }
   }
+
+  const commandSearchWindow = text.slice(rawCommandStart, rawCommandEnd);
+  const commandRelativeIndex = commandSearchWindow.indexOf(command);
+  const commandRange =
+    command.length > 0 && commandRelativeIndex >= 0
+      ? {
+          from: rawCommandStart + commandRelativeIndex,
+          to: rawCommandStart + commandRelativeIndex + command.length,
+        }
+      : undefined;
 
   return {
     glyph,
     prefix,
     command,
+    ...(commandRange ? { commandRange } : {}),
     ...(timingLabel ? { timingLabel } : {}),
     ...(counts ? { counts } : {}),
   };
@@ -684,6 +955,7 @@ class CommandWidgetLine extends WidgetType {
       outputLines?: ReadonlyArray<string>;
       expanded: boolean;
       isFileChange: boolean;
+      isRunning: boolean;
       statusClass?: string;
     },
   ) {
@@ -694,8 +966,8 @@ class CommandWidgetLine extends WidgetType {
     return JSON.stringify(this.content) === JSON.stringify(other.content);
   }
 
-  override ignoreEvent() {
-    return false;
+  override ignoreEvent(event: Event) {
+    return shouldIgnoreCommandWidgetEvent(event);
   }
 
   override toDOM() {
@@ -708,6 +980,15 @@ class CommandWidgetLine extends WidgetType {
       this.content.statusClass ?? "",
     ].filter(Boolean).join(" ");
     root.dataset.commandWidgetSignature = this.content.signature;
+
+    const rail = document.createElement("div");
+    rail.className = "cm-commandWidgetRail";
+    const railVisual = document.createElement("div");
+    railVisual.className = "cm-commandWidgetRailVisual";
+    rail.append(railVisual);
+
+    const contentRoot = document.createElement("div");
+    contentRoot.className = "cm-commandWidgetContent";
 
     const summary = document.createElement("div");
     summary.className = "cm-commandWidgetSummary cm-commandWidgetCopyRow";
@@ -748,7 +1029,11 @@ class CommandWidgetLine extends WidgetType {
 
     const command = document.createElement("span");
     command.className = "cm-commandWidgetCommand";
-    command.textContent = this.content.command;
+    command.append(
+      this.content.isRunning
+        ? renderAnimatedCommandText(this.content.command)
+        : renderHighlightedInlineText(this.content.command),
+    );
 
     summary.append(command);
 
@@ -759,14 +1044,14 @@ class CommandWidgetLine extends WidgetType {
       summary.append(meta);
     }
 
-    root.append(summary);
+    contentRoot.append(summary);
 
     if (this.content.expanded && this.content.outputLines && this.content.outputLines.length > 0) {
       const body = document.createElement("pre");
       body.className = "cm-commandWidgetBody cm-commandWidgetCopyRow";
       body.dataset.copyText = this.content.outputLines.join("\n");
       body.textContent = this.content.outputLines.join("\n");
-      root.append(body);
+      contentRoot.append(body);
     }
 
     if (
@@ -828,8 +1113,10 @@ class CommandWidgetLine extends WidgetType {
         inlineDiff.append(stateMessage);
       }
 
-      root.append(inlineDiff);
+      contentRoot.append(inlineDiff);
     }
+
+    root.append(rail, contentRoot);
 
     return root;
   }
@@ -1064,6 +1351,7 @@ function buildTranscriptDocument(
           from: from + span.from,
           to: from + span.to,
           className: span.className,
+          ...(span.link ? { link: span.link } : {}),
         });
       }
     }
@@ -1097,6 +1385,7 @@ function buildTranscriptDocument(
       const parsed = parseCommandWidgetText(line.text);
       if (parsed) {
         const statusClass = (line.extraClasses ?? []).find((entry) => entry.startsWith("cm-line-workItem"));
+        const isRunning = statusClass === "cm-line-workItemRunning";
         const resolvedInlineDiffState = resolvedInlineDiffBySignature.get(line.commandWidgetSignature);
         const effectiveInlineDiff =
           line.inlineUnifiedDiff
@@ -1140,6 +1429,7 @@ function buildTranscriptDocument(
               : {}),
             expanded: isExpandedCommand,
             isFileChange: isFileChangeWidget,
+            isRunning,
             ...(statusClass ? { statusClass } : {}),
           }),
           signature:
@@ -1186,7 +1476,9 @@ function buildDecorations(
   );
   ranges.push(
     ...marks.map((mark) =>
-      Decoration.mark({ class: `cm-codeToken ${mark.className}` }).range(mark.from, mark.to),
+      Decoration.mark({
+        class: `cm-codeToken ${mark.className}${mark.link ? " cm-inlineLink" : ""}`,
+      }).range(mark.from, mark.to),
     ),
   );
   ranges.push(
@@ -1274,11 +1566,14 @@ function buildEditorTheme() {
         width: "100%",
         minWidth: "0",
         maxWidth: "100%",
-        padding: "0 22px 18px",
+        padding: "0 22px 6px",
         caretColor: "#cfd6dd",
       },
       ".cm-cursor, .cm-dropCursor": {
         borderLeftColor: "#cfd6dd",
+      },
+      "&.cm-editor-historyActive .cm-cursor": {
+        display: "none",
       },
       ".cm-selectionBackground": {
         backgroundColor: "#e6e6e6 !important",
@@ -1367,6 +1662,55 @@ function buildEditorTheme() {
       ".cm-codeToken.tok-special.tok-string": { color: "#9adf8f" },
       ".cm-codeToken.tok-added": { color: "#63f28a" },
       ".cm-codeToken.tok-removed": { color: "#ff7575" },
+      ".cm-codeToken.tok-inlineCode": {
+        color: "#c7cdd3",
+        backgroundColor: "rgba(214, 220, 226, 0.08)",
+        borderRadius: "4px",
+        padding: "0 0.24em",
+      },
+      ".cm-codeToken.tok-inlineCode.tok-markdownLink": {
+        color: "#cfd5db",
+      },
+      ".cm-codeToken.tok-inlineCode.tok-linkUrl": {
+        color: "#cfd5db",
+      },
+      ".cm-codeToken.tok-inlineCode.tok-linkFile": {
+        color: "#cfd5db",
+      },
+      ".cm-inlineLink": {
+        cursor: "pointer",
+      },
+      ".cm-codeToken.tok-markdownLink": {
+        textDecoration: "underline",
+        textUnderlineOffset: "2px",
+      },
+      ".cm-codeToken.tok-linkUrl": {
+        color: "#7dc4ff",
+      },
+      ".cm-codeToken.tok-linkFile": {
+        color: "#8fd6ff",
+      },
+      ".cm-codeToken.tok-markdownStrong": {
+        color: "#eef3f8",
+        fontWeight: "600",
+      },
+      ".cm-codeToken.tok-markdownEmphasis": {
+        color: "#d8dee5",
+        fontStyle: "italic",
+      },
+      ".cm-line-markdownHeading": {
+        color: "#eef3f8",
+        fontWeight: "600",
+      },
+      ".cm-line-markdownHeading1": {
+        fontSize: "1.16em",
+      },
+      ".cm-line-markdownHeading2": {
+        fontSize: "1.08em",
+      },
+      ".cm-line-markdownHeading3": {
+        fontSize: "1.03em",
+      },
       ".cm-line-list": { color: "#c7ccd1" },
       ".cm-line-userPromptSeparator": {
         position: "relative",
@@ -1374,17 +1718,17 @@ function buildEditorTheme() {
         minHeight: "0",
         lineHeight: "0",
         fontSize: "16px",
-        paddingTop: "1.3em",
-        paddingBottom: "1.3em",
+        paddingTop: "1.8em",
+        paddingBottom: "1.8em",
         overflow: "visible",
       },
       ".cm-line-userPromptSeparator::before": {
         content: '""',
         position: "absolute",
-        left: "0",
-        right: "0",
+           left: "-17px",
+        right: "-17px",
         top: "50%",
-        borderTop: "1px solid rgba(236, 241, 246, 0.38)",
+        borderTop: "1px solid rgba(236, 241, 246, 0.285)",
         transform: "translateY(-50%)",
       },
       ".cm-line-userPromptSeparator.cm-line-userPromptSeparatorHidden": {
@@ -1424,17 +1768,17 @@ function buildEditorTheme() {
         minHeight: "0",
         lineHeight: "0",
         fontSize: "16px",
-        paddingTop: "1.3em",
-        paddingBottom: "1.3em",
+        paddingTop: "2.4em",
+        paddingBottom: "2.4em",
         overflow: "visible",
       },
       ".cm-line-planSeparator::before": {
         content: '""',
         position: "absolute",
-        left: "0",
-        right: "0",
+        left: "-17px",
+        right: "-17px",
         top: "50%",
-        borderTop: "1px solid rgba(210, 225, 216, 0.28)",
+        borderTop: "1px solid rgba(210, 225, 216, 0.21)",
         transform: "translateY(-50%)",
       },
       ".cm-line-planHeader": {
@@ -1467,17 +1811,17 @@ function buildEditorTheme() {
         minHeight: "0",
         lineHeight: "0",
         fontSize: "16px",
-        paddingTop: "1.3em",
-        paddingBottom: "1.3em",
+        paddingTop: "2.4em",
+        paddingBottom: "2.4em",
         overflow: "visible",
       },
       ".cm-line-checkpointSeparator::before": {
         content: '""',
         position: "absolute",
-        left: "0",
-        right: "0",
+        left: "-17px",
+        right: "-17px",
         top: "50%",
-        borderTop: "1px solid rgba(224, 230, 236, 0.28)",
+        borderTop: "1px solid rgba(224, 230, 236, 0.21)",
         transform: "translateY(-50%)",
       },
       ".cm-line-checkpointHeader": {
@@ -1541,17 +1885,17 @@ function buildEditorTheme() {
         minHeight: "0",
         lineHeight: "0",
         fontSize: "16px",
-        paddingTop: "1.3em",
-        paddingBottom: "1.3em",
+        paddingTop: "2.4em",
+        paddingBottom: "2.4em",
         overflow: "visible",
       },
       ".cm-line-promptSeparator::before": {
         content: '""',
         position: "absolute",
-        left: "0",
-        right: "0",
+        left: "-17px",
+        right: "-17px",
         top: "50%",
-        borderTop: "1px solid rgba(230, 236, 242, 0.34)",
+        borderTop: "1px solid rgba(230, 236, 242, 0.255)",
         transform: "translateY(-50%)",
       },
       ".cm-line-promptSeparator.cm-line-promptSeparatorPlan::before": {
@@ -1568,9 +1912,9 @@ function buildEditorTheme() {
         content: '""',
         position: "absolute",
         left: "18ch",
-        right: "0",
-        top: "50%",
-        borderTop: "1px solid rgba(127, 201, 109, 0.62)",
+        right: "-17px",
+     top: "50%",
+        borderTop: "1px solid rgba(127, 201, 109, 0.465)",
         transform: "translateY(-50%)",
       },
       ".cm-line-userMessage": { color: "#e0e4e8" },
@@ -1613,53 +1957,69 @@ function buildEditorTheme() {
       ".cm-commandWidgetSurface": {
         color: "#ced5dc",
         display: "flex",
-        alignItems: "center",
-        gap: "10px",
+        alignItems: "stretch",
+        gap: "0",
         boxSizing: "border-box",
         width: "100%",
         maxWidth: "100%",
         minWidth: "0",
         fontSize: "12px",
         lineHeight: "1.45",
-        padding: "5px 10px",
-        margin: "2px 0",
-        border: "1px solid rgba(123, 135, 146, 0.32)",
-        borderRadius: "10px",
-        backgroundColor: "rgba(17, 23, 29, 0.9)",
-        cursor: "pointer",
-        overflow: "hidden",
-        transition:
-          "max-height 180ms ease, background-color 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease",
+        padding: "2px 0",
+        margin: "1px 0",
+        backgroundColor: "transparent",
       },
-      ".cm-commandWidgetSurface:hover": {
-        backgroundColor: "rgba(22, 31, 38, 0.98)",
-        borderColor: "rgba(168, 180, 191, 0.48)",
-        boxShadow: "inset 0 0 0 1px rgba(205, 214, 223, 0.05)",
+      ".cm-commandWidgetRail": {
+        flex: "0 0 16px",
+        width: "16px",
+        alignSelf: "stretch",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "flex-start",
+        paddingLeft: "4px",
+        cursor: "pointer",
+      },
+      ".cm-commandWidgetRailVisual": {
+        width: "2px",
+        alignSelf: "stretch",
+        borderRadius: "0",
+        backgroundColor: "rgba(244, 247, 250, 0.28)",
+        opacity: "0",
+        transition:
+          "background-color 140ms ease, opacity 140ms ease, width 180ms cubic-bezier(0.25, 0.46, 0.45, 0.94)",
+      },
+      ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetRailVisual": {
+        opacity: "1",
+      },
+      ".cm-commandWidgetSurface:not(.cm-commandWidgetSurfaceExpanded):hover .cm-commandWidgetRailVisual": {
+        opacity: "1",
+      },
+      ".cm-commandWidgetSurface:hover .cm-commandWidgetRailVisual": {
+        backgroundColor: "rgba(244, 247, 250, 0.38)",
+      },
+      ".cm-commandWidgetRail:hover .cm-commandWidgetRailVisual": {
+        width: "5px",
+        backgroundColor: "rgba(244, 247, 250, 0.52)",
       },
       ".cm-commandWidgetSurfaceExpanded": {
         alignItems: "flex-start",
-        flexWrap: "wrap",
       },
       ".cm-commandWidgetSurfaceWithBody": {
         alignItems: "flex-start",
-        flexWrap: "wrap",
       },
-      ".cm-commandWidgetSurface.cm-line-workItemRunning": {
-        borderColor: "rgba(113, 178, 255, 0.44)",
-        backgroundColor: "rgba(18, 27, 36, 0.96)",
+      ".cm-commandWidgetContent": {
+        flex: "1 1 auto",
+        minWidth: "0",
+        userSelect: "text",
       },
-      ".cm-commandWidgetSurface.cm-line-workItemDone": {
-        borderColor: "rgba(128, 146, 160, 0.34)",
+      ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetRailVisual": {
+        backgroundColor: "rgba(244, 247, 250, 0.4)",
       },
       ".cm-commandWidgetSurface.cm-line-workItemError": {
         color: "#f0cbcb",
-        borderColor: "rgba(214, 108, 108, 0.42)",
-        backgroundColor: "rgba(41, 22, 24, 0.94)",
       },
       ".cm-commandWidgetSurface.cm-line-workItemDeclined": {
         color: "#e0d1ae",
-        borderColor: "rgba(194, 154, 79, 0.38)",
-        backgroundColor: "rgba(40, 31, 17, 0.94)",
       },
       ".cm-commandWidgetLead": {
         display: "inline-flex",
@@ -1671,11 +2031,19 @@ function buildEditorTheme() {
       ".cm-commandWidgetSummary": {
         display: "flex",
         alignItems: "center",
+        flexWrap: "nowrap",
         gap: "10px",
-        flex: "1 1 auto",
+        width: "100%",
         minWidth: "0",
+        userSelect: "text",
       },
       ".cm-commandWidgetGlyph": {
+        position: "relative",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: "20px",
+        height: "20px",
         color: "#d8e0e8",
         fontWeight: "700",
         flexShrink: "0",
@@ -1686,6 +2054,7 @@ function buildEditorTheme() {
         flexShrink: "0",
       },
       ".cm-commandWidgetCommand": {
+        color: "#8a939d",
         flex: "1 1 auto",
         minWidth: "0",
         overflow: "hidden",
@@ -1694,11 +2063,15 @@ function buildEditorTheme() {
       },
       ".cm-commandWidgetMeta": {
         color: "#7f8891",
+        marginLeft: "18px",
         flexShrink: "0",
         whiteSpace: "nowrap",
       },
       ".cm-commandWidgetCounts": {
+        display: "inline-flex",
+        flexShrink: "0",
         color: "#9aa4ad",
+        whiteSpace: "nowrap",
       },
       ".cm-commandWidgetCountAdded": {
         color: "#63f28a",
@@ -1707,44 +2080,31 @@ function buildEditorTheme() {
         color: "#ff7575",
       },
       ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetCommand": {
-        flex: "0 0 100%",
-        width: "100%",
+        flex: "1 1 auto",
+        width: "auto",
+        minWidth: "0",
         overflow: "visible",
         textOverflow: "clip",
         whiteSpace: "pre-wrap",
         overflowWrap: "anywhere",
       },
       ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetSummary": {
-        flexWrap: "wrap",
+        flexWrap: "nowrap",
         alignItems: "flex-start",
       },
       ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetMeta": {
         marginLeft: "auto",
       },
       ".cm-commandWidgetBody": {
-        flexBasis: "100%",
+        width: "100%",
         minWidth: "0",
-        marginTop: "2px",
-        borderRadius: "10px",
-        backgroundColor: "rgba(11, 16, 21, 0.68)",
-        overflow: "hidden",
+        margin: "2px 0 0",
         color: "#7a828b",
         whiteSpace: "pre-wrap",
         overflowWrap: "anywhere",
-        margin: "2px 0 0",
-        padding: "4px 10px",
+        padding: "0",
         fontFamily: "inherit",
-      },
-      ".cm-commandWidgetSurfaceExpanded.cm-commandWidgetSurfaceFileChange .cm-commandWidgetCommand": {
-        flex: "1 1 auto",
-        width: "auto",
-        minWidth: "0",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
-      },
-      ".cm-commandWidgetSurfaceExpanded.cm-commandWidgetSurfaceFileChange .cm-commandWidgetMeta": {
-        marginLeft: "0",
+        userSelect: "text",
       },
       ".cm-commandWidgetInlineDiff": {
         flexBasis: "100%",
@@ -1752,6 +2112,7 @@ function buildEditorTheme() {
         marginTop: "0",
         paddingTop: "0",
         borderTop: "none",
+        userSelect: "text",
       },
       ".cm-inlineDiffStateMessage": {
         padding: "4px 0 0",
@@ -1764,8 +2125,6 @@ function buildEditorTheme() {
       ".cm-inlineDiffFile": {
         minWidth: "0",
         overflow: "hidden",
-        borderRadius: "10px",
-        backgroundColor: "rgba(11, 16, 21, 0.74)",
       },
       ".cm-inlineDiffFile + .cm-inlineDiffFile": {
         marginTop: "6px",
@@ -1776,10 +2135,10 @@ function buildEditorTheme() {
         columnGap: "8px",
         alignItems: "start",
         minWidth: "0",
-        padding: "0 10px",
+        padding: "0 10px 0 4px",
       },
       ".cm-inlineDiffRowContext": {
-        backgroundColor: "rgba(20, 26, 32, 0.58)",
+        backgroundColor: "transparent",
       },
       ".cm-inlineDiffRowAddition": {
         backgroundColor: "rgba(20, 60, 38, 0.5)",
@@ -1795,16 +2154,17 @@ function buildEditorTheme() {
       ".cm-inlineDiffMarker": {
         color: "#8b97a3",
       },
+      ".cm-inlineDiffContent": {
+        minWidth: "0",
+        whiteSpace: "pre-wrap",
+        overflowWrap: "anywhere",
+        userSelect: "text",
+      },
       ".cm-inlineDiffRowAddition .cm-inlineDiffMarker, .cm-inlineDiffRowAddition .cm-inlineDiffContent": {
         color: "#9cf0b4",
       },
       ".cm-inlineDiffRowDeletion .cm-inlineDiffMarker, .cm-inlineDiffRowDeletion .cm-inlineDiffContent": {
         color: "#ffb1b1",
-      },
-      ".cm-inlineDiffContent": {
-        minWidth: "0",
-        whiteSpace: "pre-wrap",
-        overflowWrap: "anywhere",
       },
       ".cm-inlineDiffFallback": {
         margin: "0",
@@ -1816,16 +2176,30 @@ function buildEditorTheme() {
         overflowWrap: "anywhere",
       },
       ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetGlyph": {
-        color: "#8cc8ff",
+        color: "transparent",
       },
       ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetPrefix": {
         color: "#82bff2",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetCommand": {
+        color: "#96a1ab",
+      },
+      ".cm-commandWidgetAnimatedText": {
+        display: "inline",
+      },
+      ".cm-commandWidgetCommandChar": {
+        display: "inline-block",
+      },
+      ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetCommandChar": {
+        color: "#8f99a3",
+        animation: "cm-commandWidgetTextPulse 1.24s ease-in-out infinite",
+        willChange: "color",
       },
       ".cm-commandWidgetSurface.cm-line-workItemDone .cm-commandWidgetPrefix": {
         color: "#c8d0d8",
       },
       ".cm-commandWidgetSurface.cm-line-workItemDone .cm-commandWidgetGlyph": {
-        color: "#d8e6d8",
+        color: "#63f28a",
       },
       ".cm-commandWidgetSurface.cm-line-workItemError .cm-commandWidgetPrefix": {
         color: "#ff9d9d",
@@ -1838,6 +2212,26 @@ function buildEditorTheme() {
       },
       ".cm-commandWidgetSurface.cm-line-workItemDeclined .cm-commandWidgetGlyph": {
         color: "#f0c36a",
+      },
+      "@keyframes cm-commandWidgetTextPulse": {
+        "0%, 100%": {
+          color: "#8f99a3",
+        },
+        "38%": {
+          color: "#8f99a3",
+        },
+        "52%": {
+          color: "rgba(255, 255, 255, 0.56)",
+        },
+        "60%": {
+          color: "#ffffff",
+        },
+        "72%": {
+          color: "rgba(255, 255, 255, 0.56)",
+        },
+        "86%": {
+          color: "#8f99a3",
+        },
       },
       ".cm-codeBlockSurface": {
         position: "relative",
@@ -1857,6 +2251,7 @@ function buildEditorTheme() {
         margin: "0",
         whiteSpace: "pre-wrap",
         overflowWrap: "anywhere",
+        userSelect: "text",
       },
       ".cm-codeBlockLine": {
         display: "inline",
@@ -1881,16 +2276,16 @@ function buildEditorTheme() {
         fontFamily: "inherit",
         cursor: "pointer",
         opacity: "0",
-        transform: "translateY(-4px) scale(0.96)",
+        transform: "translateY(-2px) scale(0.96)",
         pointerEvents: "none",
         transition:
-          "opacity 320ms ease, transform 180ms ease",
+          "opacity 160ms ease, transform 90ms ease",
         transitionDelay: "0ms, 0ms",
       },
       ".cm-codeBlockCopyButtonLabel": {
         display: "block",
         gridArea: "1 / 1",
-        transition: "opacity 120ms ease",
+        transition: "opacity 60ms ease",
       },
       ".cm-codeBlockCopyButtonStatus": {
         display: "inline-block",
@@ -1898,7 +2293,7 @@ function buildEditorTheme() {
         textAlign: "center",
         opacity: "0",
         transform: "scale(0.85)",
-        transition: "opacity 120ms ease, transform 160ms ease",
+        transition: "opacity 60ms ease, transform 80ms ease",
       },
       ".cm-codeBlockSurface:hover .cm-codeBlockCopyButton": {
         opacity: "1",
@@ -1971,8 +2366,105 @@ function getConversationScrollContainer(view: EditorView) {
   return scrollContainer instanceof HTMLElement ? scrollContainer : null;
 }
 
+const USER_MESSAGE_COPY_PREFIX = "> ";
+
+function collectSelectedUserMessageStartSegments(
+  state: EditorState,
+  ranges: ReadonlyArray<{ from: number; to: number; empty: boolean }>,
+  userMessageStartLineStarts: ReadonlySet<number>,
+) {
+  const segments: string[] = [];
+
+  for (const range of ranges) {
+    let position = range.from;
+    while (position <= range.to) {
+      const line = state.doc.lineAt(position);
+      const segmentFrom = Math.max(range.from, line.from);
+      const segmentTo = Math.min(range.to, line.to);
+
+      if (
+        segmentTo > segmentFrom
+        && segmentFrom === line.from
+        && userMessageStartLineStarts.has(line.from)
+      ) {
+        segments.push(state.sliceDoc(segmentFrom, segmentTo));
+      }
+
+      if (line.to >= range.to) {
+        break;
+      }
+
+      const nextPosition = line.to + 1;
+      if (nextPosition > state.doc.length) {
+        break;
+      }
+      position = nextPosition;
+    }
+  }
+
+  return segments;
+}
+
+function collectUserMessageStartLineStarts(lines: ReadonlyArray<UserMessageCopyLine>) {
+  return new Set(
+    lines
+      .filter((line) => line.extraClasses?.includes("cm-line-userMessageStart"))
+      .map((line) => line.from),
+  );
+}
+
+export function prefixCopiedLinesInOrder(
+  text: string,
+  orderedExactMatches: ReadonlyArray<string>,
+  prefix: string,
+) {
+  if (text.length === 0 || orderedExactMatches.length === 0) {
+    return text;
+  }
+
+  const lines = text.split("\n");
+  let matchIndex = 0;
+  const prefixedLines = lines.map((line) => {
+    if (matchIndex < orderedExactMatches.length && line === orderedExactMatches[matchIndex]) {
+      matchIndex += 1;
+      return `${prefix}${line}`;
+    }
+    return line;
+  });
+
+  return matchIndex > 0 ? prefixedLines.join("\n") : text;
+}
+
+export function prefixCopiedUserMessageStarts(
+  text: string,
+  state: EditorState,
+  lines: ReadonlyArray<UserMessageCopyLine>,
+) {
+  if (text.length === 0) {
+    return text;
+  }
+
+  const nonEmptyRanges = state.selection.ranges.filter((range) => !range.empty);
+  if (nonEmptyRanges.length === 0) {
+    return text;
+  }
+
+  const userMessageStartLineStarts = collectUserMessageStartLineStarts(lines);
+  if (userMessageStartLineStarts.size === 0) {
+    return text;
+  }
+
+  const selectedSegments = collectSelectedUserMessageStartSegments(
+    state,
+    nonEmptyRanges,
+    userMessageStartLineStarts,
+  );
+
+  return prefixCopiedLinesInOrder(text, selectedSegments, USER_MESSAGE_COPY_PREFIX);
+}
+
 function serializeCommandWidgetSelection(view: EditorView, selection: Selection | null) {
-  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+  if (!selection || !shouldUseCustomCommandWidgetCopy(selection)) {
     return null;
   }
 
@@ -2211,6 +2703,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     {
       blocks,
       composerAttachments = [],
+      cwd,
       interactionMode = "default",
       pendingUserInputHighlight,
       onAddImageFiles,
@@ -2342,8 +2835,13 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
     }, [docModel.defaultExpandedInlineDiffSignatures, requestInlineDiff]);
 
+    const syncActiveRegionClass = useCallback((view: EditorView) => {
+      view.dom.classList.toggle("cm-editor-historyActive", activeRegionRef.current === "history");
+    }, []);
+
     const focusPromptRegion = useCallback((view: EditorView) => {
       activeRegionRef.current = "prompt";
+      syncActiveRegionClass(view);
       const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
       promptSelectionRef.current = storePromptSelection(view.state, promptSelection);
       view.dispatch({
@@ -2355,7 +2853,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       requestAnimationFrame(() => {
         keepCursorWithinViewportPadding(view);
       });
-    }, []);
+    }, [syncActiveRegionClass]);
 
     const focusHistoryRegion = useCallback((view: EditorView) => {
       const currentSelection: StoredSelection = {
@@ -2364,6 +2862,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       };
       promptSelectionRef.current = storePromptSelection(view.state, currentSelection);
       activeRegionRef.current = "history";
+      syncActiveRegionClass(view);
       const historySelection = resolveHistorySelection(view.state, historySelectionRef.current);
       historySelectionRef.current = historySelection;
       view.dispatch({
@@ -2375,7 +2874,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       requestAnimationFrame(() => {
         keepCursorWithinViewportPadding(view);
       });
-    }, []);
+    }, [syncActiveRegionClass]);
 
     const redirectHistoryTypingToPrompt = useCallback(
       (view: EditorView, text: string) => {
@@ -2385,6 +2884,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         };
         historySelectionRef.current = clampStoredSelectionToHistory(view.state, currentSelection);
         activeRegionRef.current = "prompt";
+        syncActiveRegionClass(view);
 
         const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
         view.dispatch({
@@ -2406,7 +2906,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           keepCursorWithinViewportPadding(view);
         });
       },
-      [],
+      [syncActiveRegionClass],
     );
 
     const storeSelectionForRegion = useCallback(
@@ -2446,37 +2946,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         };
         storeSelectionForRegion(view.state, activeRegionRef.current, currentSelection);
         activeRegionRef.current = nextRegion;
+        syncActiveRegionClass(view);
       },
-      [storeSelectionForRegion],
+      [storeSelectionForRegion, syncActiveRegionClass],
     );
 
     const resolveCommandWidgetSignatureFromMouseEvent = useCallback(
       (_view: EditorView, event: MouseEvent) => {
-        const target = event.target;
-        if (!(target instanceof Node)) {
-          return null;
-        }
-
-        const commandSurface =
-          target instanceof Element
-            ? target.closest(".cm-commandWidgetSurface")
-            : target.parentElement?.closest(".cm-commandWidgetSurface");
-        if (commandSurface instanceof HTMLElement && commandSurface.dataset.commandWidgetSignature) {
-          return commandSurface.dataset.commandWidgetSignature;
-        }
-
-        const commandLine =
-          target instanceof Element
-            ? target.closest(".cm-line-commandWidget")
-            : target.parentElement?.closest(".cm-line-commandWidget");
-        if (!(commandLine instanceof HTMLElement)) {
-          return null;
-        }
-
-        const linePosition = _view.posAtDOM(commandLine, 0);
-        const lineFrom = _view.state.doc.lineAt(linePosition).from;
-        const line = docModelRef.current.lines.find((entry) => entry.from === lineFrom);
-        return line?.commandWidgetSignature ?? null;
+        return resolveCommandWidgetToggleSignatureFromEventTarget(event.target);
       },
       [],
     );
@@ -2630,6 +3107,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           ]),
           keymap.of(defaultKeymap),
           EditorView.lineWrapping,
+          EditorView.clipboardOutputFilter.of((text, state) =>
+            prefixCopiedUserMessageStarts(
+              text,
+              state,
+              docModelRef.current.lines,
+            )),
           buildEditorTheme(),
           decorationsCompartment.of(
             EditorView.decorations.of(
@@ -2679,6 +3162,11 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               });
             },
             mousedown(_event, view) {
+              const interactiveMark = resolveInteractiveMarkFromMouseEvent(view, _event, docModelRef.current.marks);
+              if (interactiveMark?.link) {
+                _event.preventDefault();
+                return true;
+              }
               if (resolveCommandWidgetSignatureFromMouseEvent(view, _event)) {
                 _event.preventDefault();
                 return true;
@@ -2687,6 +3175,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               return false;
             },
             click(event, view) {
+              const interactiveMark = resolveInteractiveMarkFromMouseEvent(view, event, docModelRef.current.marks);
+              if (interactiveMark?.link) {
+                event.preventDefault();
+                void openTranscriptLink(interactiveMark.link, cwd);
+                return true;
+              }
               const signature = resolveCommandWidgetSignatureFromMouseEvent(view, event);
               if (!signature) {
                 return false;
@@ -2764,6 +3258,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         state: initialState,
         parent: editorRef.current,
       });
+      syncActiveRegionClass(view);
 
       view.dispatch({
         effects: setPromptStartEffect.of(initialDocModel.promptStart),
@@ -2791,10 +3286,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         viewRef.current = null;
       };
     }, [
+      cwd,
       focusPromptRegion,
       requestInlineDiff,
       redirectHistoryTypingToPrompt,
       resolveCommandWidgetSignatureFromMouseEvent,
+      syncActiveRegionClass,
       storeSelectionForRegion,
       updateActiveRegionFromPointer,
     ]);
