@@ -24,6 +24,7 @@ export function CommandPalette({
   onRun,
 }: CommandPaletteProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   useEffect(() => {
     if (!open) {
@@ -39,6 +40,21 @@ export function CommandPalette({
     requestAnimationFrame(focusInput);
   }, [open]);
 
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const selectedRow = rowRefs.current[selectedIndex];
+    if (!selectedRow) {
+      return;
+    }
+
+    selectedRow.scrollIntoView({
+      block: "nearest",
+    });
+  }, [commands.length, open, selectedIndex]);
+
   if (!open) {
     return null;
   }
@@ -51,16 +67,16 @@ export function CommandPalette({
 
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      if (commands.length > 0) {
-        onSelectedIndexChange((selectedIndex + 1) % commands.length);
+      if (commands.length > 0 && selectedIndex < commands.length - 1) {
+        onSelectedIndexChange(selectedIndex + 1);
       }
       return;
     }
 
     if (event.key === "ArrowUp") {
       event.preventDefault();
-      if (commands.length > 0) {
-        onSelectedIndexChange((selectedIndex - 1 + commands.length) % commands.length);
+      if (commands.length > 0 && selectedIndex > 0) {
+        onSelectedIndexChange(selectedIndex - 1);
       }
       return;
     }
@@ -110,8 +126,11 @@ export function CommandPalette({
             commands.map((cmd, index) => (
               <button
                 key={cmd.id}
+                ref={(element) => {
+                  rowRefs.current[index] = element;
+                }}
                 type="button"
-                className={`palette-row${index === selectedIndex ? " palette-row--active" : ""}`}
+                className={`palette-row${index === selectedIndex ? " palette-row--active" : ""}${cmd.contextText ? " palette-row--withContext" : " palette-row--withoutContext"}`}
                 tabIndex={-1}
                 role="option"
                 aria-selected={index === selectedIndex}
@@ -124,7 +143,7 @@ export function CommandPalette({
               >
                 <span className="palette-marker" aria-hidden="true">{index === selectedIndex ? "›" : ""}</span>
                 <span className="palette-cmd">{cmd.label}</span>
-                <span className="palette-desc">{cmd.description}</span>
+                {cmd.contextText ? <span className="palette-context">{cmd.contextText}</span> : null}
               </button>
             ))
           )}

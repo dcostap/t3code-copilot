@@ -1,6 +1,6 @@
 :root {
   color-scheme: dark;
-  font-family: "Cascadia Mono", "Cascadia Code", "Iosevka Term", "JetBrains Mono", Consolas, monospace;
+  font-family: "Cascadia Code", "Cascadia Mono", "Iosevka Term", "JetBrains Mono", Consolas, monospace;
   font-size: 16px;
   background-color: #202020;
   color: #cfd4d9;
@@ -326,8 +326,12 @@ body {
 
 .palette-window {
   position: relative;
-  width: min(720px, 100%);
-  overflow: visible;
+  display: flex;
+  flex-direction: column;
+  width: min(1000px, 90vw);
+  max-width: 1000px;
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
   background: rgba(18, 21, 26, 0.96);
   border: 1px solid rgba(95, 103, 111, 0.3);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
@@ -349,15 +353,11 @@ body {
 }
 
 .palette-results {
-  position: absolute;
-  top: calc(100% + 10px);
-  left: -1px;
-  right: -1px;
-  max-height: min(420px, 55vh);
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  background: rgba(18, 21, 26, 0.96);
-  border: 1px solid rgba(95, 103, 111, 0.3);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
+  background: transparent;
 }
 
 .palette {
@@ -369,16 +369,26 @@ body {
 }
 
 .palette-row {
-  display: flex;
-  gap: 10px;
+  display: grid;
+  column-gap: 8px;
+  align-items: start;
   width: 100%;
-  padding: 8px 14px;
+  padding: 5px 16px 6px;
   border: 0;
   background: transparent;
   text-align: left;
-  line-height: 1.55;
-  font: inherit;
+  line-height: 1.25;
+  font-size: 12px;
+  font-family: inherit;
   cursor: pointer;
+}
+
+.palette-row--withContext {
+  grid-template-columns: 1ch minmax(360px, 450px) minmax(0, 1fr);
+}
+
+.palette-row--withoutContext {
+  grid-template-columns: 1ch minmax(0, 1fr);
 }
 
 .palette-marker {
@@ -388,15 +398,20 @@ body {
 }
 
 .palette-cmd {
-  flex-shrink: 0;
-  min-width: 170px;
+  min-width: 0;
   color: #5aa8f3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.palette-desc {
-  flex: 1;
+.palette-context {
+  min-width: 0;
   color: #5f676f;
-  font-size: 14px;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .palette-row--active .palette-marker {
@@ -408,13 +423,14 @@ body {
   font-weight: 600;
 }
 
-.palette-row--active .palette-desc {
+.palette-row--active .palette-context {
   color: #8b929a;
 }
 
 .palette-empty {
   padding: 16px 18px 18px;
   color: #5f676f;
+  font-size: 13px;
 }
 
 /* ── Status bar ───────────────────────────────────────── */
