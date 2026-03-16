@@ -1,11 +1,11 @@
 export interface CommandPaletteCommand {
   readonly id: string;
   readonly label: string;
-  readonly description: string;
+  readonly contextText?: string;
   readonly keywords?: ReadonlyArray<string>;
 }
 
-/** Simple substring match across id, label, description, and optional keywords. */
+/** Simple substring match across id, label, optional context text, and optional keywords. */
 export function filterCommandPaletteCommands(
   commands: ReadonlyArray<CommandPaletteCommand>,
   query: string,
@@ -18,7 +18,7 @@ export function filterCommandPaletteCommands(
   return commands.filter((command) => {
     if (command.id.toLowerCase().includes(q)) return true;
     if (command.label.toLowerCase().includes(q)) return true;
-    if (command.description.toLowerCase().includes(q)) return true;
+    if (command.contextText?.toLowerCase().includes(q)) return true;
     return (command.keywords ?? []).some((keyword) => keyword.toLowerCase().includes(q));
   });
 }
