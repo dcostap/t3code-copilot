@@ -3,6 +3,7 @@ import { EditorState } from "@codemirror/state";
 
 import {
   getHistorySelectionLimitForPromptStart,
+  isCommandWidgetSummaryOverflowing,
   normalizeInlineDiffRowText,
   prefixCopiedLinesInOrder,
   prefixCopiedUserMessageStarts,
@@ -11,6 +12,7 @@ import {
   resolveCommandWidgetToggleSignatureFromEventTarget,
   resolveTranscriptLinkUrl,
   resolvePromptSelectionForDocument,
+  shouldRenderCommandWidgetToggleRail,
   shouldRenderPromptSeparator,
   shouldUseCustomCommandWidgetCopy,
   shouldIgnoreCommandWidgetEvent,
@@ -110,6 +112,59 @@ describe("resolveCommandWidgetToggleSignatureFromEventTarget", () => {
 
     expect(resolveCommandWidgetToggleSignatureFromEventTarget(railVisual)).toBe("cmd-1");
     expect(resolveCommandWidgetToggleSignatureFromEventTarget(body)).toBeNull();
+  });
+});
+
+describe("isCommandWidgetSummaryOverflowing", () => {
+  it("detects when the collapsed summary is actually ellipsized", () => {
+    expect(isCommandWidgetSummaryOverflowing({ clientWidth: 120, scrollWidth: 180 })).toBe(true);
+    expect(isCommandWidgetSummaryOverflowing({ clientWidth: 120, scrollWidth: 121 })).toBe(false);
+  });
+
+  it("treats missing elements as not overflowing", () => {
+    expect(isCommandWidgetSummaryOverflowing(null)).toBe(false);
+  });
+});
+
+describe("shouldRenderCommandWidgetToggleRail", () => {
+  it("keeps the rail when the widget is already expanded", () => {
+    expect(
+      shouldRenderCommandWidgetToggleRail({
+        expanded: true,
+        hasHiddenExpansionContent: false,
+        summaryOverflowing: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("shows the rail when expansion would reveal hidden body or diff content", () => {
+    expect(
+      shouldRenderCommandWidgetToggleRail({
+        expanded: false,
+        hasHiddenExpansionContent: true,
+        summaryOverflowing: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("shows the rail when the collapsed summary is ellipsized", () => {
+    expect(
+      shouldRenderCommandWidgetToggleRail({
+        expanded: false,
+        hasHiddenExpansionContent: false,
+        summaryOverflowing: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("hides the rail when expansion would not change anything", () => {
+    expect(
+      shouldRenderCommandWidgetToggleRail({
+        expanded: false,
+        hasHiddenExpansionContent: false,
+        summaryOverflowing: false,
+      }),
+    ).toBe(false);
   });
 });
 
