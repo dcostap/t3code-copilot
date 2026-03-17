@@ -1068,37 +1068,34 @@ export function App() {
       <div className="bg-image" />
       <div className="bg-gradient" />
       <div className={isDesktop ? "console-shell console-shell--desktop" : "console-shell"}>
-        <div
-          className={isDesktop ? "session-tabs session-tabs--desktop" : "session-tabs"}
-          role="tablist"
-          aria-label="Workspace sessions"
-        >
-          {workspace.sessions.map((session) => (
-            <button
-              key={session.id}
-              type="button"
-              role="tab"
-              aria-selected={session.id === activeSession?.id}
-              className={
-                session.id === activeSession?.id
-                  ? "session-tab session-tab--active"
-                  : "session-tab"
-              }
-              onClick={() => activateSession(session.id)}
-              onMouseDown={(event) => {
-                if (event.button !== 1) {
-                  return;
+        <div className={isDesktop ? "session-tabs session-tabs--desktop" : "session-tabs"}>
+          <div className="session-tabs__list" role="tablist" aria-label="Workspace sessions">
+            {workspace.sessions.map((session) => (
+              <button
+                key={session.id}
+                type="button"
+                role="tab"
+                aria-selected={session.id === activeSession?.id}
+                className={
+                  session.id === activeSession?.id
+                    ? "session-tab session-tab--active"
+                    : "session-tab"
                 }
-                event.preventDefault();
-                event.stopPropagation();
-                closeSession(session.id);
-              }}
-              title={session.cwd}
-            >
-              <span className="session-tab__title">{session.title}</span>
-              <span className="session-tab__meta">{session.histories.length}</span>
-            </button>
-          ))}
+                onClick={() => activateSession(session.id)}
+                onMouseDown={(event) => {
+                  if (event.button !== 1) {
+                    return;
+                  }
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeSession(session.id);
+                }}
+                title={session.cwd}
+              >
+                <span className="session-tab__title">{session.title}</span>
+              </button>
+            ))}
+          </div>
           <button
             type="button"
             className="session-tab session-tab--create"

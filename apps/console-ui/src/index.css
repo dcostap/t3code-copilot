@@ -60,62 +60,84 @@ body {
 
 .session-tabs {
   display: flex;
+  align-items: flex-end;
   gap: 8px;
-  align-items: center;
-  min-height: 38px;
-  padding: 0 10px 8px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-}
-
-.session-tabs::-webkit-scrollbar {
-  display: none;
+  min-height: 46px;
+  padding: 0 12px;
+  overflow: hidden;
 }
 
 .session-tabs--desktop {
   min-height: 46px;
-  padding: 8px 12px 8px 12px;
-  background: linear-gradient(to bottom, rgba(17, 20, 25, 0.98), rgba(17, 20, 25, 0.74));
+  padding: 8px 12px 0;
+  background: rgba(15, 17, 21, 0.98);
   -webkit-app-region: drag;
 }
 
-.session-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
+.session-tabs__list {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 8px;
   min-width: 0;
-  max-width: 260px;
-  height: 30px;
-  padding: 0 12px;
-  border: 1px solid rgba(95, 103, 111, 0.22);
-  background: rgba(14, 17, 22, 0.74);
-  color: #7e868f;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.session-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex: 1 1 200px;
+  width: 200px;
+  min-width: 0;
+  max-width: 200px;
+  height: 36px;
+  padding: 0 16px 0 18px;
+  border: none;
+  border-radius: 0;
+  background: rgba(27, 31, 35, 0.97);
+  color: #899198;
   font: inherit;
+  font-size: 13px;
   cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease;
   -webkit-app-region: no-drag;
 }
 
-.session-tab:hover {
-  color: #b8bec6;
-  border-color: rgba(117, 126, 135, 0.3);
+.session-tab::before {
+  content: none;
+}
+
+.session-tab::after {
+  content: none;
 }
 
 .session-tab--active {
-  border-color: rgba(87, 150, 214, 0.4);
-  background: rgba(17, 22, 28, 0.94);
-  color: #d6dbe0;
+  background: rgba(35, 40, 45, 0.98);
+  color: #eef3f7;
+}
+
+.session-tab:hover {
+  background: rgba(31, 35, 40, 0.98);
+  color: #c7d0d8;
 }
 
 .session-tab--create {
   justify-content: center;
-  width: 32px;
-  min-width: 32px;
+  flex: 0 0 36px;
+  width: 36px;
+  min-width: 36px;
+  max-width: 36px;
   padding: 0;
+  font-size: 18px;
+  line-height: 1;
 }
 
 .console-shell--desktop .conversation-scroll {
-  padding-top: 2px;
+  padding-top: 0;
 }
 
 .session-tab--create:disabled {
@@ -129,16 +151,14 @@ body {
 }
 
 .session-tab__title {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.session-tab__meta {
-  flex-shrink: 0;
-  color: #59616a;
-  font-size: 12px;
+  text-align: left;
 }
 
 .conversation-scroll {
