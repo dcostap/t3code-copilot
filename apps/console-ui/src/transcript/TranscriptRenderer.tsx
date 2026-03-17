@@ -172,10 +172,19 @@ interface CommandWidgetLineContent {
 
 export type TranscriptRegion = "prompt" | "history";
 
+interface TranscriptScrollSnapshot {
+  readonly top: number;
+  readonly left: number;
+  readonly stickToBottom: boolean;
+}
+
 export interface TranscriptRendererHandle {
   focus(): void;
   focusPrompt(): void;
   focusHistory(): void;
+  getScrollSnapshot(): TranscriptScrollSnapshot | null;
+  restoreScrollSnapshot(snapshot: TranscriptScrollSnapshot): void;
+  scrollToBottom(): void;
 }
 
 const CURSOR_VIEWPORT_PADDING_LINES = 7;
@@ -2598,6 +2607,47 @@ function preserveConversationScrollPosition(view: EditorView, update: () => void
   });
 }
 
+function getConversationScrollSnapshot(view: EditorView): TranscriptScrollSnapshot | null {
+  const scrollContainer = getConversationScrollContainer(view);
+  if (!scrollContainer) {
+    return null;
+  }
+
+  return {
+    top: scrollContainer.scrollTop,
+    left: scrollContainer.scrollLeft,
+    stickToBottom: isConversationScrollNearBottom(view),
+  };
+}
+
+function restoreConversationScrollSnapshot(view: EditorView, snapshot: TranscriptScrollSnapshot) {
+  if (snapshot.stickToBottom) {
+    scrollConversationToBottom(view);
+    requestAnimationFrame(() => {
+      scrollConversationToBottom(view);
+    });
+    return;
+  }
+
+  const scrollContainer = getConversationScrollContainer(view);
+  if (!scrollContainer) {
+    return;
+  }
+
+  const applySnapshot = () => {
+    scrollContainer.scrollTop = snapshot.top;
+    scrollContainer.scrollLeft = snapshot.left;
+  };
+
+  applySnapshot();
+  requestAnimationFrame(() => {
+    applySnapshot();
+    requestAnimationFrame(() => {
+      applySnapshot();
+    });
+  });
+}
+
 function isConversationScrollNearBottom(view: EditorView, thresholdPx = 24) {
   const scrollContainer = getConversationScrollContainer(view);
   if (!scrollContainer) {
@@ -3071,6 +3121,27 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           return;
         }
         focusHistoryRegion(view);
+      },
+      getScrollSnapshot() {
+        const view = viewRef.current;
+        if (!view) {
+          return null;
+        }
+        return getConversationScrollSnapshot(view);
+      },
+      restoreScrollSnapshot(snapshot) {
+        const view = viewRef.current;
+        if (!view) {
+          return;
+        }
+        restoreConversationScrollSnapshot(view, snapshot);
+      },
+      scrollToBottom() {
+        const view = viewRef.current;
+        if (!view) {
+          return;
+        }
+        scrollConversationToBottom(view);
       },
     }), [focusHistoryRegion, focusPromptRegion]);
 

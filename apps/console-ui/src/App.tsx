@@ -97,6 +97,9 @@ export function App() {
   >({});
   const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
   const hasInitiallyFocusedPromptRef = useRef(false);
+  const paneScrollSnapshotByPaneIdRef = useRef<
+    Record<string, { top: number; left: number; stickToBottom: boolean }>
+  >({});
   const composerAttachmentsRef = useRef(composerAttachmentsByPaneId);
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
   const activePane = workspace.activePane;
@@ -291,6 +294,21 @@ export function App() {
     }
     paneRefs.current[activePaneId]?.focusPrompt();
   }, [activePaneId]);
+
+  const capturePaneScrollSnapshots = useCallback(() => {
+    for (const [paneId, handle] of Object.entries(paneRefs.current)) {
+      const snapshot = handle?.getScrollSnapshot();
+      if (!snapshot) {
+        continue;
+      }
+      paneScrollSnapshotByPaneIdRef.current[paneId] = snapshot;
+    }
+  }, []);
+
+  const activateSessionAndRestoreScroll = useCallback((sessionId: string) => {
+    capturePaneScrollSnapshots();
+    activateSession(sessionId);
+  }, [activateSession, capturePaneScrollSnapshots]);
 
   const activatePaneAndFocus = useCallback((paneId: string) => {
     activatePane(paneId);
@@ -548,6 +566,7 @@ export function App() {
         worktreePath: sessionWorktreePath,
         createdAt,
       });
+      capturePaneScrollSnapshots();
       createSessionFromHistory({
         threadId: result.threadId,
         preferredProvider,
@@ -560,7 +579,7 @@ export function App() {
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "Failed to create a new session.");
     }
-  }, [activeProject, activeSession, activeThread, createSessionFromHistory, createThread, resolveModelForProvider]);
+  }, [activeProject, activeSession, activeThread, capturePaneScrollSnapshots, createSessionFromHistory, createThread, resolveModelForProvider]);
   const handleSplitActivePane = useCallback(async (preferredProvider: ProviderKind) => {
     if (!activeSession) {
       setSubmitError("No active session is available to split.");
@@ -588,6 +607,7 @@ export function App() {
         worktreePath: sessionWorktreePath,
         createdAt,
       });
+      capturePaneScrollSnapshots();
       workspace.splitActivePane({
         threadId: result.threadId,
         preferredProvider,
@@ -600,7 +620,7 @@ export function App() {
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "Failed to split the active pane.");
     }
-  }, [activeProject, activeSession, activeThread, createThread, resolveModelForProvider, workspace]);
+  }, [activeProject, activeSession, activeThread, capturePaneScrollSnapshots, createThread, resolveModelForProvider, workspace]);
   const paneViews = useMemo(() => {
     if (!activeSession) {
       return [];
@@ -690,6 +710,10 @@ export function App() {
     pendingUserInputAnswersByRequestId,
     pendingUserInputQuestionIndexByRequestId,
   ]);
+  const activeSessionPaneLayoutKey = useMemo(
+    () => (activeSession ? `${activeSession.id}:${activeSession.panes.map((pane) => pane.id).join(",")}` : null),
+    [activeSession],
+  );
   const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
     const commands: AppPaletteCommand[] = [];
     const currentSession = activeSession;
@@ -705,7 +729,7 @@ export function App() {
         contextText: `${session.cwd} · ${session.histories.length} histories`,
         keywords: ["session", session.title, session.cwd],
         run: () => {
-          activateSession(session.id);
+          activateSessionAndRestoreScroll(session.id);
         },
       });
     }
@@ -884,7 +908,7 @@ export function App() {
 
     return commands;
   }, [
-    activateSession,
+    activateSessionAndRestoreScroll,
     activePendingUserInputs,
     activeProject,
     activeSession,
@@ -966,6 +990,29 @@ export function App() {
       paneRefs.current[activePaneId]?.focusPrompt();
     });
   }, [activePaneId]);
+
+  useEffect(() => {
+    if (!activeSession || !activeSessionPaneLayoutKey) {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      activeSession.panes.forEach((pane) => {
+        const handle = paneRefs.current[pane.id];
+        if (!handle) {
+          return;
+        }
+
+        const snapshot = paneScrollSnapshotByPaneIdRef.current[pane.id];
+        if (snapshot) {
+          handle.restoreScrollSnapshot(snapshot);
+          return;
+        }
+
+        handle.scrollToBottom();
+      });
+    });
+  }, [activeSession, activeSessionPaneLayoutKey]);
 
   useEffect(() => {
     if (selectedCommandIndex < filteredCommands.length) {
@@ -1080,7 +1127,7 @@ export function App() {
                     ? "session-tab session-tab--active"
                     : "session-tab"
                 }
-                onClick={() => activateSession(session.id)}
+                onClick={() => activateSessionAndRestoreScroll(session.id)}
                 onMouseDown={(event) => {
                   if (event.button !== 1) {
                     return;
