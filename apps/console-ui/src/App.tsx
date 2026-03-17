@@ -95,11 +95,12 @@ export function App() {
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] = useState<
     Record<string, number>
   >({});
+  const [mountedSessionIds, setMountedSessionIds] = useState<ReadonlySet<string>>(
+    () => new Set(activeSession ? [activeSession.id] : []),
+  );
   const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
   const hasInitiallyFocusedPromptRef = useRef(false);
-  const paneScrollSnapshotByPaneIdRef = useRef<
-    Record<string, { top: number; left: number; stickToBottom: boolean }>
-  >({});
+  const initializedPaneIdsRef = useRef<Record<string, true>>({});
   const composerAttachmentsRef = useRef(composerAttachmentsByPaneId);
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
   const activePane = workspace.activePane;
@@ -294,21 +295,6 @@ export function App() {
     }
     paneRefs.current[activePaneId]?.focusPrompt();
   }, [activePaneId]);
-
-  const capturePaneScrollSnapshots = useCallback(() => {
-    for (const [paneId, handle] of Object.entries(paneRefs.current)) {
-      const snapshot = handle?.getScrollSnapshot();
-      if (!snapshot) {
-        continue;
-      }
-      paneScrollSnapshotByPaneIdRef.current[paneId] = snapshot;
-    }
-  }, []);
-
-  const activateSessionAndRestoreScroll = useCallback((sessionId: string) => {
-    capturePaneScrollSnapshots();
-    activateSession(sessionId);
-  }, [activateSession, capturePaneScrollSnapshots]);
 
   const activatePaneAndFocus = useCallback((paneId: string) => {
     activatePane(paneId);
@@ -566,7 +552,6 @@ export function App() {
         worktreePath: sessionWorktreePath,
         createdAt,
       });
-      capturePaneScrollSnapshots();
       createSessionFromHistory({
         threadId: result.threadId,
         preferredProvider,
@@ -579,7 +564,7 @@ export function App() {
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "Failed to create a new session.");
     }
-  }, [activeProject, activeSession, activeThread, capturePaneScrollSnapshots, createSessionFromHistory, createThread, resolveModelForProvider]);
+  }, [activeProject, activeSession, activeThread, createSessionFromHistory, createThread, resolveModelForProvider]);
   const handleSplitActivePane = useCallback(async (preferredProvider: ProviderKind) => {
     if (!activeSession) {
       setSubmitError("No active session is available to split.");
@@ -607,7 +592,6 @@ export function App() {
         worktreePath: sessionWorktreePath,
         createdAt,
       });
-      capturePaneScrollSnapshots();
       workspace.splitActivePane({
         threadId: result.threadId,
         preferredProvider,
@@ -620,84 +604,90 @@ export function App() {
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "Failed to split the active pane.");
     }
-  }, [activeProject, activeSession, activeThread, capturePaneScrollSnapshots, createThread, resolveModelForProvider, workspace]);
-  const paneViews = useMemo(() => {
-    if (!activeSession) {
-      return [];
-    }
+  }, [activeProject, activeSession, activeThread, createThread, resolveModelForProvider, workspace]);
+  const sessionViews = useMemo(() => {
+    return workspace.sessions
+      .filter((session) => session.id === activeSession?.id || mountedSessionIds.has(session.id))
+      .map((session) => {
+        const paneViews = session.panes.map((pane, index) => {
+          const history = session.histories.find((candidate) => candidate.id === pane.historyId) ?? null;
+          const threadId = history?.threadId ?? null;
+          const thread =
+            threadId ? (consoleData.threads.find((candidate) => candidate.id === threadId) ?? null) : null;
+          const pendingUserInputs = threadId ? getPendingUserInputs(threadId) : [];
+          const pendingUserInput = pendingUserInputs[0] ?? null;
+          const pendingQuestionIndex = pendingUserInput
+            ? (pendingUserInputQuestionIndexByRequestId[pendingUserInput.requestId] ?? 0)
+            : 0;
+          const pendingQuestion = pendingUserInput?.questions[pendingQuestionIndex] ?? null;
+          const draft = composerDraftByPaneId[pane.id] ?? "";
+          const pendingShortcut = pendingQuestion
+            ? resolvePendingUserInputShortcut(draft, pendingQuestion.options)
+            : null;
+          const panePendingPromptSendStartedAt = threadId
+            ? (pendingPromptSendStartedAtByThreadId[threadId] ?? null)
+            : null;
+          const paneNow =
+            threadId && (isThreadTurnRunning(threadId) || panePendingPromptSendStartedAt !== null)
+              ? nowIso
+              : undefined;
+          const blocks = thread
+            ? (() => {
+                const nextBlocks = threadToTranscriptBlocks(thread, {
+                  resolveAttachmentPreviewUrl: (attachmentId) =>
+                    `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
+                  orchestrationEvents: getThreadEvents(thread.id),
+                  ...(paneNow ? { now: paneNow } : {}),
+                });
+                if (
+                  panePendingPromptSendStartedAt !== null
+                  && paneNow
+                  && !isThreadTurnRunning(threadId)
+                ) {
+                  return [
+                    ...nextBlocks,
+                    {
+                      type: "sending-state" as const,
+                      startedAt: panePendingPromptSendStartedAt,
+                      now: paneNow,
+                    },
+                  ];
+                }
+                return nextBlocks;
+              })()
+            : [{
+                type: "status" as const,
+                text: history?.pending ? "Loading session history..." : "History unavailable in this session.",
+              }];
 
-    return activeSession.panes.map((pane, index) => {
-      const history = activeSession.histories.find((candidate) => candidate.id === pane.historyId) ?? null;
-      const threadId = history?.threadId ?? null;
-      const thread =
-        threadId ? (consoleData.threads.find((candidate) => candidate.id === threadId) ?? null) : null;
-      const pendingUserInputs = threadId ? getPendingUserInputs(threadId) : [];
-      const pendingUserInput = pendingUserInputs[0] ?? null;
-      const pendingQuestionIndex = pendingUserInput
-        ? (pendingUserInputQuestionIndexByRequestId[pendingUserInput.requestId] ?? 0)
-        : 0;
-      const pendingQuestion = pendingUserInput?.questions[pendingQuestionIndex] ?? null;
-      const draft = composerDraftByPaneId[pane.id] ?? "";
-      const pendingShortcut = pendingQuestion
-        ? resolvePendingUserInputShortcut(draft, pendingQuestion.options)
-        : null;
-       const panePendingPromptSendStartedAt = threadId
-         ? (pendingPromptSendStartedAtByThreadId[threadId] ?? null)
-         : null;
-       const paneNow =
-         threadId && (isThreadTurnRunning(threadId) || panePendingPromptSendStartedAt !== null)
-           ? nowIso
-           : undefined;
-       const blocks = thread
-         ? (() => {
-             const nextBlocks = threadToTranscriptBlocks(thread, {
-               resolveAttachmentPreviewUrl: (attachmentId) =>
-                 `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
-               orchestrationEvents: getThreadEvents(thread.id),
-               ...(paneNow ? { now: paneNow } : {}),
-             });
-             if (
-               panePendingPromptSendStartedAt !== null
-               && paneNow
-               && !isThreadTurnRunning(threadId)
-             ) {
-               return [
-                 ...nextBlocks,
-                 {
-                   type: "sending-state" as const,
-                   startedAt: panePendingPromptSendStartedAt,
-                   now: paneNow,
-                 },
-               ];
-             }
-             return nextBlocks;
-           })()
-         : [{
-             type: "status" as const,
-             text: history?.pending ? "Loading session history..." : "History unavailable in this session.",
-           }];
+          return {
+            pane,
+            history,
+            threadId,
+            thread,
+            isActive: pane.id === session.activePaneId,
+            index,
+            blocks,
+            draft,
+            attachments: [...(composerAttachmentsByPaneId[pane.id] ?? [])],
+            pendingUserInput,
+            pendingQuestionIndex,
+            pendingQuestion,
+            draftAnswers: pendingUserInput
+              ? (pendingUserInputAnswersByRequestId[pendingUserInput.requestId] ?? {})
+              : {},
+            pendingShortcut,
+          };
+        });
 
-      return {
-        pane,
-        history,
-        threadId,
-        thread,
-        isActive: pane.id === activeSession.activePaneId,
-        index,
-        blocks,
-        draft,
-        attachments: [...(composerAttachmentsByPaneId[pane.id] ?? [])],
-        pendingUserInput,
-        pendingQuestionIndex,
-        pendingQuestion,
-        draftAnswers: pendingUserInput
-          ? (pendingUserInputAnswersByRequestId[pendingUserInput.requestId] ?? {})
-          : {},
-        pendingShortcut,
-      };
-    });
+        return {
+          session,
+          paneViews,
+          isActive: session.id === activeSession?.id,
+        };
+      });
   }, [
-    activeSession,
+    activeSession?.id,
     attachmentPreviewBaseUrl,
     composerAttachmentsByPaneId,
     composerDraftByPaneId,
@@ -705,14 +695,23 @@ export function App() {
     getPendingUserInputs,
     getThreadEvents,
     isThreadTurnRunning,
+    mountedSessionIds,
     nowIso,
     pendingPromptSendStartedAtByThreadId,
     pendingUserInputAnswersByRequestId,
     pendingUserInputQuestionIndexByRequestId,
+    workspace.sessions,
   ]);
+  const activeSessionView = useMemo(
+    () => sessionViews.find((sessionView) => sessionView.session.id === activeSession?.id) ?? null,
+    [activeSession?.id, sessionViews],
+  );
+  const activePaneViews = activeSessionView?.paneViews ?? [];
   const activeSessionPaneLayoutKey = useMemo(
-    () => (activeSession ? `${activeSession.id}:${activeSession.panes.map((pane) => pane.id).join(",")}` : null),
-    [activeSession],
+    () => (activeSessionView
+      ? `${activeSessionView.session.id}:${activeSessionView.paneViews.map((paneView) => paneView.pane.id).join(",")}`
+      : null),
+    [activeSessionView],
   );
   const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
     const commands: AppPaletteCommand[] = [];
@@ -729,7 +728,7 @@ export function App() {
         contextText: `${session.cwd} · ${session.histories.length} histories`,
         keywords: ["session", session.title, session.cwd],
         run: () => {
-          activateSessionAndRestoreScroll(session.id);
+          activateSession(session.id);
         },
       });
     }
@@ -908,7 +907,7 @@ export function App() {
 
     return commands;
   }, [
-    activateSessionAndRestoreScroll,
+    activateSession,
     activePendingUserInputs,
     activeProject,
     activeSession,
@@ -943,6 +942,7 @@ export function App() {
     const livePaneIds = new Set(
       workspace.sessions.flatMap((session) => session.panes.map((pane) => pane.id)),
     );
+    const liveSessionIds = new Set(workspace.sessions.map((session) => session.id));
     setComposerAttachmentsByPaneId((existing) => {
       let changed = false;
       const nextEntries = Object.entries(existing)
@@ -972,7 +972,30 @@ export function App() {
         Object.entries(existing).filter(([paneId]) => livePaneIds.has(paneId)),
       ),
     );
+    setMountedSessionIds((existing) => {
+      const next = new Set([...existing].filter((sessionId) => liveSessionIds.has(sessionId)));
+      if (next.size === existing.size && [...next].every((sessionId) => existing.has(sessionId))) {
+        return existing;
+      }
+      return next;
+    });
+    initializedPaneIdsRef.current = Object.fromEntries(
+      Object.entries(initializedPaneIdsRef.current).filter(([paneId]) => livePaneIds.has(paneId)),
+    );
   }, [workspace.sessions]);
+
+  useEffect(() => {
+    if (!activeSession) {
+      return;
+    }
+
+    setMountedSessionIds((existing) => {
+      if (existing.has(activeSession.id)) {
+        return existing;
+      }
+      return new Set(existing).add(activeSession.id);
+    });
+  }, [activeSession]);
 
   useEffect(() => {
     return () => {
@@ -992,27 +1015,26 @@ export function App() {
   }, [activePaneId]);
 
   useEffect(() => {
-    if (!activeSession || !activeSessionPaneLayoutKey) {
+    if (!activeSessionView || !activeSessionPaneLayoutKey) {
       return;
     }
 
     requestAnimationFrame(() => {
-      activeSession.panes.forEach((pane) => {
-        const handle = paneRefs.current[pane.id];
+      activeSessionView.paneViews.forEach((paneView) => {
+        if (initializedPaneIdsRef.current[paneView.pane.id]) {
+          return;
+        }
+
+        const handle = paneRefs.current[paneView.pane.id];
         if (!handle) {
           return;
         }
 
-        const snapshot = paneScrollSnapshotByPaneIdRef.current[pane.id];
-        if (snapshot) {
-          handle.restoreScrollSnapshot(snapshot);
-          return;
-        }
-
+        initializedPaneIdsRef.current[paneView.pane.id] = true;
         handle.scrollToBottom();
       });
     });
-  }, [activeSession, activeSessionPaneLayoutKey]);
+  }, [activeSessionPaneLayoutKey, activeSessionView]);
 
   useEffect(() => {
     if (selectedCommandIndex < filteredCommands.length) {
@@ -1127,7 +1149,7 @@ export function App() {
                     ? "session-tab session-tab--active"
                     : "session-tab"
                 }
-                onClick={() => activateSessionAndRestoreScroll(session.id)}
+                onClick={() => activateSession(session.id)}
                 onMouseDown={(event) => {
                   if (event.button !== 1) {
                     return;
@@ -1153,65 +1175,77 @@ export function App() {
           </button>
           {isDesktop ? <div className="session-tabs__drag-space" aria-hidden="true" /> : null}
         </div>
-        <main className={paneViews.length > 1 ? "conversation-scroll conversation-scroll--split" : "conversation-scroll"}>
-          {paneViews.length > 0 ? (
-            <div className={paneViews.length > 1 ? "pane-grid pane-grid--split" : "pane-grid"}>
-              {paneViews.map((paneView) => (
-                <section
-                  key={paneView.pane.id}
-                  className={
-                    paneView.isActive
-                      ? "conversation-pane conversation-pane--active"
-                      : "conversation-pane"
-                  }
-                  onMouseDownCapture={() => activatePane(paneView.pane.id)}
-                >
-                  <div className="transcript-shell">
-                    <TranscriptRenderer
-                      ref={(handle) => {
-                        paneRefs.current[paneView.pane.id] = handle;
-                      }}
-                      blocks={paneView.blocks}
-                      composerAttachments={paneView.attachments}
-                      cwd={activeSession?.cwd ?? paneView.thread?.worktreePath ?? activeProject?.workspaceRoot ?? null}
-                      interactionMode={paneView.thread?.interactionMode ?? "default"}
-                      {...(paneView.pendingUserInput && paneView.pendingQuestion
-                        ? {
-                            pendingUserInputHighlight: {
-                              requestId: paneView.pendingUserInput.requestId,
-                              questionIndex: paneView.pendingQuestionIndex,
-                              ...(paneView.pendingShortcut
-                                ? { optionIndex: paneView.pendingShortcut.optionIndex }
-                                : {}),
-                            },
-                          }
-                        : {})}
-                      onAddImageFiles={(files) => handleAddImageFilesForPane(paneView.pane.id, files)}
-                      onDraftChange={(value) => setComposerDraftForPane(paneView.pane.id, value)}
-                      onRemoveImage={(attachmentId) => handleRemoveImageForPane(paneView.pane.id, attachmentId)}
-                      resolveInlineDiff={(lookup) =>
-                        getTurnDiff({
-                          threadId: lookup.threadId as ThreadId,
-                          fromTurnCount: lookup.fromTurnCount,
-                          toTurnCount: lookup.toTurnCount,
-                        })}
-                      onSubmit={(value) =>
-                        handleSubmit(
-                          paneView.pane.id,
-                          paneView.threadId,
-                          paneView.history?.preferredProvider ?? null,
-                          paneView.pendingUserInput,
-                          paneView.pendingQuestion,
-                          paneView.pendingQuestionIndex,
-                          paneView.draftAnswers,
-                          value,
-                        )}
-                      submitDisabled={!canSubmitPromptForThread(paneView.threadId)}
-                    />
-                  </div>
-                </section>
-              ))}
-            </div>
+        <main className={activePaneViews.length > 1 ? "conversation-scroll conversation-scroll--split" : "conversation-scroll"}>
+          {sessionViews.length > 0 ? (
+            sessionViews.map((sessionView) => (
+              <div
+                key={sessionView.session.id}
+                className={
+                  sessionView.paneViews.length > 1
+                    ? "conversation-session conversation-session--split"
+                    : "conversation-session"
+                }
+                hidden={!sessionView.isActive}
+              >
+                <div className={sessionView.paneViews.length > 1 ? "pane-grid pane-grid--split" : "pane-grid"}>
+                  {sessionView.paneViews.map((paneView) => (
+                    <section
+                      key={paneView.pane.id}
+                      className={
+                        paneView.isActive
+                          ? "conversation-pane conversation-pane--active"
+                          : "conversation-pane"
+                      }
+                      onMouseDownCapture={() => activatePane(paneView.pane.id)}
+                    >
+                      <div className="transcript-shell">
+                        <TranscriptRenderer
+                          ref={(handle) => {
+                            paneRefs.current[paneView.pane.id] = handle;
+                          }}
+                          blocks={paneView.blocks}
+                          composerAttachments={paneView.attachments}
+                          cwd={sessionView.session.cwd ?? paneView.thread?.worktreePath ?? null}
+                          interactionMode={paneView.thread?.interactionMode ?? "default"}
+                          {...(paneView.pendingUserInput && paneView.pendingQuestion
+                            ? {
+                                pendingUserInputHighlight: {
+                                  requestId: paneView.pendingUserInput.requestId,
+                                  questionIndex: paneView.pendingQuestionIndex,
+                                  ...(paneView.pendingShortcut
+                                    ? { optionIndex: paneView.pendingShortcut.optionIndex }
+                                    : {}),
+                                },
+                              }
+                            : {})}
+                          onAddImageFiles={(files) => handleAddImageFilesForPane(paneView.pane.id, files)}
+                          onDraftChange={(value) => setComposerDraftForPane(paneView.pane.id, value)}
+                          onRemoveImage={(attachmentId) => handleRemoveImageForPane(paneView.pane.id, attachmentId)}
+                          resolveInlineDiff={(lookup) =>
+                            getTurnDiff({
+                              threadId: lookup.threadId as ThreadId,
+                              fromTurnCount: lookup.fromTurnCount,
+                              toTurnCount: lookup.toTurnCount,
+                            })}
+                          onSubmit={(value) =>
+                            handleSubmit(
+                              paneView.pane.id,
+                              paneView.threadId,
+                              paneView.history?.preferredProvider ?? null,
+                              paneView.pendingUserInput,
+                              paneView.pendingQuestion,
+                              paneView.pendingQuestionIndex,
+                              paneView.draftAnswers,
+                              value,
+                            )}
+                          submitDisabled={!canSubmitPromptForThread(paneView.threadId)}
+                        />
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              </div>
+            ))
           ) : (
             <div className="transcript-shell">
               <TranscriptRenderer
