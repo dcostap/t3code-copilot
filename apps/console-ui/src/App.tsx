@@ -96,6 +96,7 @@ export function App() {
     Record<string, number>
   >({});
   const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
+  const hasInitiallyFocusedPromptRef = useRef(false);
   const composerAttachmentsRef = useRef(composerAttachmentsByPaneId);
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
   const activePane = workspace.activePane;
@@ -956,17 +957,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const focusTranscript = () => {
-      focusActivePanePrompt();
-    };
+    if (hasInitiallyFocusedPromptRef.current || !activePaneId) {
+      return;
+    }
 
-    focusTranscript();
+    hasInitiallyFocusedPromptRef.current = true;
     requestAnimationFrame(() => {
-      focusTranscript();
-      setTimeout(focusTranscript, 0);
-      setTimeout(focusTranscript, 40);
+      paneRefs.current[activePaneId]?.focusPrompt();
     });
-  }, [focusActivePanePrompt]);
+  }, [activePaneId]);
 
   useEffect(() => {
     if (selectedCommandIndex < filteredCommands.length) {

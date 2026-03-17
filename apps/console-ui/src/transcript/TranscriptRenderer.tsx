@@ -2810,7 +2810,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
   ) {
     const editorRef = useRef<HTMLDivElement | null>(null);
     const viewRef = useRef<EditorView | null>(null);
-    const hasAutofocusedRef = useRef(false);
     const syncingViewRef = useRef(false);
     const submittingRef = useRef(false);
     const activeRegionRef = useRef<TranscriptRegion>("prompt");
@@ -3360,19 +3359,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
       viewRef.current = view;
       appliedDecorationSignatureRef.current = buildDecorationSignature(initialDocModel);
-
-      if (!hasAutofocusedRef.current) {
-        hasAutofocusedRef.current = true;
-        const autofocus = () => {
-          focusPromptRegion(view);
-        };
-        autofocus();
-        requestAnimationFrame(() => {
-          autofocus();
-          setTimeout(autofocus, 0);
-          setTimeout(autofocus, 40);
-        });
-      }
 
       return () => {
         view.destroy();
