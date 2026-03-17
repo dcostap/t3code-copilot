@@ -603,7 +603,10 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
   const fileChangeUnifiedDiff = itemType === "file_change" ? extractFileChangeUnifiedDiff(payload) : null;
   const itemId = extractWorkItemId(payload);
   const webSearchQuery = itemType === "web_search" ? extractWebSearchQuery(payload) : null;
-  const toolDetail = toolInvocationDetail ?? detail;
+  const toolDetail =
+    itemType === "web_search"
+      ? detail ?? webSearchQuery ?? toolInvocationDetail
+      : toolInvocationDetail ?? detail;
 
   if (itemType === "file_change") {
     return {
@@ -684,7 +687,9 @@ function mergeWorkItems(previous: PendingWorkItem, next: PendingWorkItem): Pendi
     ? uniqueStrings([...(previous.changedFiles ?? []), ...(next.changedFiles ?? [])])
     : null;
   const detail =
-    previous.kind === "tool" && previous.detail
+    isWebSearchWorkItem(previous)
+      ? next.detail ?? previous.detail
+      : previous.kind === "tool" && previous.detail
       ? previous.detail
       : next.detail ?? previous.detail;
 

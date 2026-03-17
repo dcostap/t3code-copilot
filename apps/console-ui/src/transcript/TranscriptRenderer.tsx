@@ -148,6 +148,28 @@ interface InlineDiffResolutionState {
   readonly diff?: string;
 }
 
+interface CommandWidgetLineContent {
+  readonly signature: string;
+  readonly glyph: string;
+  readonly prefix: string;
+  readonly command: string;
+  readonly timingLabel?: string;
+  readonly counts?: {
+    additions: string;
+    deletions: string;
+  };
+  readonly inlineDiffFiles?: ReadonlyArray<InlineDiffFileData>;
+  readonly rawInlineDiff?: string;
+  readonly inlineDiffStateMessage?: string;
+  readonly inlineDiffStateClass?: string;
+  readonly outputLines?: ReadonlyArray<string>;
+  readonly expanded: boolean;
+  readonly hasHiddenExpansionContent: boolean;
+  readonly isFileChange: boolean;
+  readonly isRunning: boolean;
+  readonly statusClass?: string;
+}
+
 export type TranscriptRegion = "prompt" | "history";
 
 export interface TranscriptRendererHandle {
@@ -161,6 +183,7 @@ const CURSOR_VIEWPORT_PADDING_LINES = 7;
 const syncAnnotation = Annotation.define<boolean>();
 const setPromptStartEffect = StateEffect.define<number>();
 const decorationsCompartment = new Compartment();
+const commandWidgetResizeObservers = new WeakMap<HTMLElement, ResizeObserver>();
 
 const promptStartField = StateField.define<number>({
   create: () => 0,
@@ -476,6 +499,26 @@ export function shouldIgnoreCommandWidgetEvent(
     return false;
   }
   return resolveCommandWidgetToggleSignatureFromEventTarget(event.target) === null;
+}
+
+export function isCommandWidgetSummaryOverflowing(
+  element:
+    | Pick<HTMLElement, "clientWidth" | "scrollWidth">
+    | null
+    | undefined,
+) {
+  if (!element) {
+    return false;
+  }
+  return element.scrollWidth > element.clientWidth + 1;
+}
+
+export function shouldRenderCommandWidgetToggleRail(options: {
+  readonly expanded: boolean;
+  readonly hasHiddenExpansionContent: boolean;
+  readonly summaryOverflowing: boolean;
+}) {
+  return options.expanded || options.hasHiddenExpansionContent || options.summaryOverflowing;
 }
 
 export function resolveCommandWidgetCopyRowFromNode(target: unknown) {
@@ -938,26 +981,7 @@ function parseCommandWidgetText(text: string): {
 
 class CommandWidgetLine extends WidgetType {
   constructor(
-    private readonly content: {
-      signature: string;
-      glyph: string;
-      prefix: string;
-      command: string;
-      timingLabel?: string;
-      counts?: {
-        additions: string;
-        deletions: string;
-      };
-      inlineDiffFiles?: ReadonlyArray<InlineDiffFileData>;
-      rawInlineDiff?: string;
-      inlineDiffStateMessage?: string;
-      inlineDiffStateClass?: string;
-      outputLines?: ReadonlyArray<string>;
-      expanded: boolean;
-      isFileChange: boolean;
-      isRunning: boolean;
-      statusClass?: string;
-    },
+    private readonly content: CommandWidgetLineContent,
   ) {
     super();
   }
@@ -970,6 +994,12 @@ class CommandWidgetLine extends WidgetType {
     return shouldIgnoreCommandWidgetEvent(event);
   }
 
+  override destroy(dom: HTMLElement) {
+    const observer = commandWidgetResizeObservers.get(dom);
+    observer?.disconnect();
+    commandWidgetResizeObservers.delete(dom);
+  }
+
   override toDOM() {
     const root = document.createElement("div");
     root.className = [
@@ -980,12 +1010,21 @@ class CommandWidgetLine extends WidgetType {
       this.content.statusClass ?? "",
     ].filter(Boolean).join(" ");
     root.dataset.commandWidgetSignature = this.content.signature;
+    const shouldRenderRailInitially = shouldRenderCommandWidgetToggleRail({
+      expanded: this.content.expanded,
+      hasHiddenExpansionContent: this.content.hasHiddenExpansionContent,
+      summaryOverflowing: false,
+    });
+    root.classList.toggle("cm-commandWidgetSurfaceToggleable", shouldRenderRailInitially);
+    root.dataset.commandWidgetExpandable = shouldRenderRailInitially ? "true" : "false";
 
-    const rail = document.createElement("div");
-    rail.className = "cm-commandWidgetRail";
+    const gutter = document.createElement("div");
+    gutter.className = shouldRenderRailInitially ? "cm-commandWidgetRail" : "cm-commandWidgetRailSpacer";
     const railVisual = document.createElement("div");
     railVisual.className = "cm-commandWidgetRailVisual";
-    rail.append(railVisual);
+    if (shouldRenderRailInitially) {
+      gutter.append(railVisual);
+    }
 
     const contentRoot = document.createElement("div");
     contentRoot.className = "cm-commandWidgetContent";
@@ -1116,7 +1155,53 @@ class CommandWidgetLine extends WidgetType {
       contentRoot.append(inlineDiff);
     }
 
-    root.append(rail, contentRoot);
+    root.append(gutter, contentRoot);
+
+    const syncRail = () => {
+      const shouldRenderRail = shouldRenderCommandWidgetToggleRail({
+        expanded: this.content.expanded,
+        hasHiddenExpansionContent: this.content.hasHiddenExpansionContent,
+        summaryOverflowing:
+          !this.content.expanded
+          && !this.content.hasHiddenExpansionContent
+          && isCommandWidgetSummaryOverflowing(command),
+      });
+      root.classList.toggle("cm-commandWidgetSurfaceToggleable", shouldRenderRail);
+      root.dataset.commandWidgetExpandable = shouldRenderRail ? "true" : "false";
+      gutter.className = shouldRenderRail ? "cm-commandWidgetRail" : "cm-commandWidgetRailSpacer";
+      if (shouldRenderRail) {
+        if (!railVisual.isConnected) {
+          gutter.append(railVisual);
+        }
+        return;
+      }
+      if (railVisual.isConnected) {
+        railVisual.remove();
+      }
+    };
+
+    const scheduleRailSync = () => {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => {
+          if (!root.isConnected) {
+            return;
+          }
+          syncRail();
+        });
+        return;
+      }
+      queueMicrotask(syncRail);
+    };
+
+    scheduleRailSync();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => {
+        syncRail();
+      });
+      observer.observe(root);
+      commandWidgetResizeObservers.set(root, observer);
+    }
 
     return root;
   }
@@ -1321,6 +1406,11 @@ function buildTranscriptDocument(
     if (isFileChangeWidget && line.commandWidgetSignature) {
       fileChangeWidgetSignatures.add(line.commandWidgetSignature);
     }
+    const hasHiddenExpansionContent = Boolean(
+      (line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0)
+      || line.inlineUnifiedDiff
+      || line.inlineDiffLookup,
+    );
     const isExpandedCommand =
       line.commandWidgetSignature !== undefined
       && (
@@ -1428,6 +1518,7 @@ function buildTranscriptDocument(
                 }
               : {}),
             expanded: isExpandedCommand,
+            hasHiddenExpansionContent,
             isFileChange: isFileChangeWidget,
             isRunning,
             ...(statusClass ? { statusClass } : {}),
@@ -1435,7 +1526,7 @@ function buildTranscriptDocument(
           signature:
             `${line.commandWidgetSignature}:${line.text}:${isExpandedCommand}:${statusClass ?? ""}:`
             + `${effectiveInlineDiff ?? ""}:${resolvedInlineDiffState?.status ?? ""}:`
-            + `${line.commandWidgetOutputLines?.join("\n") ?? ""}`,
+            + `${line.commandWidgetOutputLines?.join("\n") ?? ""}:${hasHiddenExpansionContent ? "1" : "0"}`,
         });
       }
     }
@@ -1969,7 +2060,7 @@ function buildEditorTheme() {
         margin: "1px 0",
         backgroundColor: "transparent",
       },
-      ".cm-commandWidgetRail": {
+      ".cm-commandWidgetRail, .cm-commandWidgetRailSpacer": {
         flex: "0 0 16px",
         width: "16px",
         alignSelf: "stretch",
@@ -1977,6 +2068,8 @@ function buildEditorTheme() {
         alignItems: "center",
         justifyContent: "flex-start",
         paddingLeft: "4px",
+      },
+      ".cm-commandWidgetRail": {
         cursor: "pointer",
       },
       ".cm-commandWidgetRailVisual": {
