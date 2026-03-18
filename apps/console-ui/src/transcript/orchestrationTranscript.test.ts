@@ -226,6 +226,221 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("backpatches completed web searches into their original history position by tool id", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-web-search-1-start"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "Web search started",
+          payload: {
+            itemType: "web_search",
+            title: "Web search",
+            status: "inProgress",
+            data: {
+              toolCallId: "ws-1",
+            },
+          },
+          turnId: TurnId.makeUnsafe("turn-web-search-a"),
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:00.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-reasoning-between-searches"),
+          tone: "info",
+          kind: "reasoning.text",
+          summary: "Reasoning",
+          payload: {
+            text: "Need one more source before concluding.",
+          },
+          turnId: TurnId.makeUnsafe("turn-web-search-a"),
+          sequence: 2,
+          createdAt: "2026-03-11T09:00:01.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-web-search-2-start"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "Web search started",
+          payload: {
+            itemType: "web_search",
+            title: "Web search",
+            status: "inProgress",
+            data: {
+              toolCallId: "ws-2",
+            },
+          },
+          turnId: TurnId.makeUnsafe("turn-web-search-b"),
+          sequence: 3,
+          createdAt: "2026-03-11T09:00:02.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-web-search-1-complete"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "Web search complete",
+          payload: {
+            itemType: "web_search",
+            title: "Web search",
+            status: "completed",
+            detail: "First search matched the issue tracker.",
+            data: {
+              toolCallId: "ws-1",
+            },
+          },
+          turnId: TurnId.makeUnsafe("turn-web-search-c"),
+          sequence: 4,
+          createdAt: "2026-03-11T09:00:03.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-web-search-2-complete"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "Web search complete",
+          payload: {
+            itemType: "web_search",
+            title: "Web search",
+            status: "completed",
+            detail: "Second search matched the docs page.",
+            data: {
+              toolCallId: "ws-2",
+            },
+          },
+          turnId: TurnId.makeUnsafe("turn-web-search-d"),
+          sequence: 5,
+          createdAt: "2026-03-11T09:00:04.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "work-group",
+        title: "Web search",
+        status: "done",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        endedAt: "2026-03-11T09:00:03.000Z",
+        items: [
+          {
+            kind: "tool",
+            label: "Web search",
+            status: "done",
+            detail: "First search matched the issue tracker.",
+          },
+        ],
+      },
+      {
+        type: "reasoning-text",
+        text: "Need one more source before concluding.",
+      },
+      {
+        type: "work-group",
+        title: "Web search",
+        status: "done",
+        startedAt: "2026-03-11T09:00:02.000Z",
+        endedAt: "2026-03-11T09:00:04.000Z",
+        items: [
+          {
+            kind: "tool",
+            label: "Web search",
+            status: "done",
+            detail: "Second search matched the docs page.",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("backpatches MCP tool calls by top-level activity item id", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-mcp-start"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "MCP tool call started",
+          payload: {
+            itemType: "mcp_tool_call",
+            itemId: "mcp-item-1",
+            title: "Context7 Query Docs",
+            status: "inProgress",
+            detail: "Custom select queries in Exposed.",
+          },
+          turnId: TurnId.makeUnsafe("turn-mcp-a"),
+          sequence: 1,
+          createdAt: "2026-03-18T14:35:35.334Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-reasoning-after-mcp-start"),
+          tone: "info",
+          kind: "reasoning.text",
+          summary: "Reasoning",
+          payload: {
+            text: "Need to inspect the DSL internals before answering.",
+          },
+          turnId: TurnId.makeUnsafe("turn-mcp-a"),
+          sequence: 2,
+          createdAt: "2026-03-18T14:35:36.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-mcp-complete"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "MCP tool call",
+          payload: {
+            itemType: "mcp_tool_call",
+            itemId: "mcp-item-1",
+            title: "Context7 Query Docs",
+            status: "completed",
+            detail: "Custom select queries in Exposed. Show how to subclass Query.",
+          },
+          turnId: TurnId.makeUnsafe("turn-mcp-b"),
+          sequence: 3,
+          createdAt: "2026-03-18T14:35:38.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "work-group",
+        title: "Context7 Query Docs",
+        status: "done",
+        startedAt: "2026-03-18T14:35:35.334Z",
+        endedAt: "2026-03-18T14:35:38.000Z",
+        items: [
+          {
+            kind: "tool",
+            label: "Context7 Query Docs",
+            status: "done",
+            detail: "Custom select queries in Exposed.",
+          },
+        ],
+      },
+      {
+        type: "reasoning-text",
+        text: "Need to inspect the DSL internals before answering.",
+      },
+    ]);
+  });
+
   it("deduplicates interleaved command lifecycle items into one line per command", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];

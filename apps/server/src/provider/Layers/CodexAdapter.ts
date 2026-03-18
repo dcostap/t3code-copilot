@@ -109,6 +109,21 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function parseRetryProgress(message: string): { attempt: number; total: number } | null {
+  const match = /(\d+)\s*\/\s*(\d+)/.exec(message);
+  if (!match) {
+    return null;
+  }
+
+  const attempt = Number.parseInt(match[1] ?? "", 10);
+  const total = Number.parseInt(match[2] ?? "", 10);
+  if (!Number.isInteger(attempt) || !Number.isInteger(total) || total <= 0) {
+    return null;
+  }
+
+  return { attempt, total };
+}
+
 function toTurnStatus(value: unknown): "completed" | "failed" | "cancelled" | "interrupted" {
   switch (value) {
     case "completed":
@@ -1197,6 +1212,10 @@ function mapToRuntimeEvents(
     const message =
       asString(asObject(payload?.error)?.message) ?? event.message ?? "Provider runtime error";
     const willRetry = payload?.willRetry === true;
+    const retryProgress = willRetry ? parseRetryProgress(message) : null;
+    if (willRetry && retryProgress && retryProgress.attempt < retryProgress.total) {
+      return [];
+    }
     return [
       {
         type: willRetry ? "runtime.warning" : "runtime.error",

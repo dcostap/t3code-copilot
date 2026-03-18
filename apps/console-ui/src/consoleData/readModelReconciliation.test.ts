@@ -97,6 +97,46 @@ describe("reconcileReadModelWithEvents", () => {
     expect(reconciled?.snapshotSequence).toBe(event.sequence);
   });
 
+  it("applies thread.activity-appended events immediately so transcript activities stream live", () => {
+    const snapshot = buildTestSnapshot();
+    const event = {
+      sequence: snapshot.snapshotSequence + 1,
+      eventId: EventId.makeUnsafe("event:4"),
+      aggregateKind: "thread",
+      aggregateId: snapshot.threads[0]!.id,
+      occurredAt: "2026-03-11T10:03:00.000Z",
+      commandId: CommandId.makeUnsafe("command:4"),
+      causationEventId: null,
+      correlationId: CommandId.makeUnsafe("command:4"),
+      metadata: {},
+      type: "thread.activity-appended",
+      payload: {
+        threadId: snapshot.threads[0]!.id,
+        activity: {
+          id: EventId.makeUnsafe("activity:live"),
+          tone: "info",
+          kind: "reasoning.text",
+          summary: "Reasoning",
+          payload: {
+            streamKind: "reasoning_text",
+            text: "Show streamed reasoning immediately.",
+          },
+          turnId: null,
+          sequence: 999,
+          createdAt: "2026-03-11T10:03:00.000Z",
+        },
+      },
+    } satisfies OrchestrationEvent;
+
+    const reconciled = reconcileReadModelWithEvents(snapshot, [event]);
+    const lastActivity = reconciled?.threads[0]?.activities.at(-1);
+
+    expect(lastActivity?.id).toBe(event.payload.activity.id);
+    expect(lastActivity?.kind).toBe("reasoning.text");
+    expect(reconciled?.threads[0]?.updatedAt).toBe(event.occurredAt);
+    expect(reconciled?.snapshotSequence).toBe(event.sequence);
+  });
+
   it("does not reapply events already reflected in the snapshot", () => {
     const snapshot = buildTestSnapshot();
     const event = {

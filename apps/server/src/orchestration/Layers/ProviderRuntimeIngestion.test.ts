@@ -1259,6 +1259,7 @@ describe("ProviderRuntimeIngestion", () => {
       createdAt: now,
       threadId: asThreadId("thread-1"),
       turnId: asTurnId("turn-9"),
+      itemId: asItemId("item-tool-started"),
       payload: {
         itemType: "command_execution",
         status: "in_progress",
@@ -1278,11 +1279,15 @@ describe("ProviderRuntimeIngestion", () => {
     );
 
     expect(thread.session?.status).toBe("ready");
-    expect(
-      thread.activities.some(
-        (activity: ProviderRuntimeTestActivity) => activity.kind === "tool.started",
-      ),
-    ).toBe(true);
+    const startedActivity = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-tool-started",
+    );
+    const startedPayload =
+      startedActivity?.payload && typeof startedActivity.payload === "object"
+        ? (startedActivity.payload as Record<string, unknown>)
+        : undefined;
+    expect(startedActivity?.kind).toBe("tool.started");
+    expect(startedPayload?.itemId).toBe("item-tool-started");
   });
 
   it("preserves completed tool metadata for orchestration activity rendering", async () => {
@@ -1331,6 +1336,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(activity?.kind).toBe("tool.completed");
     expect(activity?.summary).toBe("bash");
     expect(payload?.itemType).toBe("command_execution");
+    expect(payload?.itemId).toBe("item-tool-rendering");
     expect(payload?.title).toBe("bash");
     expect(payload?.status).toBe("completed");
     expect(payload?.detail).toBe("npm run dev <exited with exit code 0>");
@@ -1458,6 +1464,7 @@ describe("ProviderRuntimeIngestion", () => {
         ? (toolUpdate.payload as Record<string, unknown>)
         : undefined;
     expect(toolUpdate?.kind).toBe("tool.updated");
+    expect(toolUpdatePayload?.itemId).toBe("item-p1-tool");
     expect(toolUpdatePayload?.itemType).toBe("command_execution");
     expect(toolUpdatePayload?.status).toBe("in_progress");
 
@@ -1700,6 +1707,80 @@ describe("ProviderRuntimeIngestion", () => {
         : undefined;
 
     expect(reasoningPayload?.text).toBe("Evaluating user advice carefully");
+  });
+
+  it("starts a fresh reasoning activity after tool activity interrupts the stream", async () => {
+    const harness = await createHarness();
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-interrupted-1"),
+      provider: "codex",
+      createdAt: "2026-03-13T09:20:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning-interrupted"),
+      itemId: asItemId("item-reasoning-interrupted"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: "Checking transcript ordering",
+      },
+    });
+
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("evt-tool-interrupted"),
+      provider: "codex",
+      createdAt: "2026-03-13T09:20:01.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning-interrupted"),
+      itemId: asItemId("item-tool-interrupted"),
+      payload: {
+        itemType: "command_execution",
+        status: "in_progress",
+        title: "Run tests",
+        detail: "bun run test",
+      },
+    });
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-interrupted-2"),
+      provider: "codex",
+      createdAt: "2026-03-13T09:20:02.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning-interrupted"),
+      itemId: asItemId("item-reasoning-interrupted"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: "Resuming after the tool call.",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.engine,
+      (entry) =>
+        entry.activities.filter(
+          (activity: ProviderRuntimeTestActivity) => activity.kind === "reasoning.text",
+        ).length === 2,
+    );
+
+    const reasoningActivities = thread.activities.filter(
+      (activity: ProviderRuntimeTestActivity) => activity.kind === "reasoning.text",
+    );
+    const reasoningPayloads = reasoningActivities.map((activity) =>
+      activity.payload && typeof activity.payload === "object"
+        ? (activity.payload as Record<string, unknown>)
+        : undefined,
+    );
+
+    expect(reasoningActivities).toHaveLength(2);
+    expect(reasoningActivities[0]?.id).not.toBe(reasoningActivities[1]?.id);
+    expect(reasoningActivities[0]?.createdAt).toBe("2026-03-13T09:20:00.000Z");
+    expect(reasoningActivities[1]?.createdAt).toBe("2026-03-13T09:20:02.000Z");
+    expect(reasoningPayloads.map((payload) => payload?.text)).toEqual([
+      "Checking transcript ordering",
+      "Resuming after the tool call.",
+    ]);
   });
 
   it("projects structured user input request and resolution as thread activities", async () => {

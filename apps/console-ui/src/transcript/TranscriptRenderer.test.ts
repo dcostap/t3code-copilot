@@ -3,6 +3,7 @@ import { EditorState } from "@codemirror/state";
 
 import {
   getHistorySelectionLimitForPromptStart,
+  hasNonCollapsedSelectionInsideElement,
   isCommandWidgetSummaryOverflowing,
   normalizeInlineDiffRowText,
   prefixCopiedLinesInOrder,
@@ -33,6 +34,63 @@ describe("resolveTranscriptRegionForPosition", () => {
 
   it("returns null when the click does not resolve to a document position", () => {
     expect(resolveTranscriptRegionForPosition(10, null)).toBeNull();
+  });
+});
+
+describe("hasNonCollapsedSelectionInsideElement", () => {
+  it("returns true when a non-collapsed selection endpoint is inside the element", () => {
+    const insideNode = { nodeType: 3 };
+    const element = {
+      contains(node: Node | null) {
+        return node === insideNode;
+      },
+    };
+
+    expect(
+      hasNonCollapsedSelectionInsideElement({
+        isCollapsed: false,
+        rangeCount: 1,
+        anchorNode: insideNode,
+        focusNode: null,
+        getRangeAt() {
+          return { startContainer: insideNode, endContainer: insideNode };
+        },
+      }, element),
+    ).toBe(true);
+  });
+
+  it("returns false for collapsed or external selections", () => {
+    const insideNode = { nodeType: 3 };
+    const outsideNode = { nodeType: 3 };
+    const element = {
+      contains(node: Node | null) {
+        return node === insideNode;
+      },
+    };
+
+    expect(
+      hasNonCollapsedSelectionInsideElement({
+        isCollapsed: true,
+        rangeCount: 1,
+        anchorNode: insideNode,
+        focusNode: insideNode,
+        getRangeAt() {
+          return { startContainer: insideNode, endContainer: insideNode };
+        },
+      }, element),
+    ).toBe(false);
+
+    expect(
+      hasNonCollapsedSelectionInsideElement({
+        isCollapsed: false,
+        rangeCount: 1,
+        anchorNode: outsideNode,
+        focusNode: outsideNode,
+        getRangeAt() {
+          return { startContainer: outsideNode, endContainer: outsideNode };
+        },
+      }, element),
+    ).toBe(false);
   });
 });
 

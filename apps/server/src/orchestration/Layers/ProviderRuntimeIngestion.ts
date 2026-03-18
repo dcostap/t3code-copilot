@@ -105,9 +105,28 @@ function normalizeProposedPlanMarkdown(planMarkdown: string | undefined): string
   return trimmed;
 }
 
-function toolLifecycleActivityPayload(payload: ItemLifecyclePayload) {
+function reasoningActivityKind(streamKind: "reasoning_text" | "reasoning_summary_text") {
+  return streamKind === "reasoning_summary_text" ? "reasoning.summary" : "reasoning.text";
+}
+
+function reasoningActivitySummary(streamKind: "reasoning_text" | "reasoning_summary_text") {
+  return streamKind === "reasoning_summary_text" ? "Reasoning summary" : "Reasoning";
+}
+
+function reasoningActivityKey(
+  threadId: ThreadId,
+  event: Extract<ProviderRuntimeEvent, { type: "content.delta" }>,
+) {
+  return `${threadId}:${event.turnId ?? event.itemId ?? event.eventId}:${event.payload.streamKind}`;
+}
+
+function toolLifecycleActivityPayload(
+  payload: ItemLifecyclePayload,
+  itemId?: ProviderRuntimeEvent["itemId"],
+) {
   return {
     itemType: payload.itemType,
+    ...(itemId ? { itemId } : {}),
     ...(payload.title ? { title: payload.title } : {}),
     ...(payload.status ? { status: payload.status } : {}),
     ...(payload.detail ? { detail: truncateDetail(payload.detail) } : {}),
@@ -452,7 +471,7 @@ function runtimeEventToActivities(
           tone: "tool",
           kind: "tool.updated",
           summary: event.payload.title ?? "Tool updated",
-          payload: toolLifecycleActivityPayload(event.payload),
+          payload: toolLifecycleActivityPayload(event.payload, event.itemId),
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
         },
@@ -470,7 +489,7 @@ function runtimeEventToActivities(
           tone: "tool",
           kind: "tool.completed",
           summary: event.payload.title ?? "Tool",
-          payload: toolLifecycleActivityPayload(event.payload),
+          payload: toolLifecycleActivityPayload(event.payload, event.itemId),
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
         },
@@ -488,7 +507,7 @@ function runtimeEventToActivities(
           tone: "tool",
           kind: "tool.started",
           summary: `${event.payload.title ?? "Tool"} started`,
-          payload: toolLifecycleActivityPayload(event.payload),
+          payload: toolLifecycleActivityPayload(event.payload, event.itemId),
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
         },
@@ -803,18 +822,6 @@ const make = Effect.gen(function* () {
       yield* clearBufferedProposedPlan(input.planId);
     });
 
-  const reasoningActivityKind = (streamKind: "reasoning_text" | "reasoning_summary_text") =>
-    streamKind === "reasoning_summary_text" ? "reasoning.summary" : "reasoning.text";
-
-  const reasoningActivitySummary = (streamKind: "reasoning_text" | "reasoning_summary_text") =>
-    streamKind === "reasoning_summary_text" ? "Reasoning summary" : "Reasoning";
-
-  const reasoningActivityKey = (
-    threadId: ThreadId,
-    event: Extract<ProviderRuntimeEvent, { type: "content.delta" }>,
-  ) =>
-    `${threadId}:${event.turnId ?? event.itemId ?? event.eventId}:${event.payload.streamKind}`;
-
   const appendReasoningActivity = (
     threadId: ThreadId,
     event: Extract<ProviderRuntimeEvent, { type: "content.delta" }>,
@@ -836,7 +843,7 @@ const make = Effect.gen(function* () {
         const activityId =
           current?.activityId
           ?? EventId.makeUnsafe(
-            `reasoning:${threadId}:${event.turnId ?? event.itemId ?? event.eventId}:${event.payload.streamKind}`,
+            `reasoning:${threadId}:${event.eventId}:${event.payload.streamKind}`,
           );
         const entry = {
           text: appendWithOverlap(current?.text ?? "", event.payload.delta),
@@ -877,6 +884,11 @@ const make = Effect.gen(function* () {
       }
       return next;
     });
+
+  const clearBufferedReasoningForEvent = (threadId: ThreadId, event: ProviderRuntimeEvent) => {
+    const turnId = toTurnId(event.turnId);
+    return clearReasoningActivitiesForPrefix(turnId ? `${threadId}:${turnId}:` : `${threadId}:`);
+  };
 
   const clearTurnStateForSession = (threadId: ThreadId) =>
     Effect.gen(function* () {
@@ -1031,6 +1043,7 @@ const make = Effect.gen(function* () {
         event.type === "turn.proposed.delta" ? event.payload.delta : undefined;
 
       if (assistantDelta && assistantDelta.length > 0) {
+        yield* clearBufferedReasoningForEvent(thread.id, event);
         const assistantMessageId = MessageId.makeUnsafe(
           `assistant:${event.itemId ?? event.turnId ?? event.eventId}`,
         );
@@ -1072,6 +1085,7 @@ const make = Effect.gen(function* () {
       }
 
       if (proposedPlanDelta && proposedPlanDelta.length > 0) {
+        yield* clearBufferedReasoningForEvent(thread.id, event);
         const planId = proposedPlanIdFromEvent(event, thread.id);
         yield* appendBufferedProposedPlan(planId, proposedPlanDelta, now);
       }
@@ -1095,6 +1109,7 @@ const make = Effect.gen(function* () {
           : undefined;
 
       if (assistantCompletion) {
+        yield* clearBufferedReasoningForEvent(thread.id, event);
         const assistantMessageId = assistantCompletion.messageId;
         const turnId = toTurnId(event.turnId);
         const existingAssistantMessage = thread.messages.find(
@@ -1128,6 +1143,7 @@ const make = Effect.gen(function* () {
       }
 
       if (proposedPlanCompletion) {
+        yield* clearBufferedReasoningForEvent(thread.id, event);
         yield* finalizeBufferedProposedPlan({
           event,
           threadId: thread.id,
@@ -1175,6 +1191,10 @@ const make = Effect.gen(function* () {
           });
           yield* clearReasoningActivitiesForPrefix(`${thread.id}:${turnId}:`);
         }
+      }
+
+      if (event.type === "item.completed" && event.payload.itemType === "reasoning") {
+        yield* clearBufferedReasoningForEvent(thread.id, event);
       }
 
       if (event.type === "session.exited") {
@@ -1251,6 +1271,9 @@ const make = Effect.gen(function* () {
       }
 
       const activities = runtimeEventToActivities(event);
+      if (activities.length > 0) {
+        yield* clearBufferedReasoningForEvent(thread.id, event);
+      }
       yield* Effect.forEach(activities, (activity) =>
         orchestrationEngine.dispatch({
           type: "thread.activity.append",

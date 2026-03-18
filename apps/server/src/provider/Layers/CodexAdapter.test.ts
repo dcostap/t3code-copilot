@@ -407,7 +407,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("maps retryable Codex error notifications to runtime.warning", () =>
+  it.effect("suppresses non-terminal retryable Codex reconnect notifications", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
       const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
@@ -428,6 +428,47 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         },
       } satisfies ProviderEvent);
 
+      lifecycleManager.emit("event", {
+        id: asEventId("evt-session-closed-after-retry"),
+        kind: "session",
+        provider: "codex",
+        threadId: asThreadId("thread-1"),
+        createdAt: new Date().toISOString(),
+        method: "session/closed",
+        message: "Session stopped",
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "session.exited");
+    }),
+  );
+
+  it.effect("maps terminal retryable Codex reconnect notifications to runtime.warning", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      lifecycleManager.emit("event", {
+        id: asEventId("evt-terminal-retryable-error"),
+        kind: "notification",
+        provider: "codex",
+        threadId: asThreadId("thread-1"),
+        createdAt: new Date().toISOString(),
+        method: "error",
+        turnId: asTurnId("turn-1"),
+        payload: {
+          error: {
+            message: "Reconnecting... 5/5",
+          },
+          willRetry: true,
+        },
+      } satisfies ProviderEvent);
+
       const firstEvent = yield* Fiber.join(firstEventFiber);
 
       assert.equal(firstEvent._tag, "Some");
@@ -439,7 +480,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         return;
       }
       assert.equal(firstEvent.value.turnId, "turn-1");
-      assert.equal(firstEvent.value.payload.message, "Reconnecting... 2/5");
+      assert.equal(firstEvent.value.payload.message, "Reconnecting... 5/5");
     }),
   );
 

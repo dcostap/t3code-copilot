@@ -47,6 +47,10 @@ interface PendingWorkItem extends WorkGroupItem {
   readonly mergeKey: string;
 }
 
+interface WorkGroupState {
+  readonly entries: Array<{ activity: OrchestrationThreadActivity; item: PendingWorkItem }>;
+}
+
 type ThreadMessageSentEvent = Extract<OrchestrationEvent, { type: "thread.message-sent" }>;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -249,10 +253,22 @@ function extractWorkItemId(payload: Record<string, unknown> | null): string | nu
   const data = asRecord(payload?.data);
   const item = asRecord(data?.item);
   const result = asRecord(item?.result);
+  const precedingToolUseIds = Array.isArray(data?.precedingToolUseIds)
+    ? data.precedingToolUseIds
+    : [];
   return (
+    asString(payload?.itemId) ??
     asString(item?.id) ??
     asString(result?.id) ??
-    asString(data?.id)
+    asString(data?.id) ??
+    asString(item?.toolCallId) ??
+    asString(result?.toolCallId) ??
+    asString(data?.toolCallId) ??
+    asString(item?.toolUseId) ??
+    asString(result?.toolUseId) ??
+    asString(data?.toolUseId) ??
+    precedingToolUseIds.find((entry): entry is string => typeof entry === "string" && entry.length > 0) ??
+    null
   );
 }
 
@@ -661,8 +677,7 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
 function canMergeWorkItems(previous: PendingWorkItem, next: PendingWorkItem) {
   return previous.kind === next.kind
     && previous.mergeKey === next.mergeKey
-    && previous.status === "running"
-    && next.status !== "running";
+    && previous.status === "running";
 }
 
 function isWebSearchWorkItem(item: PendingWorkItem) {
@@ -1181,6 +1196,8 @@ export function threadToTranscriptBlocks(
   }
 
   const blocks: TranscriptBlock[] = [];
+  const workGroupStatesByIndex = new Map<number, WorkGroupState>();
+  const activeWorkGroupIndexByMergeKey = new Map<string, number>();
   const inlineDiffLookupByTurnId = new Map<string, InlineDiffLookup>(
     thread.checkpoints.map((checkpoint) => [
       checkpoint.turnId,
@@ -1191,48 +1208,101 @@ export function threadToTranscriptBlocks(
       },
     ]),
   );
-  let pendingWorkItems: Array<{ activity: OrchestrationThreadActivity; item: PendingWorkItem }> = [];
-  let pendingWorkTurnId: OrchestrationThreadActivity["turnId"] = null;
+  let currentWorkGroupIndex: number | null = null;
+  let currentWorkTurnId: OrchestrationThreadActivity["turnId"] = null;
   const activePulseOriginAt =
     thread.latestTurn?.startedAt
     ?? thread.latestTurn?.requestedAt
     ?? thread.session?.updatedAt
     ?? thread.updatedAt;
 
-  const flushWorkItems = () => {
+  const closeCurrentWorkGroup = () => {
+    currentWorkGroupIndex = null;
+    currentWorkTurnId = null;
+  };
+
+  const updateWorkGroupBlock = (groupIndex: number) => {
+    const state = workGroupStatesByIndex.get(groupIndex);
+    if (!state) {
+      return;
+    }
+
     const block = workItemsToBlock(
-      pendingWorkItems,
+      state.entries,
       inlineDiffLookupByTurnId,
       options.now,
       activePulseOriginAt,
     );
     if (block) {
-      blocks.push(block);
+      blocks[groupIndex] = block;
     }
-    pendingWorkItems = [];
-    pendingWorkTurnId = null;
   };
 
   for (const entry of entries.toSorted(compareByCreatedAt)) {
     if (entry.source === "activity" && entry.activity) {
       const workItem = activityToWorkItem(entry.activity);
       if (workItem) {
-        if (
-          pendingWorkItems.length > 0
-          && pendingWorkTurnId !== entry.activity.turnId
-          && !shouldKeepWorkItemsGroupedAcrossTurn(pendingWorkItems, workItem)
-        ) {
-          flushWorkItems();
+        const existingGroupIndex = activeWorkGroupIndexByMergeKey.get(workItem.mergeKey);
+        if (existingGroupIndex !== undefined) {
+          const existingState = workGroupStatesByIndex.get(existingGroupIndex);
+          if (existingState) {
+            existingState.entries.push({ activity: entry.activity, item: workItem });
+            updateWorkGroupBlock(existingGroupIndex);
+          }
+          if (workItem.status === "running") {
+            activeWorkGroupIndexByMergeKey.set(workItem.mergeKey, existingGroupIndex);
+          } else {
+            activeWorkGroupIndexByMergeKey.delete(workItem.mergeKey);
+          }
+          if (currentWorkGroupIndex !== existingGroupIndex) {
+            closeCurrentWorkGroup();
+          }
+          continue;
         }
-        pendingWorkItems.push({ activity: entry.activity, item: workItem });
-        pendingWorkTurnId = entry.activity.turnId;
+
+        const currentState =
+          currentWorkGroupIndex !== null
+            ? workGroupStatesByIndex.get(currentWorkGroupIndex)
+            : undefined;
+        if (
+          currentWorkGroupIndex !== null
+          && currentState
+          && currentWorkTurnId !== entry.activity.turnId
+          && !shouldKeepWorkItemsGroupedAcrossTurn(currentState.entries, workItem)
+        ) {
+          closeCurrentWorkGroup();
+        }
+
+        const targetGroupIndex: number = currentWorkGroupIndex ?? blocks.length;
+        const targetState =
+          workGroupStatesByIndex.get(targetGroupIndex)
+          ?? { entries: [] };
+        targetState.entries.push({ activity: entry.activity, item: workItem });
+        workGroupStatesByIndex.set(targetGroupIndex, targetState);
+        if (targetGroupIndex === blocks.length) {
+          blocks.push({
+            type: "work-group",
+            status: "running",
+            startedAt: entry.activity.createdAt,
+            endedAt: entry.activity.createdAt,
+            ...(options.now ? { now: options.now } : {}),
+            ...(activePulseOriginAt ? { pulseOriginAt: activePulseOriginAt } : {}),
+            items: [],
+          });
+        }
+        updateWorkGroupBlock(targetGroupIndex);
+        currentWorkGroupIndex = targetGroupIndex;
+        currentWorkTurnId = entry.activity.turnId;
+        if (workItem.status === "running") {
+          activeWorkGroupIndexByMergeKey.set(workItem.mergeKey, targetGroupIndex);
+        } else {
+          activeWorkGroupIndexByMergeKey.delete(workItem.mergeKey);
+        }
         continue;
       }
     }
 
-    if (pendingWorkItems.length > 0) {
-      flushWorkItems();
-    }
+    closeCurrentWorkGroup();
 
     if (entry.source === "activity" && entry.activity) {
       blocks.push(...activityToBlocks(entry.activity, { resolvedUserInputsByRequestId }));
@@ -1242,10 +1312,6 @@ export function threadToTranscriptBlocks(
     if (entry.blocks) {
       blocks.push(...entry.blocks);
     }
-  }
-
-  if (pendingWorkItems.length > 0) {
-    flushWorkItems();
   }
 
   if (thread.latestTurn?.state === "running" || thread.session?.status === "running") {

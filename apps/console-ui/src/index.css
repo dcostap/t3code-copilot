@@ -76,7 +76,7 @@ body {
 
 .session-tabs__list {
   display: flex;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   gap: 8px;
   min-width: 0;
   align-items: stretch;

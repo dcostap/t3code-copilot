@@ -179,6 +179,60 @@ export interface TranscriptRendererHandle {
   scrollToBottom(): void;
 }
 
+type NativeSelectionLike =
+  | {
+      readonly isCollapsed: boolean;
+      readonly rangeCount: number;
+      readonly anchorNode?: unknown;
+      readonly focusNode?: unknown;
+      getRangeAt(index: number): {
+        readonly startContainer: unknown;
+        readonly endContainer: unknown;
+      };
+    }
+  | null;
+
+function resolveSelectionContainerNode(node: unknown): Node | null {
+  if (!node || typeof node !== "object") {
+    return null;
+  }
+  if ("nodeType" in node && typeof node.nodeType === "number") {
+    return node as Node;
+  }
+  if ("parentElement" in node && node.parentElement && typeof node.parentElement === "object") {
+    return node.parentElement as Node;
+  }
+  return null;
+}
+
+export function hasNonCollapsedSelectionInsideElement(
+  selection: NativeSelectionLike,
+  element: Pick<HTMLElement, "contains"> | null | undefined,
+) {
+  if (!selection || !element || selection.isCollapsed || selection.rangeCount === 0) {
+    return false;
+  }
+
+  if (
+    element.contains(resolveSelectionContainerNode(selection.anchorNode))
+    || element.contains(resolveSelectionContainerNode(selection.focusNode))
+  ) {
+    return true;
+  }
+
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const range = selection.getRangeAt(index);
+    if (
+      element.contains(resolveSelectionContainerNode(range.startContainer))
+      || element.contains(resolveSelectionContainerNode(range.endContainer))
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 const CURSOR_VIEWPORT_PADDING_LINES = 7;
 
 const syncAnnotation = Annotation.define<boolean>();

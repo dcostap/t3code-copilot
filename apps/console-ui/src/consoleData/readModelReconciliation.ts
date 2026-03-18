@@ -1,6 +1,24 @@
 import type { OrchestrationEvent, OrchestrationReadModel, OrchestrationThread } from "@t3tools/contracts";
 
 const MAX_THREAD_MESSAGES = 2_000;
+const MAX_THREAD_ACTIVITIES = 500;
+
+function compareThreadActivities(
+  left: OrchestrationThread["activities"][number],
+  right: OrchestrationThread["activities"][number],
+) {
+  if (left.sequence !== undefined && right.sequence !== undefined) {
+    if (left.sequence !== right.sequence) {
+      return left.sequence - right.sequence;
+    }
+  } else if (left.sequence !== undefined) {
+    return 1;
+  } else if (right.sequence !== undefined) {
+    return -1;
+  }
+
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
 
 function updateThread(
   snapshot: OrchestrationReadModel,
@@ -128,6 +146,26 @@ export function reconcileReadModelWithEvents(
           return {
             ...thread,
             messages: messages.slice(-MAX_THREAD_MESSAGES),
+            updatedAt: event.occurredAt,
+          };
+        });
+        latestAppliedSequence = event.sequence;
+        latestUpdatedAt = event.occurredAt;
+        break;
+      }
+
+      case "thread.activity-appended": {
+        nextSnapshot = updateThread(nextSnapshot, event.payload.threadId, (thread) => {
+          const activities = [
+            ...thread.activities.filter((entry) => entry.id !== event.payload.activity.id),
+            event.payload.activity,
+          ]
+            .toSorted(compareThreadActivities)
+            .slice(-MAX_THREAD_ACTIVITIES);
+
+          return {
+            ...thread,
+            activities,
             updatedAt: event.occurredAt,
           };
         });

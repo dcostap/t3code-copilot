@@ -26,7 +26,12 @@ import {
   resolvePendingUserInputAnswer,
   resolvePendingUserInputShortcut,
 } from "./pendingUserInput";
-import { TranscriptRenderer, type TranscriptRendererHandle, threadToTranscriptBlocks } from "./transcript";
+import {
+  hasNonCollapsedSelectionInsideElement,
+  TranscriptRenderer,
+  type TranscriptRendererHandle,
+  threadToTranscriptBlocks,
+} from "./transcript";
 import { useConsoleData } from "./consoleData/useConsoleData";
 import { useConsoleWorkspaceSessions } from "./consoleSessions";
 import { resolveWsHttpOrigin } from "./wsTransport";
@@ -78,6 +83,7 @@ export function App() {
   const activatePane = workspace.activatePane;
   const closePane = workspace.closePane;
   const [nowIso, setNowIso] = useState(() => new Date().toISOString());
+  const [frozenTranscriptNowIso, setFrozenTranscriptNowIso] = useState<string | null>(null);
   const [_submitError, setSubmitError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
@@ -99,6 +105,7 @@ export function App() {
     () => new Set(activeSession ? [activeSession.id] : []),
   );
   const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
+  const latestNowIsoRef = useRef(nowIso);
   const hasInitiallyFocusedPromptRef = useRef(false);
   const initializedPaneIdsRef = useRef<Record<string, true>>({});
   const composerAttachmentsRef = useRef(composerAttachmentsByPaneId);
@@ -112,6 +119,7 @@ export function App() {
     return activeSession.histories.find((history) => history.id === activePane.historyId) ?? null;
   }, [activePane?.historyId, activeSession]);
   const activeThreadId = workspace.activeThreadId ?? consoleData.activeThreadId;
+  latestNowIsoRef.current = nowIso;
   const activeThread = activeSession
     ? workspace.activeThread
     : (activeThreadId
@@ -217,6 +225,33 @@ export function App() {
       window.cancelAnimationFrame(animationFrameId);
     };
   }, [hasLiveTranscriptTimer]);
+
+  useEffect(() => {
+    if (typeof document === "undefined" || typeof window === "undefined") {
+      return;
+    }
+
+    const syncTranscriptSelectionFreeze = () => {
+      const selection = window.getSelection();
+      const transcriptShells = Array.from(document.querySelectorAll<HTMLElement>(".transcript-shell"));
+      const shouldFreeze = transcriptShells.some((shell) =>
+        hasNonCollapsedSelectionInsideElement(selection, shell));
+      setFrozenTranscriptNowIso((current) => {
+        if (shouldFreeze) {
+          return current ?? latestNowIsoRef.current;
+        }
+        return current === null ? current : null;
+      });
+    };
+
+    document.addEventListener("selectionchange", syncTranscriptSelectionFreeze);
+    window.addEventListener("blur", syncTranscriptSelectionFreeze);
+
+    return () => {
+      document.removeEventListener("selectionchange", syncTranscriptSelectionFreeze);
+      window.removeEventListener("blur", syncTranscriptSelectionFreeze);
+    };
+  }, []);
 
   useEffect(() => {
     setPendingPromptSendStartedAtByThreadId((existing) => {
@@ -483,9 +518,10 @@ export function App() {
     ],
   );
   const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
+  const effectiveTranscriptNowIso = frozenTranscriptNowIso ?? nowIso;
   const activeThreadNow =
     activeThreadId && (activeThreadTurnRunning || activePendingPromptSendStartedAt !== null)
-      ? nowIso
+      ? effectiveTranscriptNowIso
       : undefined;
   const blocks = useMemo(() => {
     if (activeThread) {
@@ -629,7 +665,7 @@ export function App() {
             : null;
           const paneNow =
             threadId && (isThreadTurnRunning(threadId) || panePendingPromptSendStartedAt !== null)
-              ? nowIso
+              ? effectiveTranscriptNowIso
               : undefined;
           const blocks = thread
             ? (() => {
@@ -696,7 +732,7 @@ export function App() {
     getThreadEvents,
     isThreadTurnRunning,
     mountedSessionIds,
-    nowIso,
+    effectiveTranscriptNowIso,
     pendingPromptSendStartedAtByThreadId,
     pendingUserInputAnswersByRequestId,
     pendingUserInputQuestionIndexByRequestId,
