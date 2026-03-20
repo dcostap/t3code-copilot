@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -24,30 +24,40 @@ function dedupePaths(paths: ReadonlyArray<string | undefined>): string[] {
 
 function resolveCopilotCliFromPathEnv(input: {
   platform?: string;
+  arch?: string;
   pathEnv?: string;
   pathExtEnv?: string;
   exists?: (path: string) => boolean;
 }): string | undefined {
   const platform = input.platform ?? process.platform;
+  const arch = input.arch ?? process.arch;
   const pathEnv = input.pathEnv ?? process.env.PATH;
   if (!pathEnv) return undefined;
 
   const exists = input.exists ?? existsSync;
   const directories = pathEnv.split(platform === "win32" ? ";" : ":").filter(Boolean);
-  const candidateNames =
-    platform === "win32"
-      ? [
-          "copilot.exe",
-          "copilot.cmd",
-          "copilot.bat",
-        ]
-      : ["copilot"];
+  const binaryName = getCopilotPlatformBinaryName(platform);
+  const platformPackages = getBundledCopilotPlatformPackages(platform, arch);
 
   for (const directory of directories) {
-    for (const candidateName of candidateNames) {
-      const candidatePath = join(directory, candidateName);
-      if (exists(candidatePath)) {
-        return candidatePath;
+    const directBinaryPath = join(directory, binaryName);
+    if (exists(directBinaryPath)) {
+      return directBinaryPath;
+    }
+
+    for (const packageName of platformPackages) {
+      const nestedPackageBinaryPath = join(
+        directory,
+        "node_modules",
+        GITHUB_SCOPE_DIR,
+        "copilot",
+        "node_modules",
+        GITHUB_SCOPE_DIR,
+        packageName,
+        binaryName,
+      );
+      if (exists(nestedPackageBinaryPath)) {
+        return nestedPackageBinaryPath;
       }
     }
   }
@@ -87,6 +97,22 @@ export function normalizeCopilotCliPathOverride(
   }
 
   return trimmed;
+}
+
+export function shouldPassCopilotCliPathToSdk(
+  cliPath: string | undefined,
+  platform: string = process.platform,
+): cliPath is string {
+  if (!cliPath) {
+    return false;
+  }
+
+  if (platform !== "win32") {
+    return true;
+  }
+
+  const name = basename(cliPath).toLowerCase();
+  return name.endsWith(".exe");
 }
 
 function resolveGithubScopeDirFromSdkEntrypoint(
@@ -147,6 +173,7 @@ export function resolveBundledCopilotCliPathFrom(input: {
   sdkEntrypoint?: string;
   platform?: string;
   arch?: string;
+  pathEnv?: string;
   exists?: (path: string) => boolean;
 }): string | undefined {
   const platform = input.platform ?? process.platform;
@@ -164,7 +191,20 @@ export function resolveBundledCopilotCliPathFrom(input: {
   const binaryCandidates = nodeModulesRoots.flatMap((root) =>
     platformPackages.map((packageName) => join(root, GITHUB_SCOPE_DIR, packageName, binaryName)),
   );
-  for (const candidate of dedupePaths(binaryCandidates)) {
+  const nestedPackageBinaryCandidates = nodeModulesRoots.flatMap((root) =>
+    platformPackages.map((packageName) =>
+      join(
+        root,
+        GITHUB_SCOPE_DIR,
+        "copilot",
+        "node_modules",
+        GITHUB_SCOPE_DIR,
+        packageName,
+        binaryName,
+      ),
+    ),
+  );
+  for (const candidate of dedupePaths([...binaryCandidates, ...nestedPackageBinaryCandidates])) {
     if (exists(candidate)) {
       return candidate;
     }
@@ -172,6 +212,8 @@ export function resolveBundledCopilotCliPathFrom(input: {
 
   const pathBinary = resolveCopilotCliFromPathEnv({
     platform,
+    arch,
+    ...(input.pathEnv ? { pathEnv: input.pathEnv } : {}),
     exists,
   });
   if (pathBinary) {

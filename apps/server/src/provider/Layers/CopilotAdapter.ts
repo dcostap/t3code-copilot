@@ -46,7 +46,11 @@ import {
   type CopilotTurnTrackingState,
 } from "./copilotTurnTracking.ts";
 import { loadCopilotMcpServers } from "./copilotMcpServers.ts";
-import { normalizeCopilotCliPathOverride, resolveBundledCopilotCliPath } from "./copilotCliPath.ts";
+import {
+  normalizeCopilotCliPathOverride,
+  resolveBundledCopilotCliPath,
+  shouldPassCopilotCliPathToSdk,
+} from "./copilotCliPath.ts";
 import { CopilotAdapter, type CopilotAdapterShape } from "../Services/CopilotAdapter.ts";
 import type {
   ProviderThreadSnapshot,
@@ -1355,7 +1359,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
         });
         const resumeSessionId = extractResumeSessionId(input.resumeCursor);
         const clientOptions: CopilotClientOptions = {
-          ...(cliPath ? { cliPath } : {}),
+          ...(shouldPassCopilotCliPathToSdk(cliPath) ? { cliPath } : {}),
           ...(input.cwd ? { cwd: input.cwd } : {}),
           logLevel: "error",
         };

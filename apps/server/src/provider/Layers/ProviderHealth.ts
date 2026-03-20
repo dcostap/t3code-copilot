@@ -26,7 +26,7 @@ import {
   parseCodexCliVersion,
 } from "../codexCliVersion";
 import { ProviderHealth, type ProviderHealthShape } from "../Services/ProviderHealth";
-import { resolveBundledCopilotCliPath } from "./copilotCliPath.ts";
+import { resolveBundledCopilotCliPath, shouldPassCopilotCliPathToSdk } from "./copilotCliPath.ts";
 
 const DEFAULT_TIMEOUT_MS = 4_000;
 const CODEX_PROVIDER = "codex" as const;
@@ -476,7 +476,7 @@ export const checkCopilotProviderStatus: Effect.Effect<ServerProviderStatus> = E
       try: async () => {
         const cliPath = resolveBundledCopilotCliPath();
         const client = new CopilotClient({
-          ...(cliPath ? { cliPath } : {}),
+          ...(shouldPassCopilotCliPathToSdk(cliPath) ? { cliPath } : {}),
           logLevel: "error",
         });
         try {

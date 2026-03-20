@@ -1325,6 +1325,37 @@ function buildCodeBlockReplacements(
   return replacements;
 }
 
+function isBlockBoundarySpacerLine(line: AnnotatedLine) {
+  if (line.kind === "divider") {
+    return true;
+  }
+  if (line.text.length > 0) {
+    return false;
+  }
+  return (
+    line.kind === "meta"
+    || line.kind === "userPromptSeparator"
+    || line.kind === "reasoningSeparator"
+    || line.kind === "workGroupSeparator"
+    || line.kind === "planSeparator"
+    || line.kind === "checkpointSeparator"
+  );
+}
+
+function trimBlockBoundarySpacerLines(lines: ReadonlyArray<AnnotatedLine>) {
+  let start = 0;
+  let end = lines.length;
+
+  while (start < end && isBlockBoundarySpacerLine(lines[start]!)) {
+    start += 1;
+  }
+  while (end > start && isBlockBoundarySpacerLine(lines[end - 1]!)) {
+    end -= 1;
+  }
+
+  return lines.slice(start, end);
+}
+
 function flattenBlocks(
   blocks: ReadonlyArray<TranscriptBlock>,
   pendingUserInputHighlight?: {
@@ -1341,55 +1372,38 @@ function flattenBlocks(
   let seenVisibleBlock = false;
 
   for (const block of blocks) {
-    const rawBlockLines = blockToLines(block);
-    const leadingUserPromptSeparatorCount =
-      !seenVisibleBlock && block.type === "user-message"
-        ? rawBlockLines.findIndex((line) => line.kind !== "userPromptSeparator")
-        : -1;
-    const hiddenUserPromptSeparatorCount =
-      leadingUserPromptSeparatorCount === -1 ? rawBlockLines.length : leadingUserPromptSeparatorCount;
+    const rawBlockLines = trimBlockBoundarySpacerLines(blockToLines(block));
     const blockLines = rawBlockLines.map((line, lineIndex) => {
       let nextLine = line;
 
-      if (
-        !seenVisibleBlock
-        && block.type === "user-message"
-        && line.kind === "userPromptSeparator"
-        && lineIndex < hiddenUserPromptSeparatorCount
-      ) {
-        nextLine = {
-          ...line,
-          extraClasses: [...(line.extraClasses ?? []), "cm-line-userPromptSeparatorHidden"],
-        };
-      }
-
       const userInputRef = nextLine.userInputRef;
 
-      if (!pendingUserInputHighlight || !userInputRef) {
-        return nextLine;
-      }
-
+      const extraClasses = [...(nextLine.extraClasses ?? [])];
       if (
-        userInputRef.requestId !== pendingUserInputHighlight.requestId
-        || userInputRef.questionIndex !== pendingUserInputHighlight.questionIndex
+        pendingUserInputHighlight
+        && userInputRef
+        && userInputRef.requestId === pendingUserInputHighlight.requestId
+        && userInputRef.questionIndex === pendingUserInputHighlight.questionIndex
       ) {
-        return nextLine;
+        extraClasses.push("cm-line-userInputActiveQuestion");
+        if (
+          userInputRef.optionIndex !== undefined
+          && pendingUserInputHighlight.optionIndex !== undefined
+          && userInputRef.optionIndex === pendingUserInputHighlight.optionIndex
+        ) {
+          extraClasses.push("cm-line-userInputActiveOption");
+        }
       }
 
-      const extraClasses = [...(nextLine.extraClasses ?? []), "cm-line-userInputActiveQuestion"];
-      if (
-        userInputRef.optionIndex !== undefined
-        && pendingUserInputHighlight.optionIndex !== undefined
-        && userInputRef.optionIndex === pendingUserInputHighlight.optionIndex
-      ) {
-        extraClasses.push("cm-line-userInputActiveOption");
+      if (seenVisibleBlock && lineIndex === 0) {
+        extraClasses.push("cm-line-blockStart");
       }
 
-      return Object.assign({}, nextLine, { extraClasses });
+      return extraClasses.length === 0 ? nextLine : Object.assign({}, nextLine, { extraClasses });
     });
     const startLineIndex = allLines.length;
     allLines.push(...blockLines);
-    if (blockLines.some((line) => line.text.length > 0 || line.kind !== "userPromptSeparator")) {
+    if (blockLines.length > 0) {
       seenVisibleBlock = true;
     }
 
@@ -1754,6 +1768,9 @@ function buildEditorTheme() {
         padding: "0",
         whiteSpace: "pre-wrap",
       },
+      ".cm-line-blockStart": {
+        paddingTop: "1.8em",
+      },
       ".cm-line-meta": { color: "#5f676f" },
       ".cm-line-body": { color: "#cfd4d9" },
       ".cm-line-reasoningSeparator": {
@@ -2028,6 +2045,9 @@ function buildEditorTheme() {
       },
       ".cm-line-userMessageStart::before": {
         color: "#8e959d",
+      },
+      ".cm-line-userMessageStart.cm-line-blockStart::before": {
+        top: "1.7em",
       },
       ".cm-line-promptSeparator": {
         position: "relative",
@@ -2926,10 +2946,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     >(() => new Map());
     const [isDraggingImages, setIsDraggingImages] = useState(false);
     const [draft, setDraft] = useState("");
-    const [promptSelection, setPromptSelection] = useState<StoredPromptSelection>({
-      anchorOffset: 0,
-      headOffset: 0,
-    });
     const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
     useEffect(() => {
@@ -2981,13 +2997,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     }, []);
 
     const setPromptSelectionValue = useCallback((anchorOffset: number, headOffset: number) => {
-      const nextSelection = { anchorOffset, headOffset };
-      promptSelectionRef.current = nextSelection;
-      setPromptSelection((current) =>
-        current.anchorOffset === nextSelection.anchorOffset && current.headOffset === nextSelection.headOffset
-          ? current
-          : nextSelection,
-      );
+      promptSelectionRef.current = { anchorOffset, headOffset };
     }, []);
 
     const syncPromptSelection = useCallback((textarea = promptTextareaRef.current) => {
