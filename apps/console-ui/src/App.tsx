@@ -224,41 +224,6 @@ function persistPaneDrafts(draftsByPaneId: Record<string, string>) {
   window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draftsByPaneId));
 }
 
-function DraftPaneHeader(props: {
-  readonly setup: ConsolePaneSetup;
-  readonly busy: boolean;
-  onSelectProvider(provider: ProviderKind): void;
-}) {
-  const options: ReadonlyArray<{ readonly provider: ProviderKind; readonly label: string }> = [
-    { provider: "codex", label: "Codex" },
-    { provider: "copilot", label: "Copilot" },
-  ];
-
-  return (
-    <div className="draft-pane-header">
-      <div className="draft-pane-header__meta">
-        <span className="draft-pane-header__eyebrow">draft</span>
-        <span className="draft-pane-header__detail">
-          provider {props.setup.selectedProvider} · mode {props.setup.interactionMode}
-        </span>
-      </div>
-      <div className="draft-pane-header__providers" role="group" aria-label="Draft provider">
-        {options.map((option) => (
-          <button
-            key={option.provider}
-            type="button"
-            className={`draft-pane-header__provider${option.provider === props.setup.selectedProvider ? " draft-pane-header__provider--active" : ""}`}
-            disabled={props.busy}
-            onClick={() => props.onSelectProvider(option.provider)}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function EmptyWorkspaceSurface(props: {
   readonly title: string;
   readonly detail: string;
@@ -1180,14 +1145,43 @@ export function App() {
       <div className="bg-image" aria-hidden="true" />
       <div className="bg-gradient" aria-hidden="true" />
       <div className={shellClassName}>
+        <div className="project-topbar">
+          <div
+            className="project-topbar__sidebarSpacer"
+            style={{
+              width: workspace.sidebarWidth,
+              minWidth: workspace.sidebarWidth,
+              maxWidth: workspace.sidebarWidth,
+              flexBasis: workspace.sidebarWidth,
+            }}
+          />
+          <div className="project-topbar__resizeSpacer" aria-hidden="true" />
+          {workspace.activeProject && activeLayout ? (
+            <div className="project-tabs">
+              {activeLayout.tabs.map((tab, index) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  className={`project-tab${tab.id === activeLayout.activeTabId ? " project-tab--active" : ""}`}
+                  onClick={() => {
+                    workspace.activateTab(workspace.activeProject!.id, tab.id);
+                    focusPanePrompt(tab.activePaneId);
+                  }}
+                >
+                  <span className="project-tab__title">Tab {index + 1}</span>
+                  <span className="project-tab__meta">{tab.paneIds.length}</span>
+                </button>
+              ))}
+              <button type="button" className="project-tab project-tab--create" onClick={handleCreateDraftTab}>
+                +
+              </button>
+            </div>
+          ) : (
+            <div className="project-tabs project-tabs--empty" />
+          )}
+        </div>
         <div className="project-workspace">
           <aside className="project-sidebar" style={{ width: workspace.sidebarWidth }}>
-            <div className="project-sidebar__toolbar">
-              <button type="button" className="project-sidebar__toolbarButton" onClick={handleCreateDraftTab}>
-                + tab
-              </button>
-              <span className="project-sidebar__origin">{resolveWsHttpOrigin()}</span>
-            </div>
             <div className="project-tree" role="tree" aria-label="Projects">
               {workspace.projectViews.map((projectView) => {
                 const threads = orderedThreadsByProjectId.get(projectView.project.id) ?? [];
@@ -1297,120 +1291,46 @@ export function App() {
           />
           <main className="project-main">
             {workspace.activeProject && activeLayout && activeTab ? (
-              <>
-                <div className="project-tabs">
-                  {activeLayout.tabs.map((tab, index) => (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      className={`project-tab${tab.id === activeLayout.activeTabId ? " project-tab--active" : ""}`}
-                      onClick={() => {
-                        workspace.activateTab(workspace.activeProject!.id, tab.id);
-                        focusPanePrompt(tab.activePaneId);
+              <div className={activePaneGridClassName}>
+                {paneViews.map((paneView) => {
+                  const dropAllowed = draggedThreadId
+                    ? (consoleData.threads.find((thread) => thread.id === draggedThreadId)?.projectId === paneView.project.id)
+                    : false;
+
+                  return (
+                    <section
+                      key={paneView.pane.id}
+                      className={`conversation-pane${paneView.isActive ? " conversation-pane--active" : ""}${dragOverPaneId === paneView.pane.id ? " conversation-pane--drag-over" : ""}${highlightedPaneId === paneView.pane.id ? " conversation-pane--highlight" : ""}`}
+                      onClick={() => workspace.activatePane(paneView.project.id, paneView.tabId, paneView.pane.id)}
+                      onDragOver={(event: ReactDragEvent<HTMLElement>) => {
+                        if (!dropAllowed) {
+                          return;
+                        }
+                        event.preventDefault();
+                        setDragOverPaneId(paneView.pane.id);
+                      }}
+                      onDragLeave={() => {
+                        setDragOverPaneId((current) => (current === paneView.pane.id ? null : current));
+                      }}
+                      onDrop={(event: ReactDragEvent<HTMLElement>) => {
+                        event.preventDefault();
+                        setDragOverPaneId(null);
+                        if (!draggedThreadId) {
+                          return;
+                        }
+                        const thread = consoleData.threads.find((candidate) => candidate.id === draggedThreadId) ?? null;
+                        if (!thread || thread.projectId !== paneView.project.id) {
+                          return;
+                        }
+                        workspace.mountThreadInPane({
+                          projectId: paneView.project.id,
+                          paneId: paneView.pane.id,
+                          threadId: draggedThreadId as ThreadId,
+                        });
+                        focusPanePrompt(paneView.pane.id);
+                        setDraggedThreadId(null);
                       }}
                     >
-                      <span className="project-tab__title">Tab {index + 1}</span>
-                      <span className="project-tab__meta">{tab.paneIds.length}</span>
-                    </button>
-                  ))}
-                  <button type="button" className="project-tab project-tab--create" onClick={handleCreateDraftTab}>
-                    +
-                  </button>
-                </div>
-                <div className={activePaneGridClassName}>
-                  {paneViews.map((paneView) => {
-                    const status = paneView.thread ? getThreadStatus(paneView.thread, nowIso, isThreadTurnRunning(paneView.thread.id)) : null;
-                    const dropAllowed = draggedThreadId
-                      ? (consoleData.threads.find((thread) => thread.id === draggedThreadId)?.projectId === paneView.project.id)
-                      : false;
-
-                    return (
-                      <section
-                        key={paneView.pane.id}
-                        className={`conversation-pane${paneView.isActive ? " conversation-pane--active" : ""}${dragOverPaneId === paneView.pane.id ? " conversation-pane--drag-over" : ""}${highlightedPaneId === paneView.pane.id ? " conversation-pane--highlight" : ""}`}
-                        onClick={() => workspace.activatePane(paneView.project.id, paneView.tabId, paneView.pane.id)}
-                        onDragOver={(event: ReactDragEvent<HTMLElement>) => {
-                          if (!dropAllowed) {
-                            return;
-                          }
-                          event.preventDefault();
-                          setDragOverPaneId(paneView.pane.id);
-                        }}
-                        onDragLeave={() => {
-                          setDragOverPaneId((current) => (current === paneView.pane.id ? null : current));
-                        }}
-                        onDrop={(event: ReactDragEvent<HTMLElement>) => {
-                          event.preventDefault();
-                          setDragOverPaneId(null);
-                          if (!draggedThreadId) {
-                            return;
-                          }
-                          const thread = consoleData.threads.find((candidate) => candidate.id === draggedThreadId) ?? null;
-                          if (!thread || thread.projectId !== paneView.project.id) {
-                            return;
-                          }
-                          workspace.mountThreadInPane({
-                            projectId: paneView.project.id,
-                            paneId: paneView.pane.id,
-                            threadId: draggedThreadId as ThreadId,
-                          });
-                          focusPanePrompt(paneView.pane.id);
-                          setDraggedThreadId(null);
-                        }}
-                      >
-                        <header className="conversation-pane__header">
-                          <div className="conversation-pane__titleBlock">
-                            <div className="conversation-pane__eyebrow">
-                              {paneView.setup ? "Draft thread" : paneView.project.title}
-                            </div>
-                            <div className="conversation-pane__title">
-                              {paneView.thread
-                                ? paneView.thread.title
-                                : paneView.setup
-                                  ? "New thread"
-                                  : "Loading thread"}
-                            </div>
-                            <div className="conversation-pane__meta">
-                              {paneView.setup
-                                ? `${paneView.setup.selectedProvider} · ${paneView.cwd ?? paneView.project.workspaceRoot}`
-                                : paneView.thread
-                                  ? `${paneView.thread.provider} · ${paneView.thread.model} · ${status?.label ?? ""}`
-                                  : `${paneView.provider} · connecting`}
-                            </div>
-                          </div>
-                          <div className="conversation-pane__actions">
-                            <button type="button" className="conversation-pane__action" onClick={(event) => {
-                              event.stopPropagation();
-                              workspace.activatePane(paneView.project.id, paneView.tabId, paneView.pane.id);
-                              handleSplitActivePane();
-                            }}
-                            >
-                              split
-                            </button>
-                            <button
-                              type="button"
-                              className="conversation-pane__action"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                workspace.closePane(paneView.project.id, paneView.pane.id);
-                              }}
-                            >
-                              close
-                            </button>
-                          </div>
-                        </header>
-                        {paneView.setup ? (
-                          <DraftPaneHeader
-                            setup={paneView.setup}
-                            busy={pendingDraftPaneIds.has(paneView.pane.id)}
-                            onSelectProvider={(provider) => {
-                              workspace.updateDraftPane({
-                                paneId: paneView.pane.id,
-                                updater: (setup) => ({ ...setup, selectedProvider: provider }),
-                              });
-                            }}
-                          />
-                        ) : null}
                         <div className="conversation-pane__body">
                           <TranscriptRenderer
                             ref={(handle) => {
@@ -1459,11 +1379,10 @@ export function App() {
                             }
                           />
                         </div>
-                      </section>
-                    );
-                  })}
-                </div>
-              </>
+                    </section>
+                  );
+                })}
+              </div>
             ) : projects.length === 0 ? (
               <EmptyWorkspaceSurface title="No project loaded." detail="Create or sync a project first." />
             ) : (
