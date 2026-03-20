@@ -75,7 +75,8 @@ const startDesktopBundle = Effect.fn("startDesktopBundle")(function* (input: {
 
 const cli = Command.make("start-desktop-bundle", {
   surface: Flag.choice("surface", DesktopSurface).pipe(
-    Flag.withDescription("Desktop renderer surface to run."),
+    Flag.withDescription("Desktop renderer surface to run. Defaults to console."),
+    Flag.withDefault("console"),
   ),
   skipBuild: Flag.boolean("skip-build").pipe(
     Flag.withDescription("Reuse existing built artifacts and launch immediately."),

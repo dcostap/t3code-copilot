@@ -3,11 +3,15 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type ChangeEvent as ReactChangeEvent,
   type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { parsePatchFiles, type FileDiffMetadata } from "@pierre/diffs";
 import { defaultKeymap } from "@codemirror/commands";
@@ -52,6 +56,7 @@ interface PositionedMark {
 
 interface TranscriptDocumentModel {
   readonly text: string;
+  readonly historyLineCount: number;
   readonly lines: ReadonlyArray<PositionedLine>;
   readonly marks: ReadonlyArray<PositionedMark>;
   readonly widgets: ReadonlyArray<PositionedWidget>;
@@ -130,6 +135,7 @@ interface TranscriptRendererProps {
   readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
   readonly cwd?: string | null;
   readonly interactionMode?: "default" | "plan";
+  readonly promptFocusDisabled?: boolean;
   readonly pendingUserInputHighlight?: {
     readonly requestId: string;
     readonly questionIndex: number;
@@ -172,10 +178,18 @@ interface CommandWidgetLineContent {
 
 export type TranscriptRegion = "prompt" | "history";
 
+interface FocusPromptOptions {
+  readonly reveal?: boolean;
+}
+
 export interface TranscriptRendererHandle {
   focus(): void;
-  focusPrompt(): void;
+  focusPrompt(options?: FocusPromptOptions): void;
   focusHistory(): void;
+  insertPromptText(text: string): void;
+  deletePromptBackward(): void;
+  deletePromptForward(): void;
+  submitPrompt(): void;
   scrollToBottom(): void;
 }
 
@@ -977,7 +991,7 @@ function parseCommandWidgetText(text: string): {
     counts = prefixCounts.counts;
   }
 
-  for (const marker of ["  Completed in ", "  Running for ", "  Failed after ", "  Declined after "]) {
+  for (const marker of ["  Finished in ", "  Completed in ", "  Running for ", "  Failed after ", "  Declined after "]) {
     const timingIndex = command.lastIndexOf(marker);
     if (timingIndex === -1) {
       continue;
@@ -1408,8 +1422,6 @@ function flattenBlocks(
 
 function buildTranscriptDocument(
   blocks: ReadonlyArray<TranscriptBlock>,
-  draft: string,
-  interactionMode: "default" | "plan",
   expandedCommandSignatures: ReadonlySet<string>,
   collapsedFileChangeSignatures: ReadonlySet<string>,
   resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>,
@@ -1420,25 +1432,10 @@ function buildTranscriptDocument(
   },
 ): TranscriptDocumentModel {
   const { lines: historyLines, widgetsByLineIndex } = flattenBlocks(blocks, pendingUserInputHighlight);
-  const draftLines = draft.length > 0 ? draft.split("\n") : [""];
-  const includePromptSeparator = shouldRenderPromptSeparator(historyLines.length);
-  const allLines: AnnotatedLine[] = [
-    ...historyLines,
-    ...(includePromptSeparator
-      ? [{
-          text: "",
-          kind: "promptSeparator" as const,
-          extraClasses: promptSeparatorClassesForInteractionMode(interactionMode),
-        }]
-      : []),
-    { text: draftLines[0] ?? "", kind: "promptInput" },
-    ...draftLines.slice(1).map((line) => ({ text: line, kind: "promptInput" as const })),
-  ];
+  const allLines: AnnotatedLine[] = [...historyLines];
 
   let text = "";
   let offset = 0;
-  let separatorStart = -1;
-  let promptStart = -1;
   const positioned: PositionedLine[] = [];
   const marks: PositionedMark[] = [];
   const widgets: PositionedWidget[] = [];
@@ -1501,14 +1498,6 @@ function buildTranscriptDocument(
       }
     }
     text += line.text;
-
-    if (line.kind === "promptSeparator" && separatorStart === -1) {
-      separatorStart = from;
-    }
-
-    if (line.kind === "promptInput" && promptStart === -1) {
-      promptStart = from;
-    }
 
     offset += line.text.length;
     const widget = widgetsByLineIndex.get(index);
@@ -1595,6 +1584,7 @@ function buildTranscriptDocument(
 
   return {
     text,
+    historyLineCount: historyLines.length,
     lines: positioned,
     marks,
     widgets,
@@ -1603,8 +1593,8 @@ function buildTranscriptDocument(
     inlineDiffLookupsBySignature,
     inlineDiffContentBySignature,
     defaultExpandedInlineDiffSignatures,
-    separatorStart: separatorStart === -1 ? promptStart === -1 ? text.length : promptStart : separatorStart,
-    promptStart: promptStart === -1 ? text.length : promptStart,
+    separatorStart: text.length,
+    promptStart: text.length,
   };
 }
 
@@ -1613,7 +1603,6 @@ function buildDecorations(
   marks: ReadonlyArray<PositionedMark>,
   widgets: ReadonlyArray<PositionedWidget>,
   replacements: ReadonlyArray<PositionedReplacement>,
-  promptStart: number,
 ) {
   const ranges = lines.map((line) =>
     Decoration.line({
@@ -1637,7 +1626,10 @@ function buildDecorations(
       Decoration.replace({ widget, block: true }).range(from, to),
     ),
   );
-  ranges.push(Decoration.line({ class: "cm-line-promptStart" }).range(promptStart));
+  const promptLine = lines.find((line) => line.kind === "promptInput");
+  if (promptLine) {
+    ranges.push(Decoration.line({ class: "cm-line-promptStart" }).range(promptLine.from));
+  }
   return Decoration.set(ranges, true);
 }
 
@@ -1691,8 +1683,12 @@ function buildEditorTheme() {
     {
       "&": {
         height: "auto",
+        minHeight: "100%",
+        flex: "1 1 auto",
         width: "100%",
         minWidth: "0",
+        display: "flex",
+        flexDirection: "column",
         color: "#c5ccd3",
         backgroundColor: "transparent",
         fontFamily:
@@ -1700,18 +1696,26 @@ function buildEditorTheme() {
         fontSize: "16px",
       },
       ".cm-scroller": {
+        display: "flex",
+        flexDirection: "column",
+        flex: "1 1 auto",
         overflowX: "hidden",
         overflowY: "visible",
         width: "100%",
         minWidth: "0",
+        minHeight: "100%",
         padding: "18px 0 18px",
         lineHeight: "1.3",
       },
       ".cm-content": {
         boxSizing: "border-box",
+        display: "flex",
+        flex: "1 0 auto",
+        flexDirection: "column",
         width: "100%",
         minWidth: "0",
         maxWidth: "100%",
+        minHeight: "100%",
         padding: "0 22px 6px",
         caretColor: "#cfd6dd",
       },
@@ -2059,7 +2063,7 @@ function buildEditorTheme() {
         position: "absolute",
         left: "18ch",
         right: "-17px",
-     top: "50%",
+        top: "50%",
         borderTop: "1px solid rgba(127, 201, 109, 0.465)",
         transform: "translateY(-50%)",
       },
@@ -2509,9 +2513,20 @@ function buildEditorTheme() {
   );
 }
 
+function findConversationScrollContainer(start: HTMLElement | null) {
+  let current = start;
+  while (current) {
+    const { overflowY } = window.getComputedStyle(current);
+    if ((overflowY === "auto" || overflowY === "scroll") && current.scrollHeight > current.clientHeight) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
 function getConversationScrollContainer(view: EditorView) {
-  const scrollContainer = view.dom.closest(".conversation-scroll");
-  return scrollContainer instanceof HTMLElement ? scrollContainer : null;
+  return findConversationScrollContainer(view.dom);
 }
 
 const USER_MESSAGE_COPY_PREFIX = "> ";
@@ -2702,6 +2717,9 @@ function keepCursorWithinViewportPadding(view: EditorView) {
 }
 
 export function getHistorySelectionLimitForPromptStart(doc: Text, promptStart: number) {
+  if (promptStart >= doc.length) {
+    return doc.length;
+  }
   const promptLine = doc.lineAt(promptStart);
   if (promptLine.number <= 1) {
     return 0;
@@ -2747,6 +2765,16 @@ export function shouldRenderPromptSeparator(historyLineCount: number) {
   return historyLineCount > 0;
 }
 
+export function resolvePromptTextareaLayout(lineHeight: number, scrollHeight: number) {
+  const safeLineHeight = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 20;
+  const minHeight = Math.ceil(safeLineHeight * 2);
+  const maxHeight = Math.ceil(safeLineHeight * 10);
+  return {
+    height: Math.min(maxHeight, Math.max(scrollHeight, minHeight)),
+    overflowY: scrollHeight > maxHeight ? "auto" as const : "hidden" as const,
+  };
+}
+
 export function shouldRedirectHistoryTypingToPrompt(
   event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey">,
 ) {
@@ -2765,28 +2793,6 @@ export function shouldKeepCursorPaddingForTransactions(
   return transactions.some((transaction) => transaction.isUserEvent("select.keyboard"));
 }
 
-function clampStoredSelectionToPrompt(
-  state: EditorState,
-  selection: StoredSelection,
-): StoredSelection {
-  const promptStart = state.field(promptStartField);
-  return {
-    anchor: Math.max(promptStart, Math.min(selection.anchor, state.doc.length)),
-    head: Math.max(promptStart, Math.min(selection.head, state.doc.length)),
-  };
-}
-
-function clampSelectionToPromptBounds(
-  promptStart: number,
-  docLength: number,
-  selection: StoredSelection,
-): StoredSelection {
-  return {
-    anchor: Math.max(promptStart, Math.min(selection.anchor, docLength)),
-    head: Math.max(promptStart, Math.min(selection.head, docLength)),
-  };
-}
-
 function clampStoredSelectionToHistory(
   state: EditorState,
   selection: StoredSelection,
@@ -2795,18 +2801,6 @@ function clampStoredSelectionToHistory(
   return {
     anchor: Math.min(selection.anchor, historyLimit),
     head: Math.min(selection.head, historyLimit),
-  };
-}
-
-function storePromptSelection(
-  state: EditorState,
-  selection: StoredSelection,
-): StoredPromptSelection {
-  const promptStart = state.field(promptStartField);
-  const clamped = clampStoredSelectionToPrompt(state, selection);
-  return {
-    anchorOffset: clamped.anchor - promptStart,
-    headOffset: clamped.head - promptStart,
   };
 }
 
@@ -2822,17 +2816,6 @@ export function resolvePromptSelectionForDocument(
     anchor: promptStart + anchorOffset,
     head: promptStart + headOffset,
   };
-}
-
-function resolvePromptSelection(
-  state: EditorState,
-  stored: StoredPromptSelection | null,
-): StoredSelection {
-  return resolvePromptSelectionForDocument(
-    state.field(promptStartField),
-    state.doc.length,
-    stored,
-  );
 }
 
 function resolveHistorySelection(
@@ -2852,7 +2835,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       blocks,
       composerAttachments = [],
       cwd,
-      interactionMode = "default",
+      interactionMode: _interactionMode = "default",
+      promptFocusDisabled = false,
       pendingUserInputHighlight,
       onAddImageFiles,
       onDraftChange,
@@ -2868,13 +2852,13 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const syncingViewRef = useRef(false);
     const submittingRef = useRef(false);
     const activeRegionRef = useRef<TranscriptRegion>("prompt");
-    const promptSelectionRef = useRef<StoredPromptSelection | null>(null);
     const historySelectionRef = useRef<StoredSelection | null>(null);
     const draftRef = useRef("");
     const onSubmitRef = useRef(onSubmit);
     const onDraftChangeRef = useRef(onDraftChange);
     const resolveInlineDiffRef = useRef(resolveInlineDiff);
     const submitDisabledRef = useRef(submitDisabled);
+    const promptFocusDisabledRef = useRef(promptFocusDisabled);
     const composerAttachmentsRef = useRef(composerAttachments);
     const expandedCommandSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const collapsedFileChangeSignaturesRef = useRef<ReadonlySet<string>>(new Set());
@@ -2891,6 +2875,11 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     >(() => new Map());
     const [isDraggingImages, setIsDraggingImages] = useState(false);
     const [draft, setDraft] = useState("");
+    const [promptSelection, setPromptSelection] = useState<StoredPromptSelection>({
+      anchorOffset: 0,
+      headOffset: 0,
+    });
+    const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
     useEffect(() => {
       draftRef.current = draft;
@@ -2898,6 +2887,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       onDraftChangeRef.current = onDraftChange;
       resolveInlineDiffRef.current = resolveInlineDiff;
       submitDisabledRef.current = submitDisabled;
+      promptFocusDisabledRef.current = promptFocusDisabled;
       composerAttachmentsRef.current = composerAttachments;
       expandedCommandSignaturesRef.current = expandedCommandSignatures;
       collapsedFileChangeSignaturesRef.current = collapsedFileChangeSignatures;
@@ -2908,6 +2898,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       expandedCommandSignatures,
       onDraftChange,
       onSubmit,
+      promptFocusDisabled,
       resolveInlineDiff,
       submitDisabled,
     ]);
@@ -2916,21 +2907,185 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       () =>
         buildTranscriptDocument(
           blocks,
-          draft,
-          interactionMode,
           expandedCommandSignatures,
           collapsedFileChangeSignatures,
           resolvedInlineDiffBySignature,
           pendingUserInputHighlight,
         ),
-      [blocks, draft, expandedCommandSignatures, collapsedFileChangeSignatures, interactionMode, pendingUserInputHighlight, resolvedInlineDiffBySignature],
+      [blocks, collapsedFileChangeSignatures, expandedCommandSignatures, pendingUserInputHighlight, resolvedInlineDiffBySignature],
     );
+    const compactPendingUserInputPrompt =
+      pendingUserInputHighlight !== undefined && !shouldRenderPromptSeparator(docModel.historyLineCount);
     const initialDocModelRef = useRef(docModel);
     const docModelRef = useRef(docModel);
 
     useEffect(() => {
       docModelRef.current = docModel;
     }, [docModel]);
+
+    const setDraftValue = useCallback((nextDraft: string) => {
+      draftRef.current = nextDraft;
+      setDraft(nextDraft);
+      onDraftChangeRef.current?.(nextDraft);
+    }, []);
+
+    const setPromptSelectionValue = useCallback((anchorOffset: number, headOffset: number) => {
+      const nextSelection = { anchorOffset, headOffset };
+      setPromptSelection((current) =>
+        current.anchorOffset === nextSelection.anchorOffset && current.headOffset === nextSelection.headOffset
+          ? current
+          : nextSelection,
+      );
+    }, []);
+
+    const syncPromptSelection = useCallback((textarea = promptTextareaRef.current) => {
+      const fallbackOffset = draftRef.current.length;
+      const anchorOffset = textarea?.selectionStart ?? fallbackOffset;
+      const headOffset = textarea?.selectionEnd ?? fallbackOffset;
+      setPromptSelectionValue(anchorOffset, headOffset);
+    }, [setPromptSelectionValue]);
+
+    const focusPromptInput = useCallback((_options?: FocusPromptOptions) => {
+      if (promptFocusDisabledRef.current) {
+        return;
+      }
+      activeRegionRef.current = "prompt";
+      const textarea = promptTextareaRef.current;
+      if (!textarea) {
+        return;
+      }
+      textarea.focus({ preventScroll: true });
+      const maxOffset = textarea.value.length;
+      const anchorOffset = Math.min(promptSelection.anchorOffset, maxOffset);
+      const headOffset = Math.min(promptSelection.headOffset, maxOffset);
+      textarea.setSelectionRange(anchorOffset, headOffset);
+      setPromptSelectionValue(anchorOffset, headOffset);
+    }, [promptSelection.anchorOffset, promptSelection.headOffset, setPromptSelectionValue]);
+
+    const autosizePromptInput = useCallback(() => {
+      const textarea = promptTextareaRef.current;
+      if (!textarea) {
+        return;
+      }
+
+      textarea.style.height = "auto";
+      const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight || "20") || 20;
+      const { height, overflowY } = resolvePromptTextareaLayout(lineHeight, textarea.scrollHeight);
+      const nextTextareaHeight = `${height}px`;
+      if (textarea.style.height !== nextTextareaHeight) {
+        textarea.style.height = nextTextareaHeight;
+      }
+      if (textarea.style.overflowY !== overflowY) {
+        textarea.style.overflowY = overflowY;
+      }
+    }, []);
+
+    useLayoutEffect(() => {
+      autosizePromptInput();
+    }, [autosizePromptInput, draft]);
+
+    const insertTextIntoDraft = useCallback((text: string) => {
+      const selectionStart = Math.min(promptSelection.anchorOffset, promptSelection.headOffset);
+      const selectionEnd = Math.max(promptSelection.anchorOffset, promptSelection.headOffset);
+      const nextDraft =
+        draftRef.current.slice(0, selectionStart)
+        + text
+        + draftRef.current.slice(selectionEnd);
+      setDraftValue(nextDraft);
+      const nextCursor = selectionStart + text.length;
+      setPromptSelectionValue(nextCursor, nextCursor);
+      requestAnimationFrame(() => {
+        const nextTextarea = promptTextareaRef.current;
+        if (!nextTextarea) {
+          return;
+        }
+        nextTextarea.focus({ preventScroll: true });
+        nextTextarea.setSelectionRange(nextCursor, nextCursor);
+      });
+    }, [promptSelection.anchorOffset, promptSelection.headOffset, setDraftValue, setPromptSelectionValue]);
+
+    const deletePromptText = useCallback((direction: "backward" | "forward") => {
+      const selectionStart = Math.min(promptSelection.anchorOffset, promptSelection.headOffset);
+      const selectionEnd = Math.max(promptSelection.anchorOffset, promptSelection.headOffset);
+      if (selectionStart === selectionEnd) {
+        if (direction === "backward" && selectionStart === 0) {
+          return;
+        }
+        if (direction === "forward" && selectionEnd >= draftRef.current.length) {
+          return;
+        }
+      }
+      const deleteFrom = selectionStart === selectionEnd
+        ? direction === "backward"
+          ? selectionStart - 1
+          : selectionStart
+        : selectionStart;
+      const deleteTo = selectionStart === selectionEnd
+        ? direction === "backward"
+          ? selectionEnd
+          : selectionEnd + 1
+        : selectionEnd;
+      const nextDraft = draftRef.current.slice(0, deleteFrom) + draftRef.current.slice(deleteTo);
+      setDraftValue(nextDraft);
+      setPromptSelectionValue(deleteFrom, deleteFrom);
+      requestAnimationFrame(() => {
+        const textarea = promptTextareaRef.current;
+        if (!textarea) {
+          return;
+        }
+        textarea.focus({ preventScroll: true });
+        textarea.setSelectionRange(deleteFrom, deleteFrom);
+      });
+    }, [promptSelection.anchorOffset, promptSelection.headOffset, setDraftValue, setPromptSelectionValue]);
+
+    const handlePromptInputChange = useCallback((event: ReactChangeEvent<HTMLTextAreaElement>) => {
+      setDraftValue(event.target.value);
+      syncPromptSelection(event.target);
+    }, [setDraftValue, syncPromptSelection]);
+
+    const submitDraft = useCallback(async () => {
+      const value = draftRef.current.trim();
+      if (
+        (value.length === 0 && composerAttachmentsRef.current.length === 0)
+        || submittingRef.current
+        || submitDisabledRef.current
+      ) {
+        return true;
+      }
+
+      submittingRef.current = true;
+      try {
+        await onSubmitRef.current?.(value);
+        setDraftValue("");
+      } finally {
+        submittingRef.current = false;
+      }
+
+      requestAnimationFrame(() => {
+        focusPromptInput();
+      });
+      return true;
+    }, [focusPromptInput, setDraftValue]);
+
+    const handlePromptInputKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+      if (event.key !== "Enter" || event.shiftKey) {
+        return;
+      }
+      event.preventDefault();
+      void submitDraft();
+    }, [submitDraft]);
+
+    const handlePromptInputSelectionChange = useCallback((event: { currentTarget: HTMLTextAreaElement }) => {
+      syncPromptSelection(event.currentTarget);
+    }, [syncPromptSelection]);
+
+    const handlePromptBodyMouseDown = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+      if (event.target instanceof HTMLElement && event.target.closest("button, textarea")) {
+        return;
+      }
+      event.preventDefault();
+      focusPromptInput();
+    }, [focusPromptInput]);
 
     const requestInlineDiff = useCallback((signature: string, lookup: InlineDiffLookup) => {
       const resolver = resolveInlineDiffRef.current;
@@ -2986,28 +3141,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       view.dom.classList.toggle("cm-editor-historyActive", activeRegionRef.current === "history");
     }, []);
 
-    const focusPromptRegion = useCallback((view: EditorView) => {
+    const focusPromptRegion = useCallback((options?: FocusPromptOptions) => {
       activeRegionRef.current = "prompt";
-      syncActiveRegionClass(view);
-      const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
-      promptSelectionRef.current = storePromptSelection(view.state, promptSelection);
-      view.dispatch({
-        selection: EditorSelection.range(promptSelection.anchor, promptSelection.head),
-        annotations: syncAnnotation.of(true),
-      });
-      view.focus();
-      view.contentDOM.focus({ preventScroll: true });
       requestAnimationFrame(() => {
-        keepCursorWithinViewportPadding(view);
+        focusPromptInput(options);
       });
-    }, [syncActiveRegionClass]);
+    }, [focusPromptInput]);
 
     const focusHistoryRegion = useCallback((view: EditorView) => {
-      const currentSelection: StoredSelection = {
-        anchor: view.state.selection.main.anchor,
-        head: view.state.selection.main.head,
-      };
-      promptSelectionRef.current = storePromptSelection(view.state, currentSelection);
       activeRegionRef.current = "history";
       syncActiveRegionClass(view);
       const historySelection = resolveHistorySelection(view.state, historySelectionRef.current);
@@ -3032,38 +3173,16 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         historySelectionRef.current = clampStoredSelectionToHistory(view.state, currentSelection);
         activeRegionRef.current = "prompt";
         syncActiveRegionClass(view);
-
-        const promptSelection = resolvePromptSelection(view.state, promptSelectionRef.current);
-        view.dispatch({
-          changes: {
-            from: promptSelection.anchor,
-            to: promptSelection.head,
-            insert: text,
-          },
-          selection: EditorSelection.cursor(promptSelection.anchor + text.length),
-          annotations: syncAnnotation.of(true),
-        });
-        promptSelectionRef.current = storePromptSelection(view.state, {
-          anchor: promptSelection.anchor + text.length,
-          head: promptSelection.anchor + text.length,
-        });
-        view.focus();
-        view.contentDOM.focus({ preventScroll: true });
-        requestAnimationFrame(() => {
-          keepCursorWithinViewportPadding(view);
-        });
+        insertTextIntoDraft(text);
       },
-      [syncActiveRegionClass],
+      [insertTextIntoDraft, syncActiveRegionClass],
     );
 
     const storeSelectionForRegion = useCallback(
       (state: EditorState, region: TranscriptRegion, selection: StoredSelection) => {
-        if (region === "prompt") {
-          promptSelectionRef.current = storePromptSelection(state, selection);
-          return;
+        if (region === "history") {
+          historySelectionRef.current = clampStoredSelectionToHistory(state, selection);
         }
-
-        historySelectionRef.current = clampStoredSelectionToHistory(state, selection);
       },
       [],
     );
@@ -3107,18 +3226,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
     useImperativeHandle(ref, () => ({
       focus() {
-        const view = viewRef.current;
-        if (!view) {
-          return;
-        }
-        focusPromptRegion(view);
+        focusPromptRegion();
       },
-      focusPrompt() {
-        const view = viewRef.current;
-        if (!view) {
-          return;
-        }
-        focusPromptRegion(view);
+      focusPrompt(options) {
+        focusPromptRegion(options);
       },
       focusHistory() {
         const view = viewRef.current;
@@ -3127,6 +3238,18 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         focusHistoryRegion(view);
       },
+      insertPromptText(text) {
+        insertTextIntoDraft(text);
+      },
+      deletePromptBackward() {
+        deletePromptText("backward");
+      },
+      deletePromptForward() {
+        deletePromptText("forward");
+      },
+      submitPrompt() {
+        void submitDraft();
+      },
       scrollToBottom() {
         const view = viewRef.current;
         if (!view) {
@@ -3134,7 +3257,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         scrollConversationToBottom(view);
       },
-    }), [focusHistoryRegion, focusPromptRegion]);
+    }), [deletePromptText, focusHistoryRegion, focusPromptRegion, insertTextIntoDraft, submitDraft]);
 
     useEffect(() => {
       if (!editorRef.current) {
@@ -3142,44 +3265,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
 
       const initialDocModel = initialDocModelRef.current;
-
-      const replaceDraft = (nextDraft: string) => {
-        const view = viewRef.current;
-        if (!view) {
-          return;
-        }
-
-        const promptStart = view.state.field(promptStartField);
-        view.dispatch({
-          changes: {
-            from: promptStart,
-            to: view.state.doc.length,
-            insert: nextDraft,
-          },
-          selection: EditorSelection.cursor(promptStart + nextDraft.length),
-        });
-      };
-
-      const submitDraft = async () => {
-        const value = draftRef.current.trim();
-        if (
-          (value.length === 0 && composerAttachmentsRef.current.length === 0) ||
-          submittingRef.current ||
-          submitDisabledRef.current
-        ) {
-          return true;
-        }
-
-        submittingRef.current = true;
-        try {
-          await onSubmitRef.current?.(value);
-          replaceDraft("");
-        } finally {
-          submittingRef.current = false;
-        }
-
-        return true;
-      };
 
       const initialState = EditorState.create({
         doc: initialDocModel.text,
@@ -3214,10 +3299,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               anchor: targetSelection.main.anchor,
               head: targetSelection.main.head,
             };
-            const clampedSelection =
-              activeRegionRef.current === "prompt"
-                ? clampSelectionToPromptBounds(promptStart, transaction.newDoc.length, rawSelection)
-                : clampStoredSelectionToHistory(transaction.startState, rawSelection);
+            const clampedSelection = clampStoredSelectionToHistory(transaction.startState, rawSelection);
 
             if (
               clampedSelection.anchor === rawSelection.anchor &&
@@ -3233,32 +3315,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               },
             ];
           }),
-          keymap.of([
-            {
-              key: "Shift-Enter",
-              run(view) {
-                if (activeRegionRef.current !== "prompt") {
-                  return true;
-                }
-                const selection = view.state.selection.main;
-                view.dispatch({
-                  changes: { from: selection.from, to: selection.to, insert: "\n" },
-                  selection: EditorSelection.cursor(selection.from + 1),
-                });
-                return true;
-              },
-            },
-            {
-              key: "Enter",
-              run() {
-                if (activeRegionRef.current !== "prompt") {
-                  return true;
-                }
-                void submitDraft();
-                return true;
-              },
-            },
-          ]),
           keymap.of(defaultKeymap),
           EditorView.lineWrapping,
           EditorView.clipboardOutputFilter.of((text, state) =>
@@ -3275,21 +3331,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                 initialDocModel.marks,
                 initialDocModel.widgets,
                 initialDocModel.replacements,
-                initialDocModel.promptStart,
               ),
             ),
           ),
           EditorView.updateListener.of((update) => {
             if (syncingViewRef.current) {
               return;
-            }
-
-            const promptStart = update.state.field(promptStartField);
-            const nextDraft = update.state.sliceDoc(promptStart);
-            if (nextDraft !== draftRef.current) {
-              draftRef.current = nextDraft;
-              setDraft(nextDraft);
-              onDraftChangeRef.current?.(nextDraft);
             }
 
             const currentSelection: StoredSelection = {
@@ -3306,10 +3353,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           }),
           EditorView.domEventHandlers({
             focus(_event, view) {
-              const nextSelection =
-                activeRegionRef.current === "prompt"
-                  ? resolvePromptSelection(view.state, promptSelectionRef.current)
-                  : resolveHistorySelection(view.state, historySelectionRef.current);
+              activeRegionRef.current = "history";
+              syncActiveRegionClass(view);
+              const nextSelection = resolveHistorySelection(view.state, historySelectionRef.current);
               view.dispatch({
                 selection: EditorSelection.range(nextSelection.anchor, nextSelection.head),
                 annotations: syncAnnotation.of(true),
@@ -3403,8 +3449,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               return true;
             },
           }),
-          EditorView.editable.of(true),
-          EditorState.readOnly.of(false),
+          EditorView.editable.of(false),
+          EditorState.readOnly.of(true),
         ],
       });
 
@@ -3451,28 +3497,21 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         return;
       }
 
-      const shouldPinToBottom =
-        view.hasFocus
-        && activeRegionRef.current === "prompt"
-        && isConversationScrollNearBottom(view);
+      const shouldPinToBottom = isConversationScrollNearBottom(view);
       const minimalDocChange = isTextStable ? null : computeMinimalDocChange(currentText, docModel.text);
 
       syncingViewRef.current = true;
-      const syncedPromptSelection =
-        activeRegionRef.current === "prompt"
-          ? resolvePromptSelectionForDocument(
-              docModel.promptStart,
-              docModel.text.length,
-              promptSelectionRef.current,
-            )
+      const syncedHistorySelection =
+        activeRegionRef.current === "history"
+          ? resolveHistorySelection(view.state, historySelectionRef.current)
           : null;
       view.dispatch({
         ...(minimalDocChange ? { changes: minimalDocChange } : {}),
-        ...(syncedPromptSelection
+        ...(syncedHistorySelection
           ? {
               selection: EditorSelection.range(
-                syncedPromptSelection.anchor,
-                syncedPromptSelection.head,
+                syncedHistorySelection.anchor,
+                syncedHistorySelection.head,
               ),
             }
           : {}),
@@ -3484,7 +3523,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                 docModel.marks,
                 docModel.widgets,
                 docModel.replacements,
-                docModel.promptStart,
               ),
             ),
           ),
@@ -3495,35 +3533,15 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       syncingViewRef.current = false;
       appliedDecorationSignatureRef.current = nextDecorationSignature;
 
-      if (!isTextStable) {
-        if (activeRegionRef.current === "prompt") {
-          promptSelectionRef.current = storePromptSelection(view.state, {
-            anchor: view.state.selection.main.anchor,
-            head: view.state.selection.main.head,
-          });
-        } else {
-          historySelectionRef.current = clampStoredSelectionToHistory(view.state, {
-            anchor: view.state.selection.main.anchor,
-            head: view.state.selection.main.head,
-          });
-        }
-      }
-
-      if (view.hasFocus) {
+      if (shouldPinToBottom) {
         requestAnimationFrame(() => {
-          if (shouldPinToBottom) {
-            scrollConversationToBottom(view);
-          }
+          scrollConversationToBottom(view);
         });
       }
     }, [docModel]);
 
     const focusPromptForAttachments = useCallback(() => {
-      const view = viewRef.current;
-      if (!view) {
-        return;
-      }
-      focusPromptRegion(view);
+      focusPromptRegion();
     }, [focusPromptRegion]);
 
     const handleIncomingFiles = useCallback((files: ReadonlyArray<File>) => {
@@ -3599,41 +3617,72 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        <div className="transcript-editor" ref={editorRef} />
-        {composerAttachments.length > 0 ? (
-          <div className="attachment-panel attachment-panel--composer">
-            {composerAttachments.map((attachment) => (
-              <div className="attachment-tile" key={attachment.id}>
-                <div className="attachment-tile__media">
-                  <div className="attachment-tile__fallback" hidden>
-                    {attachmentBadgeLabel(attachment.mimeType)}
+        <div className="transcript-history">
+          <div className="transcript-history__editor" ref={editorRef} />
+        </div>
+        <div
+          className={compactPendingUserInputPrompt ? "transcript-prompt transcript-prompt--compact" : "transcript-prompt"}
+        >
+          {composerAttachments.length > 0 ? (
+            <div className="attachment-panel attachment-panel--composer">
+              {composerAttachments.map((attachment) => (
+                <div className="attachment-tile" key={attachment.id}>
+                  <div className="attachment-tile__media">
+                    <div className="attachment-tile__fallback" hidden>
+                      {attachmentBadgeLabel(attachment.mimeType)}
+                    </div>
+                    <img
+                      className="attachment-tile__image"
+                      alt={attachment.name}
+                      src={attachment.previewUrl}
+                    />
                   </div>
-                  <img
-                    className="attachment-tile__image"
-                    alt={attachment.name}
-                    src={attachment.previewUrl}
-                  />
-                </div>
-                <div className="attachment-tile__meta">
-                  <div className="attachment-tile__name">{attachment.name}</div>
-                  <div className="attachment-tile__detail">
-                    {attachment.mimeType} · {formatAttachmentSize(attachment.sizeBytes)}
+                  <div className="attachment-tile__meta">
+                    <div className="attachment-tile__name">{attachment.name}</div>
+                    <div className="attachment-tile__detail">
+                      {attachment.mimeType} · {formatAttachmentSize(attachment.sizeBytes)}
+                    </div>
                   </div>
+                  <button
+                    type="button"
+                    className="attachment-tile__remove"
+                    aria-label={`Remove ${attachment.name}`}
+                    onClick={() => {
+                      onRemoveImage?.(attachment.id);
+                    }}
+                  >
+                    ×
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  className="attachment-tile__remove"
-                  aria-label={`Remove ${attachment.name}`}
-                  onClick={() => {
-                    onRemoveImage?.(attachment.id);
+              ))}
+            </div>
+          ) : null}
+          <div className="transcript-prompt__body" onMouseDown={handlePromptBodyMouseDown}>
+            <div className="transcript-prompt__row">
+              <span className="transcript-prompt__marker" aria-hidden="true">›</span>
+              <div className="transcript-prompt__inputShell">
+                <textarea
+                  ref={promptTextareaRef}
+                  className="transcript-prompt__input"
+                  value={draft}
+                  rows={2}
+                  spellCheck={false}
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  aria-label="Prompt input"
+                  onChange={handlePromptInputChange}
+                  onClick={handlePromptInputSelectionChange}
+                  onFocus={(event) => {
+                    syncPromptSelection(event.currentTarget);
                   }}
-                >
-                  ×
-                </button>
+                  onKeyDown={handlePromptInputKeyDown}
+                  onKeyUp={handlePromptInputSelectionChange}
+                  onSelect={handlePromptInputSelectionChange}
+                />
               </div>
-            ))}
+            </div>
           </div>
-        ) : null}
+        </div>
       </div>
     );
   },

@@ -75,6 +75,7 @@ function createMinimalSnapshot(): OrchestrationReadModel {
       {
         id: THREAD_ID,
         projectId: PROJECT_ID,
+        provider: "codex",
         title: "Test thread",
         model: "gpt-5",
         interactionMode: "default",

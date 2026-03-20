@@ -800,7 +800,7 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
-  it("maps assistant checkpoints to checkpoint-summary blocks", () => {
+  it("skips checkpoint summaries in assistant transcript blocks", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
@@ -854,23 +854,185 @@ describe("threadToTranscriptBlocks", () => {
         streaming: false,
       },
       {
-        type: "checkpoint-summary",
-        status: "ready",
-        checkpointTurnCount: 2,
-        files: [
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        finishedAt: "2026-03-11T09:00:01.000Z",
+      },
+    ]);
+  });
+
+  it("appends a finished-state block after a completed assistant reply reconstructed from events", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const turnId = TurnId.makeUnsafe("turn-completed-after-input");
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        checkpoints: [],
+        proposedPlans: [],
+        activities: [
           {
-            path: "apps/console-ui/src/App.tsx",
-            kind: "modified",
-            additions: 18,
-            deletions: 10,
-          },
-          {
-            path: "apps/console-ui/src/index.css",
-            kind: "modified",
-            additions: 22,
-            deletions: 9,
+            id: EventId.makeUnsafe("activity-user-input-boundary"),
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "Need a choice",
+            payload: {
+              requestId: "req-user-input-inline",
+              questions: [
+                {
+                  id: "demo_source",
+                  header: "Source",
+                  question: "Which mode should this console stay in?",
+                  options: [
+                    { label: "Demo", description: "Keep using local orchestration fixtures." },
+                    { label: "Live", description: "Connect to the orchestration websocket." },
+                  ],
+                },
+              ],
+            },
+            turnId,
+            sequence: 1,
+            createdAt: "2026-03-11T09:00:05.000Z",
           },
         ],
+        messages: [
+          {
+            id: MessageId.makeUnsafe("assistant-completed-after-input"),
+            role: "assistant",
+            text: "Before the question. After the answer.",
+            attachments: [],
+            turnId,
+            streaming: false,
+            createdAt: "2026-03-11T09:00:01.000Z",
+            updatedAt: "2026-03-11T09:00:06.000Z",
+          },
+        ],
+      },
+      {
+        orchestrationEvents: [
+          {
+            sequence: 1,
+            eventId: EventId.makeUnsafe("event-assistant-completed-before"),
+            aggregateKind: "thread",
+            aggregateId: thread!.id,
+            occurredAt: "2026-03-11T09:00:01.000Z",
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "thread.message-sent",
+            payload: {
+              threadId: thread!.id,
+              messageId: MessageId.makeUnsafe("assistant-completed-after-input"),
+              role: "assistant",
+              text: "Before the question. ",
+              turnId,
+              streaming: true,
+              createdAt: "2026-03-11T09:00:01.000Z",
+              updatedAt: "2026-03-11T09:00:01.000Z",
+            },
+          },
+          {
+            sequence: 2,
+            eventId: EventId.makeUnsafe("event-assistant-completed-after"),
+            aggregateKind: "thread",
+            aggregateId: thread!.id,
+            occurredAt: "2026-03-11T09:00:06.000Z",
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "thread.message-sent",
+            payload: {
+              threadId: thread!.id,
+              messageId: MessageId.makeUnsafe("assistant-completed-after-input"),
+              role: "assistant",
+              text: "After the answer.",
+              turnId,
+              streaming: true,
+              createdAt: "2026-03-11T09:00:06.000Z",
+              updatedAt: "2026-03-11T09:00:06.000Z",
+            },
+          },
+        ],
+      },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Before the question. ",
+        streaming: false,
+      },
+      {
+        type: "user-input-request",
+        requestId: "req-user-input-inline",
+        questions: [
+          {
+            id: "demo_source",
+            header: "Source",
+            question: "Which mode should this console stay in?",
+            options: [
+              { label: "Demo", description: "Keep using local orchestration fixtures." },
+              { label: "Live", description: "Connect to the orchestration websocket." },
+            ],
+          },
+        ],
+      },
+      {
+        type: "assistant-text",
+        text: "After the answer.",
+        streaming: false,
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        finishedAt: "2026-03-11T09:00:06.000Z",
+      },
+    ]);
+  });
+
+  it("shows a finished-state block for a completed latest turn even if the message still streams", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    expect(thread!.latestTurn).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      activities: [],
+      proposedPlans: [],
+      messages: [
+        {
+          id: MessageId.makeUnsafe("assistant-streaming-but-complete"),
+          role: "assistant",
+          text: "I traced it to the split scroll model.",
+          attachments: [],
+          turnId: thread!.latestTurn!.turnId,
+          streaming: true,
+          createdAt: "2026-03-11T09:00:00.000Z",
+          updatedAt: "2026-03-11T09:00:01.000Z",
+        },
+      ],
+      latestTurn: {
+        ...thread!.latestTurn!,
+        state: "completed",
+        completedAt: "2026-03-11T09:00:02.000Z",
+      },
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "I traced it to the split scroll model.",
+        streaming: true,
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        finishedAt: "2026-03-11T09:00:02.000Z",
       },
     ]);
   });

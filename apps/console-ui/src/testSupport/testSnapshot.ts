@@ -38,6 +38,7 @@ export function buildTestSnapshot(): OrchestrationReadModel {
       {
         id: THREAD_ID,
         projectId: PROJECT_ID,
+        provider: "codex",
         title: "Agent Transcript Test",
         model: "gpt-5",
         runtimeMode: "full-access",

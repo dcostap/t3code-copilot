@@ -242,6 +242,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         {
           id: ThreadId.makeUnsafe("thread-1"),
           projectId: asProjectId("project-1"),
+          provider: "codex",
           title: "Thread 1",
           model: "gpt-5-codex",
           interactionMode: "default",
@@ -449,6 +450,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         {
           id: ThreadId.makeUnsafe("thread-2"),
           projectId: asProjectId("project-2"),
+          provider: "codex",
           title: "Thread 2",
           model: "gpt-5-codex",
           interactionMode: "default",

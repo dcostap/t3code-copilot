@@ -1,5 +1,6 @@
 import {
   ApprovalRequestId,
+  DEFAULT_PROVIDER_KIND,
   type ChatAttachment,
   type OrchestrationEvent,
 } from "@t3tools/contracts";
@@ -419,6 +420,7 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
           yield* projectionThreadRepository.upsert({
             threadId: event.payload.threadId,
             projectId: event.payload.projectId,
+            provider: event.payload.provider ?? DEFAULT_PROVIDER_KIND,
             title: event.payload.title,
             model: event.payload.model,
             modelOptions: null,

@@ -4,6 +4,7 @@ import {
   ThreadId,
   TurnId,
   type OrchestrationReadModel,
+  type ProviderKind,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 
@@ -51,9 +52,18 @@ function makeState(thread: Thread): AppState {
 }
 
 function makeReadModelThread(overrides: Partial<OrchestrationReadModel["threads"][number]>) {
+  const sessionProvider =
+    overrides.session?.providerName === "copilot" || overrides.session?.providerName === "codex"
+      ? overrides.session.providerName
+      : null;
+  const provider =
+    (overrides.provider as ProviderKind | undefined) ??
+    sessionProvider ??
+    ((overrides.model ?? "gpt-5.3-codex").includes("claude") ? "copilot" : "codex");
   return {
     id: ThreadId.makeUnsafe("thread-1"),
     projectId: ProjectId.makeUnsafe("project-1"),
+    provider,
     title: "Thread",
     model: "gpt-5.3-codex",
     runtimeMode: DEFAULT_RUNTIME_MODE,

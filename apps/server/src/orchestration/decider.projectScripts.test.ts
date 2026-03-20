@@ -135,6 +135,7 @@ describe("decider project scripts", () => {
         payload: {
           threadId: ThreadId.makeUnsafe("thread-1"),
           projectId: asProjectId("project-1"),
+          provider: "codex",
           title: "Thread",
           model: "gpt-5-codex",
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -159,7 +160,6 @@ describe("decider project scripts", () => {
             text: "hello",
             attachments: [],
           },
-          provider: "codex",
           model: "gpt-5.3-codex",
           modelOptions: {
             codex: {
@@ -189,7 +189,6 @@ describe("decider project scripts", () => {
     expect(turnStartEvent.payload).toMatchObject({
       threadId: ThreadId.makeUnsafe("thread-1"),
       messageId: asMessageId("message-user-1"),
-      provider: "codex",
       model: "gpt-5.3-codex",
       modelOptions: {
         codex: {

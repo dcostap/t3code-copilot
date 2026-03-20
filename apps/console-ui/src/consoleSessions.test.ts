@@ -33,6 +33,7 @@ function makeThread(input: {
   return {
     id: input.id as OrchestrationThread["id"],
     projectId: input.projectId ?? project.id,
+    provider: input.providerName === "copilot" ? "copilot" : "codex",
     title: "Thread",
     model: "gpt-5-codex",
     runtimeMode: "full-access",
@@ -110,6 +111,26 @@ describe("reconcileWorkspaceState", () => {
     });
 
     expect(state.sessions[0]?.histories[0]?.preferredProvider).toBe("copilot");
+  });
+
+  it("keeps the workspace empty after the user closes the last tab", () => {
+    const thread = makeThread({
+      id: "thread:1",
+      createdAt: "2026-03-12T10:00:00.000Z",
+    });
+
+    const state = reconcileWorkspaceState({
+      state: { sessions: [], activeSessionId: null, suppressAutoSeed: true },
+      threads: [thread],
+      projects: [project],
+      preferredThreadId: thread.id,
+    });
+
+    expect(state).toEqual({
+      sessions: [],
+      activeSessionId: null,
+      suppressAutoSeed: true,
+    });
   });
 
   it("does not merge unrelated same-cwd threads into an existing session", () => {
@@ -467,6 +488,10 @@ describe("workspace session operations", () => {
       activeSessionId: session.id,
     };
 
-    expect(closeWorkspaceSession(state, session.id)).toBe(state);
+    expect(closeWorkspaceSession(state, session.id)).toEqual({
+      sessions: [],
+      activeSessionId: null,
+      suppressAutoSeed: true,
+    });
   });
 });

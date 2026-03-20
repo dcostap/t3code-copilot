@@ -192,6 +192,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           thread_id AS "threadId",
           project_id AS "projectId",
+          provider,
           title,
           model,
           model_options_json AS "modelOptions",
@@ -580,6 +581,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             const threadBase: OrchestrationThread = {
               id: row.threadId,
               projectId: row.projectId,
+              provider: row.provider,
               title: row.title,
               model: row.model,
               runtimeMode: row.runtimeMode,

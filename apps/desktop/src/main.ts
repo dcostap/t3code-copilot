@@ -1037,6 +1037,8 @@ function backendEnv(): NodeJS.ProcessEnv {
     ...process.env,
     T3CODE_MODE: "desktop",
     T3CODE_NO_BROWSER: "1",
+    T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD:
+      process.env.T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD ?? (!app.isPackaged ? "1" : "0"),
     T3CODE_PORT: String(backendPort),
     T3CODE_STATE_DIR: STATE_DIR,
     T3CODE_AUTH_TOKEN: backendAuthToken,

@@ -55,6 +55,7 @@ describe("orchestration projector", () => {
           payload: {
             threadId: "thread-1",
             projectId: "project-1",
+            provider: "codex",
             title: "demo",
             model: "gpt-5-codex",
             runtimeMode: "full-access",
@@ -72,6 +73,7 @@ describe("orchestration projector", () => {
       {
         id: "thread-1",
         projectId: "project-1",
+        provider: "codex",
         title: "demo",
         model: "gpt-5-codex",
         runtimeMode: "full-access",

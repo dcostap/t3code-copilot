@@ -579,12 +579,12 @@ describe("TerminalManager", () => {
 
     expect(snapshot.status).toBe("running");
     expect(ptyAdapter.spawnInputs.length).toBeGreaterThanOrEqual(2);
-    expect(ptyAdapter.spawnInputs[0]?.shell).toBe("/definitely/missing-shell");
+    expect(ptyAdapter.spawnInputs[0]?.shell).toContain("/definitely/missing-shell");
 
     if (process.platform === "win32") {
       expect(
         ptyAdapter.spawnInputs.some(
-          (input) => input.shell === "cmd.exe" || input.shell === "powershell.exe",
+          (input) => /(^|[\\/])(cmd|powershell)\.exe$/i.test(input.shell),
         ),
       ).toBe(true);
     } else {

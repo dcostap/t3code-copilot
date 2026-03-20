@@ -256,6 +256,12 @@ export interface SendingStateBlock {
   readonly now: string;
 }
 
+export interface FinishedStateBlock {
+  readonly type: "finished-state";
+  readonly startedAt: string;
+  readonly finishedAt: string;
+}
+
 export interface InterruptedStateBlock {
   readonly type: "interrupted-state";
   readonly startedAt: string;
@@ -288,6 +294,7 @@ export type TranscriptBlock =
   | CheckpointSummaryBlock
   | SendingStateBlock
   | WorkingStateBlock
+  | FinishedStateBlock
   | InterruptedStateBlock
   | DividerBlock
   | StatusBlock;
@@ -945,6 +952,17 @@ function formatWorkGroupFooter(block: WorkGroupBlock) {
   }
 }
 
+function finishedWorkGroupFooterLines(block: WorkGroupBlock): AnnotatedLine[] {
+  const elapsedLabel = formatElapsedDuration(Date.parse(block.endedAt) - Date.parse(block.startedAt));
+  return [
+    { text: "", kind: "meta" },
+    {
+      text: `Finished in ${elapsedLabel}`,
+      kind: "workingLine",
+    },
+  ];
+}
+
 function capitalizeInlineLabel(value: string) {
   if (value.length === 0) {
     return value;
@@ -1210,12 +1228,15 @@ function executionWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
           signature:
             `${block.startedAt}:${index}:${item.kind}:`
             + `${item.command ?? item.detail ?? item.changedFiles?.join("|") ?? item.label}`,
-          ...(index === lastItemIndex && block.status !== "running" ? { timingLabel } : {}),
+          ...(index === lastItemIndex && block.status !== "running" && block.status !== "done"
+            ? { timingLabel }
+            : {}),
           ...(block.now ? { now: block.now } : {}),
           startedAt: block.pulseOriginAt ?? block.startedAt,
         }),
       ];
     }),
+    ...(block.status === "done" ? finishedWorkGroupFooterLines(block) : []),
     { text: "", kind: "workGroupSeparator" },
   ];
 }
@@ -1229,7 +1250,9 @@ function fileActivityWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
       const lines: AnnotatedLine[] = [
         fileActivityWorkGroupLine(item, {
           signature: `${block.startedAt}:${index}:${item.detail ?? item.changedFiles?.join("|") ?? item.label}`,
-          ...(index === lastItemIndex && block.status !== "running" ? { timingLabel } : {}),
+          ...(index === lastItemIndex && block.status !== "running" && block.status !== "done"
+            ? { timingLabel }
+            : {}),
           ...(block.now ? { now: block.now } : {}),
           startedAt: block.pulseOriginAt ?? block.startedAt,
         }),
@@ -1241,6 +1264,7 @@ function fileActivityWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
 
       return lines;
     }),
+    ...(block.status === "done" ? finishedWorkGroupFooterLines(block) : []),
     { text: "", kind: "workGroupSeparator" },
   ];
 }
@@ -1561,15 +1585,29 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
         ? `Sending prompt for ${elapsedLabel}`
         : `Working for ${elapsedLabel}`;
       const highlightSpans = workingPulseSpans(text, block.now, block.startedAt);
-      return [{
-        text,
-        kind: "workingLine",
-        ...(highlightSpans.length > 0
-          ? {
-              highlightSpans,
-            }
-          : {}),
-      }];
+      return [
+        { text: "", kind: "meta" },
+        {
+          text,
+          kind: "workingLine",
+          ...(highlightSpans.length > 0
+            ? {
+                highlightSpans,
+              }
+            : {}),
+        },
+      ];
+    }
+
+    case "finished-state": {
+      const elapsedLabel = formatElapsedDuration(Date.parse(block.finishedAt) - Date.parse(block.startedAt));
+      return [
+        { text: "", kind: "meta" },
+        {
+          text: `Finished in ${elapsedLabel}`,
+          kind: "workingLine",
+        },
+      ];
     }
 
     case "interrupted-state": {

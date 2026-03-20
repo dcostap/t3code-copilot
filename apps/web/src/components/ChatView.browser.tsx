@@ -231,6 +231,7 @@ function createSnapshotForTargetUser(options: {
       {
         id: THREAD_ID,
         projectId: PROJECT_ID,
+        provider: "codex",
         title: "Browser test thread",
         model: "gpt-5",
         interactionMode: "default",
@@ -285,6 +286,7 @@ function addThreadToSnapshot(
       {
         id: threadId,
         projectId: PROJECT_ID,
+        provider: "codex",
         title: "New thread",
         model: "gpt-5",
         interactionMode: "default",

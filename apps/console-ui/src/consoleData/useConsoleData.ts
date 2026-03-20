@@ -40,6 +40,13 @@ export interface ConsolePendingUserInput {
   readonly questions: ReadonlyArray<UserInputQuestion>;
 }
 
+export interface PendingConsoleThread {
+  readonly provider: ProviderKind;
+  readonly model: string;
+  readonly interactionMode: ProviderInteractionMode;
+  readonly worktreePath: string | null;
+}
+
 export interface ConsoleDataState {
   readonly connectionState: ConsoleConnectionState;
   readonly snapshot: OrchestrationReadModel | null;
@@ -60,13 +67,14 @@ export interface ConsoleDataState {
   setActiveThreadId(threadId: string): void;
   createThread(input?: {
     projectId: OrchestrationProject["id"];
+    provider: ProviderKind;
     title?: string;
     model?: string;
     interactionMode?: ProviderInteractionMode;
     branch?: string | null;
     worktreePath?: string | null;
     createdAt?: string;
-  }): Promise<{ threadId: ThreadId }>;
+  }): Promise<{ threadId: ThreadId; pendingThread: PendingConsoleThread }>;
   getThreadEvents(threadId: string | null): ReadonlyArray<OrchestrationEvent>;
   getPendingUserInputs(threadId: string | null): ReadonlyArray<ConsolePendingUserInput>;
   getProjectForThread(threadId: string | null): OrchestrationProject | null;
@@ -76,12 +84,12 @@ export interface ConsoleDataState {
     toTurnCount: number;
   }): Promise<string>;
   isThreadTurnRunning(threadId: string | null): boolean;
-  canSubmitPromptForThread(threadId: string | null): boolean;
+  canSubmitPromptForThread(threadId: string | null, pendingThread?: PendingConsoleThread | null): boolean;
   submitPrompt(input: {
     threadId: string;
-    provider?: ProviderKind;
     prompt: string;
     attachments?: ReadonlyArray<UploadChatImageAttachment>;
+    pendingThread?: PendingConsoleThread | null;
   }): Promise<void>;
   respondToUserInput(threadId: string, requestId: string, answers: Record<string, unknown>): Promise<void>;
   setThreadModel(threadId: string, provider: ProviderKind, model: string): Promise<void>;
@@ -113,13 +121,6 @@ function makeId(prefix: string) {
 
 function makeCommandId() {
   return makeId("command") as CommandId;
-}
-
-function providerFromThread(thread: OrchestrationThread | null): ProviderKind | undefined {
-  if (thread?.session?.providerName === "codex" || thread?.session?.providerName === "copilot") {
-    return thread.session.providerName;
-  }
-  return undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -787,10 +788,13 @@ export function useConsoleData(): ConsoleDataState {
     turnRunning,
   ]);
   const canSubmitPromptForThread = useCallback(
-    (threadId: string | null) => {
+    (threadId: string | null, pendingThread?: PendingConsoleThread | null) => {
       const nextThread = threadId ? findThreadById(threads, threadId) : null;
-      if (!nextThread) return false;
       if (isPromptSubmitting) return false;
+      if (!canDispatchLiveCommand(connectionState)) return false;
+      if (!nextThread) {
+        return !!threadId && !!pendingThread;
+      }
       const nextPendingUserInputs = derivePendingUserInputs(nextThread);
       const activePendingUserInput = nextPendingUserInputs[0];
       if (
@@ -800,7 +804,6 @@ export function useConsoleData(): ConsoleDataState {
         return false;
       }
       if (nextPendingUserInputs.length === 0 && isTurnRunning(nextThread)) return false;
-      if (!canDispatchLiveCommand(connectionState)) return false;
       return true;
     },
     [connectionState, isPromptSubmitting, respondingUserInputRequestIds, threads],
@@ -822,13 +825,14 @@ export function useConsoleData(): ConsoleDataState {
   const createThread = useCallback(
     async (input?: {
       projectId: OrchestrationProject["id"];
+      provider: ProviderKind;
       title?: string;
       model?: string;
       interactionMode?: ProviderInteractionMode;
       branch?: string | null;
       worktreePath?: string | null;
       createdAt?: string;
-    }): Promise<{ threadId: ThreadId }> => {
+    }): Promise<{ threadId: ThreadId; pendingThread: PendingConsoleThread }> => {
       const projectId = input?.projectId ?? null;
       if (!projectId) {
         throw new Error("No orchestration project is available.");
@@ -839,26 +843,39 @@ export function useConsoleData(): ConsoleDataState {
 
       const createdAt = input?.createdAt ?? new Date().toISOString();
       const threadId = makeId("thread");
+      const provider = input?.provider ?? "codex";
+      const model =
+        input?.model?.trim() ||
+        sameProjectThread?.model ||
+        project?.defaultModel ||
+        snapshot?.projects[0]?.defaultModel ||
+        "gpt-5-codex";
+      const interactionMode = input?.interactionMode ?? sameProjectThread?.interactionMode ?? "default";
+      const worktreePath = input?.worktreePath ?? sameProjectThread?.worktreePath ?? null;
       await backend.dispatchCommand({
         type: "thread.create",
         commandId: makeCommandId(),
         threadId: threadId as ThreadId,
         projectId,
+        provider,
         title: input?.title?.trim() || "New thread",
-        model:
-          input?.model?.trim() ||
-          sameProjectThread?.model ||
-          project?.defaultModel ||
-          snapshot?.projects[0]?.defaultModel ||
-          "gpt-5-codex",
+        model,
         runtimeMode: "full-access",
-        interactionMode: input?.interactionMode ?? sameProjectThread?.interactionMode ?? "default",
+        interactionMode,
         branch: input?.branch ?? sameProjectThread?.branch ?? null,
-        worktreePath: input?.worktreePath ?? sameProjectThread?.worktreePath ?? null,
+        worktreePath,
         createdAt,
       });
 
-      return { threadId: threadId as ThreadId };
+      return {
+        threadId: threadId as ThreadId,
+        pendingThread: {
+          provider,
+          model,
+          interactionMode,
+          worktreePath,
+        },
+      };
     },
     [assertLiveCommandReady, backend, snapshot, thread],
   );
@@ -866,15 +883,16 @@ export function useConsoleData(): ConsoleDataState {
   const submitPrompt = useCallback(
     async (input: {
       threadId: string;
-      provider?: ProviderKind;
       prompt: string;
       attachments?: ReadonlyArray<UploadChatImageAttachment>;
+      pendingThread?: PendingConsoleThread | null;
     }) => {
       const trimmed = input.prompt.trim();
       const attachments = [...(input.attachments ?? [])];
       if (trimmed.length === 0 && attachments.length === 0) return;
       const targetThread = findThreadById(threads, input.threadId);
-      if (!targetThread) {
+      const threadSeed = targetThread ?? input.pendingThread;
+      if (!threadSeed) {
         throw new Error("No orchestration thread is available.");
       }
       assertLiveCommandReady();
@@ -882,7 +900,7 @@ export function useConsoleData(): ConsoleDataState {
         return;
       }
 
-      const pendingUserInput = derivePendingUserInputs(targetThread)[0];
+      const pendingUserInput = targetThread ? derivePendingUserInputs(targetThread)[0] : undefined;
       if (pendingUserInput) {
         if (attachments.length > 0) {
           throw new Error("Image attachments are not supported while a user-input request is pending.");
@@ -903,6 +921,9 @@ export function useConsoleData(): ConsoleDataState {
             : [...existing, pendingUserInput.requestId],
         );
         try {
+          if (!targetThread) {
+            throw new Error("No orchestration thread is available.");
+          }
           await backend.dispatchCommand({
             type: "thread.user-input.respond",
             commandId: makeCommandId(),
@@ -920,32 +941,31 @@ export function useConsoleData(): ConsoleDataState {
         }
       }
 
-      if (isTurnRunning(targetThread)) {
+      if (targetThread && isTurnRunning(targetThread)) {
         throw new Error("A turn is already running.");
       }
 
       promptSubmittingRef.current = true;
       setIsPromptSubmitting(true);
       try {
-        const provider = input.provider ?? providerFromThread(targetThread);
+        const dispatchThreadId = targetThread?.id ?? (input.threadId as ThreadId);
         await backend.dispatchCommand({
           type: "thread.turn.start",
           commandId: makeCommandId(),
-          threadId: targetThread.id,
+          threadId: dispatchThreadId,
           message: {
             messageId: makeId("message") as MessageId,
             role: "user",
             text: trimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
             attachments,
           },
-          ...(provider ? { provider } : {}),
-          model: targetThread.model,
-          ...(targetThread.modelOptions !== undefined
+          model: threadSeed.model,
+          ...(targetThread?.modelOptions !== undefined
             ? { modelOptions: targetThread.modelOptions }
             : {}),
           assistantDeliveryMode: "streaming",
           runtimeMode: "full-access",
-          interactionMode: targetThread.interactionMode,
+          interactionMode: threadSeed.interactionMode,
           createdAt: new Date().toISOString(),
         });
       } finally {

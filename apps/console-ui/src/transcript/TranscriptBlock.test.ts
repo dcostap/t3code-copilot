@@ -179,7 +179,7 @@ describe("blockToLines", () => {
     expect(widgetLine.kind).toBe("commandExec");
     expect(widgetLine.text).toContain("Edited");
     expect(widgetLine.text).toContain("lorem-ipsum.txt");
-    expect(widgetLine.text).toContain("Completed in");
+    expect(widgetLine.text).not.toContain("Completed in");
     expect(widgetLine.extraClasses).toEqual(
       expect.arrayContaining(["cm-line-workItemDone", "cm-line-commandWidget"]),
     );
@@ -192,9 +192,10 @@ describe("blockToLines", () => {
       "tok-commandWidgetPrefix",
       "tok-added",
       "tok-removed",
-      "tok-commandWidgetMeta",
     );
-    expect(lines[1]).toEqual({ text: "", kind: "workGroupSeparator" });
+    expect(lines[1]).toEqual({ text: "", kind: "meta" });
+    expect(lines[2]).toEqual({ text: "Finished in 0.0s", kind: "workingLine" });
+    expect(lines[3]).toEqual({ text: "", kind: "workGroupSeparator" });
   });
 
   it("preserves lazy diff lookup metadata on edited-file widgets", () => {
@@ -271,8 +272,10 @@ describe("blockToLines", () => {
     expect(lines[0]?.text).not.toContain("Completed in");
     expect(lines[1]?.kind).toBe("commandExec");
     expect(lines[1]?.text).toContain("src/two.ts");
-    expect(lines[1]?.text).toContain("Completed in");
-    expect(lines[2]).toEqual({ text: "", kind: "workGroupSeparator" });
+    expect(lines[1]?.text).not.toContain("Completed in");
+    expect(lines[2]).toEqual({ text: "", kind: "meta" });
+    expect(lines[3]).toEqual({ text: "Finished in 0.6s", kind: "workingLine" });
+    expect(lines[4]).toEqual({ text: "", kind: "workGroupSeparator" });
   });
 
   it("renders read-file work groups as command widgets without pinning signature format", () => {
@@ -296,9 +299,11 @@ describe("blockToLines", () => {
     expect(widgetLine.kind).toBe("commandExec");
     expect(widgetLine.text).toContain("Read");
     expect(widgetLine.text).toContain("src/example.ts");
-    expect(widgetLine.text).toContain("Completed in");
+    expect(widgetLine.text).not.toContain("Completed in");
     expect(widgetLine.commandWidgetSignature).toEqual(expect.any(String));
-    expectHighlightClasses(widgetLine, "tok-commandWidgetGlyph", "tok-commandWidgetPrefix", "tok-commandWidgetMeta");
+    expectHighlightClasses(widgetLine, "tok-commandWidgetGlyph", "tok-commandWidgetPrefix");
+    expect(lines[1]).toEqual({ text: "", kind: "meta" });
+    expect(lines[2]).toEqual({ text: "Finished in 0.6s", kind: "workingLine" });
   });
 
   it("does not duplicate command detail when it matches the command text", () => {
@@ -427,7 +432,9 @@ describe("blockToLines", () => {
     expect(lines[0]?.text).toContain("Get-Location");
     expect(lines[0]?.text).not.toContain("Completed in");
     expect(lines[1]?.text).toContain("git status --short");
-    expect(lines[1]?.text).toContain("Completed in");
+    expect(lines[1]?.text).not.toContain("Completed in");
+    expect(lines[2]).toEqual({ text: "", kind: "meta" });
+    expect(lines[3]).toEqual({ text: "Finished in 0.3s", kind: "workingLine" });
   });
 
   it("renders tool work groups as command widgets without pinning optional output layout", () => {
@@ -745,9 +752,23 @@ describe("blockToLines", () => {
       now: "1970-01-01T00:00:00.180Z",
     });
 
-    expect(lines[0]?.kind).toBe("workingLine");
-    expect(lines[0]?.text).toContain("Working for");
-    expectHighlightClasses(lines[0]!, "tok-workingPulseCore", "tok-workingPulseMid", "tok-workingPulseEdge");
+    expect(lines[0]).toEqual({ text: "", kind: "meta" });
+    expect(lines[1]?.kind).toBe("workingLine");
+    expect(lines[1]?.text).toContain("Working for");
+    expectHighlightClasses(lines[1]!, "tok-workingPulseCore", "tok-workingPulseMid", "tok-workingPulseEdge");
+  });
+
+  it("renders a finished-state block with the same spacing as the working widget", () => {
+    const lines = blockToLines({
+      type: "finished-state",
+      startedAt: "1970-01-01T00:00:00.000Z",
+      finishedAt: "1970-01-01T00:00:01.250Z",
+    });
+
+    expect(lines[0]).toEqual({ text: "", kind: "meta" });
+    expect(lines[1]?.kind).toBe("workingLine");
+    expect(lines[1]?.text).toBe("Finished in 1.3s");
+    expect(lines[1]?.highlightSpans).toBeUndefined();
   });
 
   it("renders a sending-state block with pulse highlights", () => {
@@ -757,9 +778,10 @@ describe("blockToLines", () => {
       now: "1970-01-01T00:00:00.180Z",
     });
 
-    expect(lines[0]?.kind).toBe("workingLine");
-    expect(lines[0]?.text).toContain("Sending prompt for");
-    expectHighlightClasses(lines[0]!, "tok-workingPulseCore", "tok-workingPulseMid", "tok-workingPulseEdge");
+    expect(lines[0]).toEqual({ text: "", kind: "meta" });
+    expect(lines[1]?.kind).toBe("workingLine");
+    expect(lines[1]?.text).toContain("Sending prompt for");
+    expectHighlightClasses(lines[1]!, "tok-workingPulseCore", "tok-workingPulseMid", "tok-workingPulseEdge");
   });
 
   it("renders an interrupted-state block with the frozen elapsed time", () => {

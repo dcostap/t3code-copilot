@@ -2,10 +2,11 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   MODEL_OPTIONS_BY_PROVIDER,
   REASONING_EFFORT_OPTIONS_BY_PROVIDER,
+  type OrchestrationProject,
   type ThreadId,
   type ProviderKind,
 } from "@t3tools/contracts";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 
 import { CommandPalette } from "./CommandPalette";
 import {
@@ -32,8 +33,8 @@ import {
   type TranscriptRendererHandle,
   threadToTranscriptBlocks,
 } from "./transcript";
-import { useConsoleData } from "./consoleData/useConsoleData";
-import { useConsoleWorkspaceSessions } from "./consoleSessions";
+import { useConsoleData, type PendingConsoleThread } from "./consoleData/useConsoleData";
+import { useConsoleWorkspaceSessions, type ConsolePaneSetup } from "./consoleSessions";
 import { resolveWsHttpOrigin } from "./wsTransport";
 
 interface AppPaletteCommand extends CommandPaletteCommand {
@@ -47,11 +48,132 @@ function isDesktopBridgeAvailable() {
   return typeof window.desktopBridge !== "undefined";
 }
 
-function resolveProviderFromThread(providerName: string | null | undefined): ProviderKind | null {
-  if (providerName === "codex" || providerName === "copilot") {
-    return providerName;
-  }
-  return null;
+interface ThreadSetupSurfaceProps {
+  readonly selectedProvider: ProviderKind;
+  readonly busy: boolean;
+  readonly hoverSelectionSuppressed: boolean;
+  onHoverSelectionResume(): void;
+  onSelect(provider: ProviderKind): void;
+  onConfirm(provider: ProviderKind): void;
+}
+
+function ThreadSetupSurface({
+  selectedProvider,
+  busy,
+  hoverSelectionSuppressed,
+  onHoverSelectionResume,
+  onSelect,
+  onConfirm,
+}: ThreadSetupSurfaceProps) {
+  const options: ReadonlyArray<{
+    readonly provider: ProviderKind;
+    readonly label: string;
+    readonly description: string;
+  }> = [
+    { provider: "codex", label: "Codex", description: "OpenAI Codex provider" },
+    { provider: "copilot", label: "GitHub Copilot", description: "GitHub Copilot provider" },
+  ];
+
+  const selectProvider = useCallback((provider: ProviderKind) => {
+    if (provider !== selectedProvider) {
+      onSelect(provider);
+    }
+  }, [onSelect, selectedProvider]);
+
+  return (
+    <div className="thread-setup" role="group" aria-label="New thread setup">
+      <div className="thread-setup__content">
+        <div className="thread-setup__line">new thread</div>
+        <div className="thread-setup__line thread-setup__line--muted">choose provider</div>
+        <div className="thread-setup__spacer" />
+        {options.map((option, index) => {
+          const active = option.provider === selectedProvider;
+          const className = [
+            "thread-setup__option",
+            active ? "thread-setup__option--active" : null,
+            hoverSelectionSuppressed ? "thread-setup__option--hover-suppressed" : null,
+          ].filter(Boolean).join(" ");
+          return (
+            <button
+              key={option.provider}
+              type="button"
+              className={className}
+              onMouseEnter={() => {
+                if (busy || hoverSelectionSuppressed) {
+                  return;
+                }
+                selectProvider(option.provider);
+              }}
+              onMouseMove={() => {
+                if (busy || !hoverSelectionSuppressed) {
+                  return;
+                }
+                onHoverSelectionResume();
+                selectProvider(option.provider);
+              }}
+              onClick={() => {
+                selectProvider(option.provider);
+                onConfirm(option.provider);
+              }}
+              disabled={busy}
+            >
+              <span className="thread-setup__marker" aria-hidden="true">{active ? "›" : " "}</span>
+              <span className="thread-setup__text">
+                [{index + 1}] {option.label}{" "}
+                <span className="thread-setup__description">— {option.description}</span>
+              </span>
+            </button>
+          );
+        })}
+        {busy ? (
+          <>
+            <div className="thread-setup__spacer" />
+            <div className="thread-setup__line thread-setup__line--hint">creating thread...</div>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+interface EmptyWorkspaceSurfaceProps {
+  readonly canCreate: boolean;
+  onCreate(): void;
+}
+
+function EmptyWorkspaceSurface({
+  canCreate,
+  onCreate,
+}: EmptyWorkspaceSurfaceProps) {
+  return (
+    <div className="empty-workspace" role="status" aria-live="polite">
+      <div className="empty-workspace__content">
+        <div className="empty-workspace__row">
+          <span className="thread-setup__line thread-setup__line--muted">There&apos;s nothing here...</span>
+          <button
+            type="button"
+            className="thread-setup__option thread-setup__option--active empty-workspace__action"
+            onClick={onCreate}
+            disabled={!canCreate}
+          >
+            <span className="thread-setup__text">Open new tab?</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function renderLoadingText(text: string) {
+  return Array.from(text).map((char, index) => (
+    <span
+      key={`${char}-${index}`}
+      className="loading-screen__char"
+      style={{ animationDelay: `${index * 0.028}s` }}
+    >
+      {char === " " ? "\u00A0" : char}
+    </span>
+  ));
 }
 
 export function App() {
@@ -77,7 +199,9 @@ export function App() {
   const setInteractionMode = consoleData.setInteractionMode;
   const interruptTurn = consoleData.interruptTurn;
   const stopSession = consoleData.stopSession;
-  const createSessionFromHistory = workspace.createSessionFromHistory;
+  const updatePaneSetup = workspace.updatePaneSetup;
+  const completePaneSetup = workspace.completePaneSetup;
+  const createSessionWithSetup = workspace.createSessionWithSetup;
   const activateSession = workspace.activateSession;
   const closeSession = workspace.closeSession;
   const activatePane = workspace.activatePane;
@@ -101,23 +225,20 @@ export function App() {
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] = useState<
     Record<string, number>
   >({});
+  const [pendingThreadSetupPaneIds, setPendingThreadSetupPaneIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [setupHoverSuppressedPaneIds, setSetupHoverSuppressedPaneIds] = useState<ReadonlySet<string>>(() => new Set());
   const [mountedSessionIds, setMountedSessionIds] = useState<ReadonlySet<string>>(
     () => new Set(activeSession ? [activeSession.id] : []),
   );
   const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
-  const latestNowIsoRef = useRef(nowIso);
   const hasInitiallyFocusedPromptRef = useRef(false);
+  const latestNowIsoRef = useRef(nowIso);
   const initializedPaneIdsRef = useRef<Record<string, true>>({});
+  const previousActiveSetupPaneIdRef = useRef<string | null>(null);
   const composerAttachmentsRef = useRef(composerAttachmentsByPaneId);
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
   const activePane = workspace.activePane;
   const activePaneId = activePane?.id ?? null;
-  const activeHistory = useMemo(() => {
-    if (!activeSession || !activePane?.historyId) {
-      return null;
-    }
-    return activeSession.histories.find((history) => history.id === activePane.historyId) ?? null;
-  }, [activePane?.historyId, activeSession]);
   const activeThreadId = workspace.activeThreadId ?? consoleData.activeThreadId;
   latestNowIsoRef.current = nowIso;
   const activeThread = activeSession
@@ -128,6 +249,14 @@ export function App() {
   const activeProject = activeSession
     ? workspace.activeProject
     : (activeThreadId ? getProjectForThread(activeThreadId) : consoleData.project);
+  const availableProject = activeProject ?? consoleData.snapshot?.projects[0] ?? null;
+  const activeHistory = useMemo(
+    () => (activeSession && activePane?.historyId
+      ? (activeSession.histories.find((history) => history.id === activePane.historyId) ?? null)
+      : null),
+    [activePane?.historyId, activeSession],
+  );
+  const activePendingThread = !activeThread ? (activeHistory?.pendingThread ?? null) : null;
   const composerDraft = activePaneId ? (composerDraftByPaneId[activePaneId] ?? "") : "";
   const composerAttachments = activePaneId ? [...(composerAttachmentsByPaneId[activePaneId] ?? [])] : [];
   const activePendingUserInputs = useMemo(
@@ -153,8 +282,9 @@ export function App() {
     ? resolvePendingUserInputShortcut(composerDraft, activePendingQuestion.options)
     : null;
   const activeProvider =
-    activeHistory?.preferredProvider ??
-    resolveProviderFromThread(activeThread?.session?.providerName) ??
+    activePane?.setup?.selectedProvider ??
+    activeThread?.provider ??
+    activePendingThread?.provider ??
     null;
   const activeReasoningEffort =
     activeProvider === "codex"
@@ -260,7 +390,18 @@ export function App() {
 
       for (const [threadId, startedAt] of Object.entries(existing)) {
         const thread = consoleData.threads.find((candidate) => candidate.id === threadId);
-        if (!thread || isThreadTurnRunning(threadId)) {
+        if (!thread) {
+          const hasPendingThreadHistory = workspace.sessions.some((session) =>
+            session.histories.some((history) => history.threadId === threadId && history.pendingThread !== null),
+          );
+          if (hasPendingThreadHistory) {
+            next[threadId] = startedAt;
+            continue;
+          }
+          changed = true;
+          continue;
+        }
+        if (isThreadTurnRunning(threadId)) {
           changed = true;
           continue;
         }
@@ -269,7 +410,7 @@ export function App() {
 
       return changed ? next : existing;
     });
-  }, [consoleData.threads, isThreadTurnRunning]);
+  }, [consoleData.threads, isThreadTurnRunning, workspace.sessions]);
 
   useEffect(() => {
     const openRequestIds = new Set(
@@ -305,7 +446,7 @@ export function App() {
     const matchingProviderThread = [...consoleData.threads]
       .filter((thread) =>
         thread.projectId === projectId &&
-        resolveProviderFromThread(thread.session?.providerName) === preferredProvider &&
+        thread.provider === preferredProvider &&
         isAvailableModel(thread.model),
       )
       .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
@@ -324,12 +465,15 @@ export function App() {
     consoleData.setActiveThreadId(workspace.activeThreadId);
   }, [consoleData, workspace.activeThreadId]);
 
-  const focusActivePanePrompt = useCallback(() => {
+  const focusActivePanePrompt = useCallback((options?: { readonly reveal?: boolean }) => {
     if (!activePaneId) {
       return;
     }
-    paneRefs.current[activePaneId]?.focusPrompt();
+    paneRefs.current[activePaneId]?.focusPrompt(options);
   }, [activePaneId]);
+  const handleToolbarButtonMouseDown = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+  }, []);
 
   const activatePaneAndFocus = useCallback((paneId: string) => {
     activatePane(paneId);
@@ -337,6 +481,17 @@ export function App() {
       paneRefs.current[paneId]?.focusPrompt();
     });
   }, [activatePane]);
+  const activateSessionAndFocus = useCallback((sessionId: string) => {
+    const session = workspace.sessions.find((candidate) => candidate.id === sessionId);
+    const paneId = session?.activePaneId ?? session?.panes[0]?.id ?? null;
+    activateSession(sessionId);
+    requestAnimationFrame(() => {
+      if (!paneId) {
+        return;
+      }
+      paneRefs.current[paneId]?.focusPrompt();
+    });
+  }, [activateSession, workspace.sessions]);
 
   const setComposerDraftForPane = useCallback((paneId: string, value: string) => {
     setComposerDraftByPaneId((existing) =>
@@ -415,7 +570,7 @@ export function App() {
     async (
       paneId: string,
       threadId: string | null,
-      preferredProvider: ProviderKind | null,
+      pendingThread: PendingConsoleThread | null,
       pendingUserInput: typeof activePendingUserInput,
       activeQuestion: typeof activePendingQuestion,
       activeQuestionIndex: number,
@@ -482,7 +637,7 @@ export function App() {
         try {
           await submitPrompt({
             threadId,
-            ...(preferredProvider ? { provider: preferredProvider } : {}),
+            pendingThread,
             prompt: value,
             attachments: await Promise.all(attachmentSnapshot.map(toUploadImageAttachment)),
           });
@@ -550,6 +705,12 @@ export function App() {
     if (activeSession) {
       return [{ type: "status" as const, text: "Loading session history..." }];
     }
+    if (consoleData.snapshot) {
+      if (consoleData.snapshot.projects.length === 0) {
+        return [{ type: "status" as const, text: "No workspace is loaded yet." }];
+      }
+      return [{ type: "status" as const, text: "No thread is available yet. Press + to open a new thread tab." }];
+    }
     if (consoleData.error) {
       return [{ type: "status" as const, text: `Connection error: ${consoleData.error}` }];
     }
@@ -561,86 +722,76 @@ export function App() {
     activeThreadNow,
     activeThreadTurnRunning,
     attachmentPreviewBaseUrl,
+    consoleData.snapshot,
     consoleData.error,
     getThreadEvents,
   ]);
 
-  const handleCreateSession = useCallback(async (preferredProvider: ProviderKind) => {
-    const sessionCwd =
-      activeSession?.cwd ?? activeThread?.worktreePath ?? activeProject?.workspaceRoot ?? null;
-    const projectId = activeSession?.projectId ?? activeProject?.id ?? null;
-    if (!sessionCwd || !projectId) {
+  const handleCreateSession = useCallback(() => {
+    const nextSessionCwd =
+      activeSession?.cwd ?? activeThread?.worktreePath ?? availableProject?.workspaceRoot ?? null;
+    const projectId = activeSession?.projectId ?? availableProject?.id ?? null;
+    if (!nextSessionCwd || !projectId) {
       setSubmitError("No workspace is available for a new session.");
       return;
     }
     const sessionWorktreePath =
       activeThread?.worktreePath ??
-      (activeProject && sessionCwd !== activeProject.workspaceRoot ? sessionCwd : null);
-
-    try {
-      const createdAt = new Date().toISOString();
-      const result = await createThread({
-        projectId,
-        title: "New thread",
-        model: resolveModelForProvider(preferredProvider, projectId),
-        interactionMode: activeThread?.interactionMode ?? "default",
-        branch: activeThread?.branch ?? null,
-        worktreePath: sessionWorktreePath,
-        createdAt,
-      });
-      createSessionFromHistory({
-        threadId: result.threadId,
-        preferredProvider,
-        cwd: sessionCwd,
-        projectId,
-        createdAt,
-        pending: true,
-      });
-      setSubmitError(null);
-    } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : "Failed to create a new session.");
-    }
-  }, [activeProject, activeSession, activeThread, createSessionFromHistory, createThread, resolveModelForProvider]);
-  const handleSplitActivePane = useCallback(async (preferredProvider: ProviderKind) => {
-    if (!activeSession) {
-      setSubmitError("No active session is available to split.");
-      return;
-    }
-    if (activeSession.panes.length >= 2) {
-      setSubmitError("This session is already split.");
+      (availableProject && nextSessionCwd !== availableProject.workspaceRoot ? nextSessionCwd : null);
+    createSessionWithSetup({
+      cwd: nextSessionCwd,
+      projectId,
+      createdAt: new Date().toISOString(),
+      selectedProvider: "codex",
+      interactionMode: activeThread?.interactionMode ?? "default",
+      branch: activeThread?.branch ?? null,
+      worktreePath: sessionWorktreePath,
+    });
+    setSubmitError(null);
+  }, [activeSession, activeThread, availableProject, createSessionWithSetup]);
+  const handleConfirmSetupPane = useCallback(async (
+    paneId: string,
+    projectId: OrchestrationProject["id"],
+    cwd: string,
+    setup: ConsolePaneSetup,
+  ) => {
+    if (!setup || pendingThreadSetupPaneIds.has(paneId)) {
       return;
     }
 
-    const sessionCwd = activeSession.cwd;
-    const projectId = activeSession.projectId;
-    const sessionWorktreePath =
-      activeThread?.worktreePath ??
-      (activeProject && sessionCwd !== activeProject.workspaceRoot ? sessionCwd : null);
-
+    setPendingThreadSetupPaneIds((existing) => new Set(existing).add(paneId));
     try {
-      const createdAt = new Date().toISOString();
       const result = await createThread({
         projectId,
+        provider: setup.selectedProvider,
         title: "New thread",
-        model: resolveModelForProvider(preferredProvider, projectId),
-        interactionMode: activeThread?.interactionMode ?? "default",
-        branch: activeThread?.branch ?? null,
-        worktreePath: sessionWorktreePath,
-        createdAt,
+        model: resolveModelForProvider(setup.selectedProvider, projectId),
+        interactionMode: setup.interactionMode,
+        branch: setup.branch,
+        worktreePath: setup.worktreePath,
+        createdAt: setup.createdAt,
       });
-      workspace.splitActivePane({
+      completePaneSetup({
+        paneId,
         threadId: result.threadId,
-        preferredProvider,
-        cwd: sessionCwd,
+        preferredProvider: setup.selectedProvider,
+        cwd,
         projectId,
-        createdAt,
+        createdAt: setup.createdAt,
         pending: true,
+        pendingThread: result.pendingThread,
       });
       setSubmitError(null);
     } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : "Failed to split the active pane.");
+      setSubmitError(error instanceof Error ? error.message : "Failed to create a new thread.");
+    } finally {
+      setPendingThreadSetupPaneIds((existing) => {
+        const next = new Set(existing);
+        next.delete(paneId);
+        return next;
+      });
     }
-  }, [activeProject, activeSession, activeThread, createThread, resolveModelForProvider, workspace]);
+  }, [completePaneSetup, createThread, pendingThreadSetupPaneIds, resolveModelForProvider]);
   const sessionViews = useMemo(() => {
     return workspace.sessions
       .filter((session) => session.id === activeSession?.id || mountedSessionIds.has(session.id))
@@ -650,12 +801,14 @@ export function App() {
           const threadId = history?.threadId ?? null;
           const thread =
             threadId ? (consoleData.threads.find((candidate) => candidate.id === threadId) ?? null) : null;
+          const pendingThread = !thread ? (history?.pendingThread ?? null) : null;
           const pendingUserInputs = threadId ? getPendingUserInputs(threadId) : [];
           const pendingUserInput = pendingUserInputs[0] ?? null;
           const pendingQuestionIndex = pendingUserInput
             ? (pendingUserInputQuestionIndexByRequestId[pendingUserInput.requestId] ?? 0)
             : 0;
           const pendingQuestion = pendingUserInput?.questions[pendingQuestionIndex] ?? null;
+          const setup = pane.setup;
           const draft = composerDraftByPaneId[pane.id] ?? "";
           const pendingShortcut = pendingQuestion
             ? resolvePendingUserInputShortcut(draft, pendingQuestion.options)
@@ -691,16 +844,28 @@ export function App() {
                 }
                 return nextBlocks;
               })()
-            : [{
-                type: "status" as const,
-                text: history?.pending ? "Loading session history..." : "History unavailable in this session.",
-              }];
+            : setup
+              ? []
+              : history?.pending && pendingThread
+                ? (panePendingPromptSendStartedAt !== null && effectiveTranscriptNowIso
+                    ? [{
+                        type: "sending-state" as const,
+                        startedAt: panePendingPromptSendStartedAt,
+                        now: effectiveTranscriptNowIso,
+                      }]
+                    : [])
+              : [{
+                  type: "status" as const,
+                  text: history?.pending ? "Loading session history..." : "History unavailable in this session.",
+                }];
 
           return {
             pane,
+            setup,
             history,
             threadId,
             thread,
+            pendingThread,
             isActive: pane.id === session.activePaneId,
             index,
             blocks,
@@ -713,6 +878,7 @@ export function App() {
               ? (pendingUserInputAnswersByRequestId[pendingUserInput.requestId] ?? {})
               : {},
             pendingShortcut,
+            pendingPromptSendStartedAt: panePendingPromptSendStartedAt,
           };
         });
 
@@ -743,6 +909,10 @@ export function App() {
     [activeSession?.id, sessionViews],
   );
   const activePaneViews = activeSessionView?.paneViews ?? [];
+  const activeSetupPaneView = useMemo(
+    () => activePaneViews.find((paneView) => paneView.isActive && paneView.setup) ?? null,
+    [activePaneViews],
+  );
   const activeSessionPaneLayoutKey = useMemo(
     () => (activeSessionView
       ? `${activeSessionView.session.id}:${activeSessionView.paneViews.map((paneView) => paneView.pane.id).join(",")}`
@@ -764,43 +934,18 @@ export function App() {
         contextText: `${session.cwd} · ${session.histories.length} histories`,
         keywords: ["session", session.title, session.cwd],
         run: () => {
-          activateSession(session.id);
+          activateSessionAndFocus(session.id);
         },
       });
     }
 
-    if (canDispatchBackendCommands && (currentSession || activeProject)) {
-      commands.push(
-        {
-          id: "session:new:codex",
-          label: "[Session] New · Codex",
-          keywords: ["session", "new", "tab", "workspace", "codex"],
-          run: () => handleCreateSession("codex"),
-        },
-        {
-          id: "session:new:copilot",
-          label: "[Session] New · Copilot",
-          keywords: ["session", "new", "tab", "workspace", "copilot"],
-          run: () => handleCreateSession("copilot"),
-        },
-      );
-    }
-
-    if (canDispatchBackendCommands && currentSession && currentSession.panes.length < 2) {
-      commands.push(
-        {
-          id: `session:${currentSession.id}:split:codex`,
-          label: "[Pane] Split active · Codex",
-          keywords: ["split", "pane", "parallel", "session", "codex"],
-          run: () => handleSplitActivePane("codex"),
-        },
-        {
-          id: `session:${currentSession.id}:split:copilot`,
-          label: "[Pane] Split active · Copilot",
-          keywords: ["split", "pane", "parallel", "session", "copilot"],
-          run: () => handleSplitActivePane("copilot"),
-        },
-      );
+    if (canDispatchBackendCommands && (currentSession || availableProject)) {
+      commands.push({
+        id: "thread:new-tab",
+        label: "[Thread] New tab",
+        keywords: ["thread", "new", "tab", "workspace"],
+        run: () => handleCreateSession(),
+      });
     }
 
     if (currentSession && currentSession.panes.length > 1) {
@@ -932,20 +1077,19 @@ export function App() {
           id: `user-input:${pendingUserInput.requestId}:prompt`,
           label: `[Input] Answer in prompt · ${pendingUserInput.questions.length} questions`,
           keywords: ["user input", "prompt", "answer"],
-          run: () => {
-            requestAnimationFrame(() => {
-              focusActivePanePrompt();
-            });
-          },
+            run: () => {
+              requestAnimationFrame(() => {
+                focusActivePanePrompt({ reveal: true });
+              });
+            },
         });
       }
     }
 
     return commands;
   }, [
-    activateSession,
-    activePendingUserInputs,
-    activeProject,
+      activePendingUserInputs,
+      availableProject,
     activeSession,
     activeThread,
     activeThreadTurnRunning,
@@ -954,9 +1098,9 @@ export function App() {
     consoleData.isStoppingSession,
     consoleData.respondingUserInputRequestIds,
     handleCreateSession,
-    handleSplitActivePane,
     interruptTurn,
     activatePaneAndFocus,
+    activateSessionAndFocus,
     activeProvider,
     activeReasoningEffort,
     activeReasoningOptions,
@@ -1040,15 +1184,29 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (hasInitiallyFocusedPromptRef.current || !activePaneId) {
+    const activeSetupPaneId = activeSetupPaneView?.pane.id ?? null;
+    const previousActiveSetupPaneId = previousActiveSetupPaneIdRef.current;
+    previousActiveSetupPaneIdRef.current = activeSetupPaneId;
+    if (!activePaneId || activeSetupPaneId === activePaneId) {
       return;
     }
 
+    const shouldAutoFocusInitialReadyPane = !hasInitiallyFocusedPromptRef.current;
+    const hasJustFinishedActivePaneSetup =
+      previousActiveSetupPaneId === activePaneId && activeSetupPaneId !== activePaneId;
+    if (!shouldAutoFocusInitialReadyPane && !hasJustFinishedActivePaneSetup) {
+      return;
+    }
+
+    const handle = paneRefs.current[activePaneId];
+    if (!handle) {
+      return;
+    }
     hasInitiallyFocusedPromptRef.current = true;
     requestAnimationFrame(() => {
-      paneRefs.current[activePaneId]?.focusPrompt();
+      handle.focusPrompt();
     });
-  }, [activePaneId]);
+  }, [activePaneId, activeSetupPaneView]);
 
   useEffect(() => {
     if (!activeSessionView || !activeSessionPaneLayoutKey) {
@@ -1101,6 +1259,62 @@ export function App() {
     }
   }, [closePalette]);
 
+  const routeTypedKeyToPrompt = useCallback((event: KeyboardEvent) => {
+    if (paletteOpen || activeSetupPaneView?.setup || !activePaneId || event.isComposing) {
+      return false;
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey) {
+      return false;
+    }
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.closest(".transcript-prompt__input")) {
+      return false;
+    }
+    if (target?.closest("input, textarea, select, [contenteditable='true']")) {
+      return false;
+    }
+    const handle = paneRefs.current[activePaneId];
+    if (!handle) {
+      return false;
+    }
+
+    const routeToPrompt = () => {
+      handle.scrollToBottom();
+      focusActivePanePrompt();
+    };
+
+    if (event.key === "Backspace") {
+      event.preventDefault();
+      routeToPrompt();
+      handle.deletePromptBackward();
+      return true;
+    }
+    if (event.key === "Delete") {
+      event.preventDefault();
+      routeToPrompt();
+      handle.deletePromptForward();
+      return true;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      routeToPrompt();
+      if (event.shiftKey) {
+        handle.insertPromptText("\n");
+      } else {
+        handle.submitPrompt();
+      }
+      return true;
+    }
+    if (event.key.length !== 1) {
+      return false;
+    }
+
+    event.preventDefault();
+    routeToPrompt();
+    handle.insertPromptText(event.key);
+    return true;
+  }, [activePaneId, activeSetupPaneView, focusActivePanePrompt, paletteOpen]);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const isPaletteShortcut =
@@ -1127,9 +1341,57 @@ export function App() {
         return;
       }
 
+      if (
+        activeSetupPaneView?.setup &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
+        const providers: ReadonlyArray<ProviderKind> = ["codex", "copilot"];
+        const currentIndex = providers.indexOf(activeSetupPaneView.setup.selectedProvider);
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          const delta = event.key === "ArrowDown" ? 1 : -1;
+          const nextProvider = providers[Math.max(0, Math.min(providers.length - 1, currentIndex + delta))];
+          if (nextProvider) {
+            setSetupHoverSuppressedPaneIds((existing) => new Set(existing).add(activeSetupPaneView.pane.id));
+            updatePaneSetup({ paneId: activeSetupPaneView.pane.id, selectedProvider: nextProvider });
+          }
+          return;
+        }
+        if (event.key === "1" || event.key === "2") {
+          event.preventDefault();
+          const nextProvider = providers[Number.parseInt(event.key, 10) - 1];
+          if (nextProvider) {
+            setSetupHoverSuppressedPaneIds((existing) => new Set(existing).add(activeSetupPaneView.pane.id));
+            updatePaneSetup({ paneId: activeSetupPaneView.pane.id, selectedProvider: nextProvider });
+          }
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          const projectId = activeSession?.projectId ?? availableProject?.id ?? null;
+          const cwd = activeSession?.cwd ?? availableProject?.workspaceRoot ?? null;
+          if (!projectId || !cwd) {
+            return;
+          }
+          void handleConfirmSetupPane(
+            activeSetupPaneView.pane.id,
+            projectId,
+            cwd,
+            activeSetupPaneView.setup,
+          );
+          return;
+        }
+      }
+
+      if (routeTypedKeyToPrompt(event)) {
+        return;
+      }
+
       if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === "1") {
         event.preventDefault();
-        focusActivePanePrompt();
+        focusActivePanePrompt({ reveal: true });
       } else if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === "4") {
         event.preventDefault();
         if (activePaneId) {
@@ -1141,78 +1403,138 @@ export function App() {
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keydown", handleKeyDown, true);
     };
-  }, [activePaneId, closePalette, focusActivePanePrompt, paletteOpen]);
+  }, [
+    activePaneId,
+    activeSession?.cwd,
+    activeSession?.projectId,
+    activeSetupPaneView,
+    availableProject?.id,
+    availableProject?.workspaceRoot,
+    closePalette,
+    focusActivePanePrompt,
+    handleConfirmSetupPane,
+    paletteOpen,
+    routeTypedKeyToPrompt,
+    updatePaneSetup,
+  ]);
 
   const footerText = useMemo(() => {
+    const pathText =
+      activeThread?.worktreePath
+      ?? activePendingThread?.worktreePath
+      ?? workspace.activeSession?.cwd
+      ?? availableProject?.workspaceRoot
+      ?? "no project";
+    if (workspace.sessions.length === 0 || activeSetupPaneView?.setup) {
+      return pathText;
+    }
     const provider = activeProvider ?? "no-provider";
-    const model = activeThread?.model ?? "no-model";
+    const model = activeThread?.model ?? activePendingThread?.model ?? "no-model";
     const reasoning =
       activeReasoningEffort === null
         ? activeDefaultReasoningEffort
           ? `default (${activeDefaultReasoningEffort})`
           : "default"
         : activeReasoningEffort;
-    const cwd = workspace.activeSession?.cwd ?? activeProject?.workspaceRoot ?? "no project";
-    return `${provider} · ${model} · ${reasoning} · ${cwd}`;
+    return `${provider} · ${model} · ${reasoning} · ${pathText}`;
   }, [
     activeDefaultReasoningEffort,
+    activePendingThread?.model,
+    activePendingThread?.worktreePath,
     activeProvider,
-    activeProject?.workspaceRoot,
+    activeSetupPaneView,
+    availableProject?.workspaceRoot,
     activeReasoningEffort,
     activeThread?.model,
+    workspace.sessions.length,
     workspace.activeSession?.cwd,
   ]);
+
+  if (!consoleData.snapshot && !consoleData.error) {
+    return (
+      <>
+        <div className="bg-image" />
+        <div className="bg-gradient" />
+        <div className={isDesktop ? "console-shell console-shell--desktop" : "console-shell"}>
+          <div
+            className={isDesktop ? "session-tabs session-tabs--desktop" : "session-tabs"}
+            aria-hidden="true"
+          >
+            <div className="session-tabs__list" />
+            {isDesktop ? <div className="session-tabs__drag-space" aria-hidden="true" /> : null}
+          </div>
+          <main className="loading-screen loading-screen--shell" role="status" aria-live="polite">
+            <span className="loading-screen__text">{renderLoadingText("connecting to backend...")}</span>
+          </main>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
       <div className="bg-image" />
       <div className="bg-gradient" />
       <div className={isDesktop ? "console-shell console-shell--desktop" : "console-shell"}>
-        <div className={isDesktop ? "session-tabs session-tabs--desktop" : "session-tabs"}>
-          <div className="session-tabs__list" role="tablist" aria-label="Workspace sessions">
+        <div
+          className={isDesktop ? "session-tabs session-tabs--desktop" : "session-tabs"}
+        >
+          <div className="session-tabs__list" aria-label="Workspace sessions">
             {workspace.sessions.map((session) => (
               <button
                 key={session.id}
                 type="button"
-                role="tab"
-                aria-selected={session.id === activeSession?.id}
                 className={
                   session.id === activeSession?.id
                     ? "session-tab session-tab--active"
                     : "session-tab"
                 }
-                onClick={() => activateSession(session.id)}
+                onClick={() => activateSessionAndFocus(session.id)}
                 onMouseDown={(event) => {
                   if (event.button !== 1) {
+                    handleToolbarButtonMouseDown(event);
                     return;
                   }
                   event.preventDefault();
                   event.stopPropagation();
                   closeSession(session.id);
                 }}
+                tabIndex={-1}
                 title={session.cwd}
               >
                 <span className="session-tab__title">{session.title}</span>
               </button>
             ))}
           </div>
-          <button
-            type="button"
-            className="session-tab session-tab--create"
-            onClick={() => void handleCreateSession("codex")}
-            disabled={!activeProject}
-            title={activeProject ? "New session" : "No workspace available"}
-          >
-            +
-          </button>
+            <button
+              type="button"
+              className="session-tab session-tab--create"
+              onClick={() => handleCreateSession()}
+              onMouseDown={handleToolbarButtonMouseDown}
+              disabled={!availableProject}
+              tabIndex={-1}
+              title={availableProject ? "New thread" : "No workspace available"}
+            >
+              +
+            </button>
           {isDesktop ? <div className="session-tabs__drag-space" aria-hidden="true" /> : null}
         </div>
         <main className={activePaneViews.length > 1 ? "conversation-scroll conversation-scroll--split" : "conversation-scroll"}>
-          {sessionViews.length > 0 ? (
+          {workspace.sessions.length === 0 ? (
+            <div className="conversation-session">
+              <div className="pane-grid">
+                <section className="conversation-pane conversation-pane--active">
+                  <div className="transcript-shell">
+                    <EmptyWorkspaceSurface canCreate={availableProject !== null} onCreate={handleCreateSession} />
+                  </div>
+                </section>
+              </div>
+            </div>
+          ) : sessionViews.length > 0 ? (
             sessionViews.map((sessionView) => (
               <div
                 key={sessionView.session.id}
@@ -1235,47 +1557,100 @@ export function App() {
                       onMouseDownCapture={() => activatePane(paneView.pane.id)}
                     >
                       <div className="transcript-shell">
-                        <TranscriptRenderer
-                          ref={(handle) => {
-                            paneRefs.current[paneView.pane.id] = handle;
-                          }}
-                          blocks={paneView.blocks}
-                          composerAttachments={paneView.attachments}
-                          cwd={sessionView.session.cwd ?? paneView.thread?.worktreePath ?? null}
-                          interactionMode={paneView.thread?.interactionMode ?? "default"}
-                          {...(paneView.pendingUserInput && paneView.pendingQuestion
-                            ? {
-                                pendingUserInputHighlight: {
-                                  requestId: paneView.pendingUserInput.requestId,
-                                  questionIndex: paneView.pendingQuestionIndex,
-                                  ...(paneView.pendingShortcut
-                                    ? { optionIndex: paneView.pendingShortcut.optionIndex }
-                                    : {}),
+                        {paneView.setup ? (
+                          (() => {
+                            const setup = paneView.setup;
+                            return (
+                          <ThreadSetupSurface
+                            selectedProvider={setup.selectedProvider}
+                            busy={pendingThreadSetupPaneIds.has(paneView.pane.id)}
+                            hoverSelectionSuppressed={setupHoverSuppressedPaneIds.has(paneView.pane.id)}
+                            onHoverSelectionResume={() =>
+                              setSetupHoverSuppressedPaneIds((existing) => {
+                                if (!existing.has(paneView.pane.id)) {
+                                  return existing;
+                                }
+                                const next = new Set(existing);
+                                next.delete(paneView.pane.id);
+                                return next;
+                              })}
+                            onSelect={(provider) =>
+                              updatePaneSetup({ paneId: paneView.pane.id, selectedProvider: provider })}
+                            onConfirm={(provider) => {
+                              updatePaneSetup({ paneId: paneView.pane.id, selectedProvider: provider });
+                              void handleConfirmSetupPane(
+                                paneView.pane.id,
+                                sessionView.session.projectId,
+                                sessionView.session.cwd,
+                                {
+                                  type: setup.type,
+                                  selectedProvider: provider,
+                                  createdAt: setup.createdAt,
+                                  interactionMode: setup.interactionMode,
+                                  branch: setup.branch,
+                                  worktreePath: setup.worktreePath,
                                 },
-                              }
-                            : {})}
-                          onAddImageFiles={(files) => handleAddImageFilesForPane(paneView.pane.id, files)}
-                          onDraftChange={(value) => setComposerDraftForPane(paneView.pane.id, value)}
-                          onRemoveImage={(attachmentId) => handleRemoveImageForPane(paneView.pane.id, attachmentId)}
-                          resolveInlineDiff={(lookup) =>
-                            getTurnDiff({
-                              threadId: lookup.threadId as ThreadId,
-                              fromTurnCount: lookup.fromTurnCount,
-                              toTurnCount: lookup.toTurnCount,
-                            })}
-                          onSubmit={(value) =>
-                            handleSubmit(
-                              paneView.pane.id,
-                              paneView.threadId,
-                              paneView.history?.preferredProvider ?? null,
-                              paneView.pendingUserInput,
-                              paneView.pendingQuestion,
-                              paneView.pendingQuestionIndex,
-                              paneView.draftAnswers,
-                              value,
-                            )}
-                          submitDisabled={!canSubmitPromptForThread(paneView.threadId)}
-                        />
+                              );
+                            }}
+                          />
+                            );
+                          })()
+                        ) : (
+                          <TranscriptRenderer
+                            ref={(handle) => {
+                              paneRefs.current[paneView.pane.id] = handle;
+                            }}
+                            blocks={paneView.blocks}
+                            composerAttachments={paneView.attachments}
+                            cwd={
+                              sessionView.session.cwd
+                              ?? paneView.thread?.worktreePath
+                              ?? paneView.pendingThread?.worktreePath
+                              ?? null
+                            }
+                            interactionMode={
+                              paneView.thread?.interactionMode
+                              ?? paneView.pendingThread?.interactionMode
+                              ?? "default"
+                            }
+                            promptFocusDisabled={paletteOpen}
+                            {...(paneView.pendingUserInput && paneView.pendingQuestion
+                              ? {
+                                  pendingUserInputHighlight: {
+                                    requestId: paneView.pendingUserInput.requestId,
+                                    questionIndex: paneView.pendingQuestionIndex,
+                                    ...(paneView.pendingShortcut
+                                      ? { optionIndex: paneView.pendingShortcut.optionIndex }
+                                      : {}),
+                                  },
+                                }
+                              : {})}
+                            onAddImageFiles={(files) => handleAddImageFilesForPane(paneView.pane.id, files)}
+                            onDraftChange={(value) => setComposerDraftForPane(paneView.pane.id, value)}
+                            onRemoveImage={(attachmentId) => handleRemoveImageForPane(paneView.pane.id, attachmentId)}
+                            resolveInlineDiff={(lookup) =>
+                              getTurnDiff({
+                                threadId: lookup.threadId as ThreadId,
+                                fromTurnCount: lookup.fromTurnCount,
+                                toTurnCount: lookup.toTurnCount,
+                              })}
+                            onSubmit={(value) =>
+                              handleSubmit(
+                                paneView.pane.id,
+                                paneView.threadId,
+                                paneView.pendingThread,
+                                paneView.pendingUserInput,
+                                paneView.pendingQuestion,
+                                paneView.pendingQuestionIndex,
+                                paneView.draftAnswers,
+                                value,
+                              )}
+                            submitDisabled={
+                              paneView.pendingPromptSendStartedAt !== null
+                              || !canSubmitPromptForThread(paneView.threadId, paneView.pendingThread)
+                            }
+                          />
+                        )}
                       </div>
                     </section>
                   ))}
@@ -1290,8 +1665,9 @@ export function App() {
                 }}
                 blocks={blocks}
                 composerAttachments={composerAttachments}
-                cwd={activeSession?.cwd ?? activeThread?.worktreePath ?? activeProject?.workspaceRoot ?? null}
+                cwd={activeSession?.cwd ?? activeThread?.worktreePath ?? availableProject?.workspaceRoot ?? null}
                 interactionMode={activeThread?.interactionMode ?? "default"}
+                promptFocusDisabled={paletteOpen}
                 resolveInlineDiff={(lookup) =>
                   getTurnDiff({
                     threadId: lookup.threadId as ThreadId,
@@ -1316,14 +1692,14 @@ export function App() {
                   handleSubmit(
                     activePaneId ?? "bootstrap",
                     activeThreadId,
-                    activeHistory?.preferredProvider ?? null,
+                    activePendingThread,
                     activePendingUserInput,
                     activePendingQuestion,
                     activePendingQuestionIndex,
                     activePendingDraftAnswers,
                     value,
                   )}
-                submitDisabled={!canSubmitPromptForThread(activeThreadId)}
+                submitDisabled={!canSubmitPromptForThread(activeThreadId, activePendingThread)}
               />
             </div>
           )}

@@ -1,5 +1,6 @@
 import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
 import {
+  DEFAULT_PROVIDER_KIND,
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
   OrchestrationSession,
@@ -251,6 +252,7 @@ export function projectEvent(
           {
             id: payload.threadId,
             projectId: payload.projectId,
+            provider: payload.provider ?? DEFAULT_PROVIDER_KIND,
             title: payload.title,
             model: payload.model,
             runtimeMode: payload.runtimeMode,

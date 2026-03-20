@@ -13,6 +13,7 @@ import {
   resolveCommandWidgetToggleSignatureFromEventTarget,
   resolveTranscriptLinkUrl,
   resolvePromptSelectionForDocument,
+  resolvePromptTextareaLayout,
   shouldRenderCommandWidgetToggleRail,
   shouldRenderPromptSeparator,
   shouldUseCustomCommandWidgetCopy,
@@ -435,6 +436,22 @@ describe("resolvePromptSelectionForDocument", () => {
         headOffset: 8,
       }),
     ).toEqual({ anchor: 32, head: 32 });
+  });
+});
+
+describe("resolvePromptTextareaLayout", () => {
+  it("keeps the composer at a minimum of two lines when content is short", () => {
+    expect(resolvePromptTextareaLayout(20, 18)).toEqual({
+      height: 40,
+      overflowY: "hidden",
+    });
+  });
+
+  it("caps the composer at ten lines and enables internal scrolling when content overflows", () => {
+    expect(resolvePromptTextareaLayout(20, 260)).toEqual({
+      height: 200,
+      overflowY: "auto",
+    });
   });
 });
 

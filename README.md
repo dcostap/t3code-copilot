@@ -6,11 +6,11 @@ T3 Code is a minimal web GUI for coding agents. This fork supports both Codex an
 
 ## New Console Development
 
-This fork is building a new desktop-first console UI alongside the existing frontend. Use the desktop shell with an explicit surface flag:
+This fork is building a new desktop-first console UI alongside the existing frontend.
 
 ```bash
 bun install
-bun run dev:desktop -- --surface=console
+bun run start:desktop
 ```
 
 Useful commands:
@@ -22,14 +22,19 @@ bun run dev:desktop -- --surface=console
 # Existing desktop/web surface with live reload
 bun run dev:desktop -- --surface=web
 
+# Release-style desktop run using the console UI by default
+bun run start:desktop
+
+# Run the built desktop app for a chosen surface override
+bun run start:desktop -- --surface=web
+
 # Build desktop runtime artifacts for a chosen surface
 bun run build:desktop -- --surface=console
-
-# Run the built desktop app for a chosen surface
-bun run start:desktop -- --surface=console
 ```
 
-The `--surface` flag is required for desktop dev/build/start so it is always explicit whether you are running the new console or the existing web UI.
+`dev:desktop` is the watch/live-reload path, so it rebuilds as files change. `start:desktop` is the bundled desktop launcher, so it behaves more like a release run and does not sit in dev watch mode.
+
+At the repo root, `bun run start` is still a generic workspace start command for the `t3` server package, which is why the desktop app keeps its own `start:desktop` entry point.
 
 ## Preview
 

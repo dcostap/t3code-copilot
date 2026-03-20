@@ -7,6 +7,7 @@ import type {
 import type {
   TranscriptBlock,
   InlineDiffLookup,
+  FinishedStateBlock,
   UserInputRequestBlock,
   WorkGroupItem,
 } from "./TranscriptBlock";
@@ -28,6 +29,7 @@ interface TimelineEntry {
   readonly id: string;
   readonly createdAt: string;
   readonly source: "message" | "plan" | "activity";
+  readonly turnId?: string | null;
   readonly sequence?: number;
   readonly blocks?: ReadonlyArray<TranscriptBlock>;
   readonly activity?: OrchestrationThreadActivity;
@@ -444,22 +446,6 @@ function stripDisplayedPlanMarkdown(planMarkdown: string): string {
     }
   }
   return sourceLines.join("\n");
-}
-
-function checkpointToBlock(
-  checkpoint: OrchestrationThread["checkpoints"][number],
-): TranscriptBlock {
-  return {
-    type: "checkpoint-summary",
-    status: checkpoint.status,
-    checkpointTurnCount: checkpoint.checkpointTurnCount,
-    files: checkpoint.files.map((file) => ({
-      path: file.path,
-      kind: file.kind,
-      additions: file.additions,
-      deletions: file.deletions,
-    })),
-  };
 }
 
 function userInputBlock(payload: Record<string, unknown> | null): UserInputRequestBlock | null {
@@ -1022,6 +1008,7 @@ function buildAssistantMessageEntriesFromEvents(
       id: `message:${message.id}:segment:${entries.length}`,
       createdAt: segmentCreatedAt,
       source: "message",
+      turnId: message.turnId,
       blocks: [{ type: "assistant-text", text: segmentText, streaming }],
     });
     segmentText = "";
@@ -1067,7 +1054,101 @@ function buildAssistantMessageEntriesFromEvents(
   }
 
   flushSegment(message.streaming);
+  if (shouldAppendFinishedState(thread, message) && entries.length > 0) {
+    const lastEntryIndex = entries.length - 1;
+    const lastEntry = entries[lastEntryIndex];
+    if (lastEntry) {
+      entries[lastEntryIndex] = {
+        ...lastEntry,
+        blocks: [
+          ...(lastEntry.blocks ?? []),
+          createFinishedStateBlock(message.createdAt, resolveFinishedAt(thread, message)),
+        ],
+      };
+    }
+  }
   return entries.length > 0 ? entries : null;
+}
+
+function appendFinishedStateToAssistantBlocks(
+  thread: OrchestrationThread,
+  blocks: TranscriptBlock[],
+  message: OrchestrationThread["messages"][number],
+) {
+  if (!shouldAppendFinishedState(thread, message) || blocks.length === 0) {
+    return blocks;
+  }
+
+  return [
+    ...blocks,
+    createFinishedStateBlock(message.createdAt, resolveFinishedAt(thread, message)),
+  ];
+}
+
+function shouldAppendFinishedState(
+  thread: OrchestrationThread,
+  message: OrchestrationThread["messages"][number],
+) {
+  return (
+    !message.streaming
+    || (
+      thread.latestTurn?.turnId === message.turnId
+      && thread.latestTurn.state === "completed"
+    )
+  );
+}
+
+function resolveFinishedAt(
+  thread: OrchestrationThread,
+  message: OrchestrationThread["messages"][number],
+) {
+  if (thread.latestTurn?.turnId === message.turnId && thread.latestTurn.state === "completed") {
+    return thread.latestTurn.completedAt ?? message.updatedAt;
+  }
+  return message.updatedAt;
+}
+
+function createFinishedStateBlock(startedAt: string, finishedAt: string): FinishedStateBlock {
+  return {
+    type: "finished-state",
+    startedAt,
+    finishedAt,
+  };
+}
+
+function appendFinishedStateToLatestTurnEntries(
+  thread: OrchestrationThread,
+  entries: TimelineEntry[],
+) {
+  const latestTurn = thread.latestTurn;
+  if (latestTurn?.state !== "completed") {
+    return entries;
+  }
+
+  let targetIndex = -1;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index]?.turnId === latestTurn.turnId) {
+      targetIndex = index;
+      break;
+    }
+  }
+  const targetEntry = targetIndex >= 0 ? entries[targetIndex] : null;
+  if (!targetEntry || targetEntry.blocks?.some((block) => block.type === "finished-state")) {
+    return entries;
+  }
+
+  const nextEntries = entries.slice();
+  nextEntries[targetIndex] = {
+    ...targetEntry,
+    blocks: [
+      ...(targetEntry.blocks ?? []),
+      createFinishedStateBlock(
+        latestTurn.startedAt ?? targetEntry.createdAt,
+        latestTurn.completedAt ?? targetEntry.createdAt,
+      ),
+    ],
+  };
+  return nextEntries;
 }
 
 export function threadToTranscriptBlocks(
@@ -1109,7 +1190,7 @@ export function threadToTranscriptBlocks(
           )
         : null;
 
-    const blocks: TranscriptBlock[] =
+    let blocks: TranscriptBlock[] =
       message.role === "user"
         ? [
             {
@@ -1131,33 +1212,20 @@ export function threadToTranscriptBlocks(
           id: `message:${message.id}`,
           createdAt: message.createdAt,
           source: "message",
-          blocks,
-        });
-        entries.push({
-          id: `checkpoint:${checkpoint.turnId}:${message.id}`,
-          createdAt: checkpoint.completedAt,
-          source: "message",
-          blocks: [checkpointToBlock(checkpoint)],
+          turnId: message.turnId,
+          blocks: appendFinishedStateToAssistantBlocks(thread, blocks, message),
         });
         continue;
       } else {
+        blocks = appendFinishedStateToAssistantBlocks(thread, blocks, message);
         entries.push({
           id: `message:${message.id}`,
           createdAt: message.createdAt,
           source: "message",
+          turnId: message.turnId,
           blocks,
         });
         continue;
-      }
-
-      if (checkpoint) {
-        const checkpointEntries = [{
-          id: `checkpoint:${checkpoint.turnId}:${message.id}`,
-          createdAt: checkpoint.completedAt,
-          source: "message" as const,
-          blocks: [checkpointToBlock(checkpoint)],
-        }];
-        entries.push(...checkpointEntries);
       }
       continue;
     }
@@ -1166,6 +1234,7 @@ export function threadToTranscriptBlocks(
       id: `message:${message.id}`,
       createdAt: message.createdAt,
       source: "message",
+      turnId: message.turnId,
       blocks,
     });
   }
@@ -1190,6 +1259,7 @@ export function threadToTranscriptBlocks(
       id: `activity:${activity.id}`,
       createdAt: activity.createdAt,
       source: "activity",
+      turnId: activity.turnId,
       ...(activity.sequence !== undefined ? { sequence: activity.sequence } : {}),
       activity,
     });
@@ -1238,7 +1308,7 @@ export function threadToTranscriptBlocks(
     }
   };
 
-  for (const entry of entries.toSorted(compareByCreatedAt)) {
+  for (const entry of appendFinishedStateToLatestTurnEntries(thread, entries.toSorted(compareByCreatedAt))) {
     if (entry.source === "activity" && entry.activity) {
       const workItem = activityToWorkItem(entry.activity);
       if (workItem) {
