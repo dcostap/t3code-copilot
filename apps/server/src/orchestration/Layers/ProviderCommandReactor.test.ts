@@ -299,6 +299,46 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it("timestamps provider turn start failures after the originating request", async () => {
+    const harness = await createHarness();
+    const requestCreatedAt = "2026-03-20T00:00:00.000Z";
+
+    harness.sendTurn.mockImplementationOnce(
+      () => Effect.fail(new Error("Provider adapter process error (copilot): spawn EINVAL")) as never,
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-failure-ordering"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-failure-ordering"),
+          role: "user",
+          text: "Test",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: requestCreatedAt,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await Effect.runPromise(harness.engine.getReadModel());
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.makeUnsafe("thread-1"));
+      return thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ?? false;
+    });
+
+    const readModel = await Effect.runPromise(harness.engine.getReadModel());
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.makeUnsafe("thread-1"));
+    const failureActivity = thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed");
+
+    expect(failureActivity).toBeDefined();
+    expect(failureActivity?.createdAt).toBeDefined();
+    expect(failureActivity!.createdAt > requestCreatedAt).toBe(true);
+  });
+
   it("forwards codex model options through session start and turn send", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();

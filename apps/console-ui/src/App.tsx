@@ -3,6 +3,7 @@ import {
   MODEL_OPTIONS_BY_PROVIDER,
   REASONING_EFFORT_OPTIONS_BY_PROVIDER,
   type OrchestrationProject,
+  type OrchestrationThread,
   type ThreadId,
   type ProviderKind,
 } from "@t3tools/contracts";
@@ -174,6 +175,25 @@ function renderLoadingText(text: string) {
       {char === " " ? "\u00A0" : char}
     </span>
   ));
+}
+
+export function shouldRetainPendingPromptSend(input: {
+  readonly thread: OrchestrationThread | null;
+  readonly startedAt: string;
+  readonly hasPendingThreadHistory: boolean;
+  readonly isThreadTurnRunning: boolean;
+}) {
+  if (!input.thread) {
+    return input.hasPendingThreadHistory;
+  }
+
+  if (input.isThreadTurnRunning) {
+    return false;
+  }
+
+  return !input.thread.activities.some((activity) =>
+    activity.kind === "provider.turn.start.failed" && activity.createdAt >= input.startedAt
+  );
 }
 
 export function App() {
@@ -389,23 +409,21 @@ export function App() {
       const next: Record<string, string> = {};
 
       for (const [threadId, startedAt] of Object.entries(existing)) {
-        const thread = consoleData.threads.find((candidate) => candidate.id === threadId);
-        if (!thread) {
-          const hasPendingThreadHistory = workspace.sessions.some((session) =>
-            session.histories.some((history) => history.threadId === threadId && history.pendingThread !== null),
-          );
-          if (hasPendingThreadHistory) {
-            next[threadId] = startedAt;
-            continue;
-          }
-          changed = true;
+        const thread = consoleData.threads.find((candidate) => candidate.id === threadId) ?? null;
+        const hasPendingThreadHistory = !thread && workspace.sessions.some((session) =>
+          session.histories.some((history) => history.threadId === threadId && history.pendingThread !== null),
+        );
+        const keepPendingPromptSend = shouldRetainPendingPromptSend({
+          thread,
+          startedAt,
+          hasPendingThreadHistory,
+          isThreadTurnRunning: thread ? isThreadTurnRunning(threadId) : false,
+        });
+        if (keepPendingPromptSend) {
+          next[threadId] = startedAt;
           continue;
         }
-        if (isThreadTurnRunning(threadId)) {
-          changed = true;
-          continue;
-        }
-        next[threadId] = startedAt;
+        changed = true;
       }
 
       return changed ? next : existing;

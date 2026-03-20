@@ -437,7 +437,7 @@ const make = Effect.gen(function* () {
         summary: "Provider turn start failed",
         detail: `User message '${event.payload.messageId}' was not found for turn start request.`,
         turnId: null,
-        createdAt: event.payload.createdAt,
+        createdAt: new Date().toISOString(),
       });
       return;
     }
@@ -474,7 +474,7 @@ const make = Effect.gen(function* () {
             summary: "Provider turn start failed",
             detail: toErrorMessage(error),
             turnId: null,
-            createdAt: event.payload.createdAt,
+            createdAt: new Date().toISOString(),
           });
         }),
       ),

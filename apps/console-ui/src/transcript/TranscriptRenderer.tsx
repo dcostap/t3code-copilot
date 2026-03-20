@@ -2529,6 +2529,53 @@ function getConversationScrollContainer(view: EditorView) {
   return findConversationScrollContainer(view.dom);
 }
 
+interface ScrollPositionSnapshot {
+  readonly element: HTMLElement;
+  readonly scrollTop: number;
+  readonly scrollLeft: number;
+}
+
+function collectScrollableAncestors(start: HTMLElement | null) {
+  const ancestors: HTMLElement[] = [];
+  let current = start;
+  while (current) {
+    const { overflowX, overflowY } = window.getComputedStyle(current);
+    const canScrollY = (overflowY === "auto" || overflowY === "scroll") && current.scrollHeight > current.clientHeight;
+    const canScrollX = (overflowX === "auto" || overflowX === "scroll") && current.scrollWidth > current.clientWidth;
+    if (canScrollX || canScrollY) {
+      ancestors.push(current);
+    }
+    current = current.parentElement;
+  }
+  return ancestors;
+}
+
+function captureScrollPositionSnapshots(...starts: Array<HTMLElement | null>) {
+  const snapshots: ScrollPositionSnapshot[] = [];
+  const seen = new Set<HTMLElement>();
+  for (const start of starts) {
+    for (const element of collectScrollableAncestors(start)) {
+      if (seen.has(element)) {
+        continue;
+      }
+      seen.add(element);
+      snapshots.push({
+        element,
+        scrollTop: element.scrollTop,
+        scrollLeft: element.scrollLeft,
+      });
+    }
+  }
+  return snapshots;
+}
+
+function restoreScrollPositionSnapshots(snapshots: ReadonlyArray<ScrollPositionSnapshot>) {
+  for (const snapshot of snapshots) {
+    snapshot.element.scrollTop = snapshot.scrollTop;
+    snapshot.element.scrollLeft = snapshot.scrollLeft;
+  }
+}
+
 const USER_MESSAGE_COPY_PREFIX = "> ";
 
 function collectSelectedUserMessageStartSegments(
@@ -2854,6 +2901,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const activeRegionRef = useRef<TranscriptRegion>("prompt");
     const historySelectionRef = useRef<StoredSelection | null>(null);
     const draftRef = useRef("");
+    const promptSelectionRef = useRef<StoredPromptSelection>({
+      anchorOffset: 0,
+      headOffset: 0,
+    });
     const onSubmitRef = useRef(onSubmit);
     const onDraftChangeRef = useRef(onDraftChange);
     const resolveInlineDiffRef = useRef(resolveInlineDiff);
@@ -2931,6 +2982,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
     const setPromptSelectionValue = useCallback((anchorOffset: number, headOffset: number) => {
       const nextSelection = { anchorOffset, headOffset };
+      promptSelectionRef.current = nextSelection;
       setPromptSelection((current) =>
         current.anchorOffset === nextSelection.anchorOffset && current.headOffset === nextSelection.headOffset
           ? current
@@ -2956,11 +3008,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
       textarea.focus({ preventScroll: true });
       const maxOffset = textarea.value.length;
-      const anchorOffset = Math.min(promptSelection.anchorOffset, maxOffset);
-      const headOffset = Math.min(promptSelection.headOffset, maxOffset);
+      const { anchorOffset: storedAnchorOffset, headOffset: storedHeadOffset } = promptSelectionRef.current;
+      const anchorOffset = Math.min(storedAnchorOffset, maxOffset);
+      const headOffset = Math.min(storedHeadOffset, maxOffset);
       textarea.setSelectionRange(anchorOffset, headOffset);
       setPromptSelectionValue(anchorOffset, headOffset);
-    }, [promptSelection.anchorOffset, promptSelection.headOffset, setPromptSelectionValue]);
+    }, [setPromptSelectionValue]);
 
     const autosizePromptInput = useCallback(() => {
       const textarea = promptTextareaRef.current;
@@ -2968,16 +3021,26 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         return;
       }
 
-      textarea.style.height = "auto";
-      const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight || "20") || 20;
-      const { height, overflowY } = resolvePromptTextareaLayout(lineHeight, textarea.scrollHeight);
-      const nextTextareaHeight = `${height}px`;
-      if (textarea.style.height !== nextTextareaHeight) {
-        textarea.style.height = nextTextareaHeight;
-      }
-      if (textarea.style.overflowY !== overflowY) {
-        textarea.style.overflowY = overflowY;
-      }
+      const view = viewRef.current;
+      const scrollSnapshots = captureScrollPositionSnapshots(
+        textarea,
+        view ? getConversationScrollContainer(view) : null,
+      );
+
+      const applyAutosize = () => {
+        textarea.style.height = "auto";
+        const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight || "20") || 20;
+        const { height, overflowY } = resolvePromptTextareaLayout(lineHeight, textarea.scrollHeight);
+        const nextTextareaHeight = `${height}px`;
+        if (textarea.style.height !== nextTextareaHeight) {
+          textarea.style.height = nextTextareaHeight;
+        }
+        if (textarea.style.overflowY !== overflowY) {
+          textarea.style.overflowY = overflowY;
+        }
+      };
+      applyAutosize();
+      restoreScrollPositionSnapshots(scrollSnapshots);
     }, []);
 
     useLayoutEffect(() => {
@@ -2985,8 +3048,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     }, [autosizePromptInput, draft]);
 
     const insertTextIntoDraft = useCallback((text: string) => {
-      const selectionStart = Math.min(promptSelection.anchorOffset, promptSelection.headOffset);
-      const selectionEnd = Math.max(promptSelection.anchorOffset, promptSelection.headOffset);
+      const { anchorOffset, headOffset } = promptSelectionRef.current;
+      const selectionStart = Math.min(anchorOffset, headOffset);
+      const selectionEnd = Math.max(anchorOffset, headOffset);
       const nextDraft =
         draftRef.current.slice(0, selectionStart)
         + text
@@ -3002,11 +3066,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         nextTextarea.focus({ preventScroll: true });
         nextTextarea.setSelectionRange(nextCursor, nextCursor);
       });
-    }, [promptSelection.anchorOffset, promptSelection.headOffset, setDraftValue, setPromptSelectionValue]);
+    }, [setDraftValue, setPromptSelectionValue]);
 
     const deletePromptText = useCallback((direction: "backward" | "forward") => {
-      const selectionStart = Math.min(promptSelection.anchorOffset, promptSelection.headOffset);
-      const selectionEnd = Math.max(promptSelection.anchorOffset, promptSelection.headOffset);
+      const { anchorOffset, headOffset } = promptSelectionRef.current;
+      const selectionStart = Math.min(anchorOffset, headOffset);
+      const selectionEnd = Math.max(anchorOffset, headOffset);
       if (selectionStart === selectionEnd) {
         if (direction === "backward" && selectionStart === 0) {
           return;
@@ -3036,7 +3101,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         textarea.focus({ preventScroll: true });
         textarea.setSelectionRange(deleteFrom, deleteFrom);
       });
-    }, [promptSelection.anchorOffset, promptSelection.headOffset, setDraftValue, setPromptSelectionValue]);
+    }, [setDraftValue, setPromptSelectionValue]);
 
     const handlePromptInputChange = useCallback((event: ReactChangeEvent<HTMLTextAreaElement>) => {
       setDraftValue(event.target.value);
