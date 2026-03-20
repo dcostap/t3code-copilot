@@ -4,10 +4,17 @@ import {
   REASONING_EFFORT_OPTIONS_BY_PROVIDER,
   type OrchestrationProject,
   type OrchestrationThread,
-  type ThreadId,
   type ProviderKind,
+  type ThreadId,
 } from "@t3tools/contracts";
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+} from "react";
 
 import { CommandPalette } from "./CommandPalette";
 import {
@@ -24,10 +31,7 @@ import {
   toUploadImageAttachment,
   type ComposerImageAttachment,
 } from "./composerAttachments";
-import {
-  resolvePendingUserInputAnswer,
-  resolvePendingUserInputShortcut,
-} from "./pendingUserInput";
+import { resolvePendingUserInputAnswer } from "./pendingUserInput";
 import {
   hasNonCollapsedSelectionInsideElement,
   TranscriptRenderer,
@@ -35,11 +39,45 @@ import {
   threadToTranscriptBlocks,
 } from "./transcript";
 import { useConsoleData, type PendingConsoleThread } from "./consoleData/useConsoleData";
-import { useConsoleWorkspaceSessions, type ConsolePaneSetup } from "./consoleSessions";
+import {
+  resolveThreadCwd,
+  useConsoleProjectLayouts,
+  type ConsolePaneSetup,
+  type ConsoleProjectPane,
+} from "./consoleSessions";
 import { resolveWsHttpOrigin } from "./wsTransport";
+
+const DRAFT_STORAGE_KEY = "t3code:console-pane-drafts:v1";
+const EMPTY_PROJECTS: ReadonlyArray<OrchestrationProject> = [];
 
 interface AppPaletteCommand extends CommandPaletteCommand {
   run(): Promise<void> | void;
+}
+
+interface PaneView {
+  readonly project: OrchestrationProject;
+  readonly tabId: string;
+  readonly pane: ConsoleProjectPane;
+  readonly isActive: boolean;
+  readonly threadId: OrchestrationThread["id"] | null;
+  readonly thread: OrchestrationThread | null;
+  readonly pendingThread: PendingConsoleThread | null;
+  readonly setup: ConsolePaneSetup | null;
+  readonly blocks: ReturnType<typeof threadToTranscriptBlocks>;
+  readonly attachments: ReadonlyArray<ComposerImageAttachment>;
+  readonly pendingPromptSendStartedAt: string | null;
+  readonly pendingUserInput: ReturnType<ReturnType<typeof useConsoleData>["getPendingUserInputs"]>[number] | null;
+  readonly pendingQuestionIndex: number;
+  readonly pendingQuestion: ReturnType<ReturnType<typeof useConsoleData>["getPendingUserInputs"]>[number]["questions"][number] | null;
+  readonly draftAnswers: Record<string, string>;
+  readonly cwd: string | null;
+  readonly interactionMode: "default" | "plan";
+  readonly provider: ProviderKind;
+}
+
+interface ThreadStatusDescriptor {
+  readonly tone: "working" | "waiting" | "idle" | "error";
+  readonly label: string;
 }
 
 function isDesktopBridgeAvailable() {
@@ -49,132 +87,209 @@ function isDesktopBridgeAvailable() {
   return typeof window.desktopBridge !== "undefined";
 }
 
-interface ThreadSetupSurfaceProps {
-  readonly selectedProvider: ProviderKind;
-  readonly busy: boolean;
-  readonly hoverSelectionSuppressed: boolean;
-  onHoverSelectionResume(): void;
-  onSelect(provider: ProviderKind): void;
-  onConfirm(provider: ProviderKind): void;
+function renderLoadingText(text: string) {
+  const seen = new Map<string, number>();
+  return Array.from(text).map((char, index) => {
+    const nextCount = (seen.get(char) ?? 0) + 1;
+    seen.set(char, nextCount);
+    return (
+      <span
+        key={`${char === " " ? "space" : char}:${nextCount}`}
+        className="loading-screen__char"
+        style={{ animationDelay: `${index * 0.028}s` }}
+      >
+        {char === " " ? "\u00A0" : char}
+      </span>
+    );
+  });
 }
 
-function ThreadSetupSurface({
-  selectedProvider,
-  busy,
-  hoverSelectionSuppressed,
-  onHoverSelectionResume,
-  onSelect,
-  onConfirm,
-}: ThreadSetupSurfaceProps) {
-  const options: ReadonlyArray<{
-    readonly provider: ProviderKind;
-    readonly label: string;
-    readonly description: string;
-  }> = [
-    { provider: "codex", label: "Codex", description: "OpenAI Codex provider" },
-    { provider: "copilot", label: "GitHub Copilot", description: "GitHub Copilot provider" },
+function truncateTitle(text: string, maxLength = 50) {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, maxLength)}...`;
+}
+
+function parseTimestampMs(value: string | null | undefined) {
+  if (!value) {
+    return Number.NaN;
+  }
+  return Date.parse(value);
+}
+
+function formatElapsedCompact(durationMs: number) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return "0s";
+  }
+  const totalSeconds = Math.max(1, Math.floor(durationMs / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes === 0 ? `${hours}h` : `${hours}h ${remainingMinutes}m`;
+}
+
+function getThreadFirstPrompt(thread: OrchestrationThread) {
+  return thread.messages.find((message) => message.role === "user" && message.text.trim().length > 0)?.text.trim()
+    ?? thread.title;
+}
+
+function getThreadSortValue(thread: OrchestrationThread) {
+  const candidates = [
+    thread.updatedAt,
+    thread.createdAt,
+    thread.latestTurn?.completedAt ?? null,
+    thread.latestTurn?.startedAt ?? null,
+    thread.latestTurn?.requestedAt ?? null,
+    thread.session?.updatedAt ?? null,
+  ];
+  return Math.max(
+    ...candidates
+      .map(parseTimestampMs)
+      .filter((value) => Number.isFinite(value)),
+    0,
+  );
+}
+
+function getThreadStatus(
+  thread: OrchestrationThread,
+  nowIso: string,
+  isThreadTurnRunning: boolean,
+): ThreadStatusDescriptor {
+  if (thread.session?.lastError) {
+    return { tone: "error", label: "error" };
+  }
+
+  const nowMs = parseTimestampMs(nowIso);
+  if (isThreadTurnRunning || thread.latestTurn?.state === "running") {
+    const startedAt = parseTimestampMs(
+      thread.latestTurn?.startedAt ?? thread.latestTurn?.requestedAt ?? thread.updatedAt,
+    );
+    return {
+      tone: "working",
+      label: `working ${formatElapsedCompact(nowMs - startedAt)}`,
+    };
+  }
+
+  const waitingFrom = parseTimestampMs(
+    thread.latestTurn?.completedAt ?? thread.latestTurn?.startedAt ?? thread.updatedAt,
+  );
+  if (Number.isFinite(waitingFrom)) {
+    return {
+      tone: "waiting",
+      label: `waiting ${formatElapsedCompact(nowMs - waitingFrom)}`,
+    };
+  }
+
+  return { tone: "idle", label: "idle" };
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
+
+function readPersistedPaneDrafts() {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function persistPaneDrafts(draftsByPaneId: Record<string, string>) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draftsByPaneId));
+}
+
+function DraftPaneHeader(props: {
+  readonly setup: ConsolePaneSetup;
+  readonly busy: boolean;
+  onSelectProvider(provider: ProviderKind): void;
+}) {
+  const options: ReadonlyArray<{ readonly provider: ProviderKind; readonly label: string }> = [
+    { provider: "codex", label: "Codex" },
+    { provider: "copilot", label: "Copilot" },
   ];
 
-  const selectProvider = useCallback((provider: ProviderKind) => {
-    if (provider !== selectedProvider) {
-      onSelect(provider);
-    }
-  }, [onSelect, selectedProvider]);
-
   return (
-    <div className="thread-setup" role="group" aria-label="New thread setup">
-      <div className="thread-setup__content">
-        <div className="thread-setup__line">new thread</div>
-        <div className="thread-setup__line thread-setup__line--muted">choose provider</div>
-        <div className="thread-setup__spacer" />
-        {options.map((option, index) => {
-          const active = option.provider === selectedProvider;
-          const className = [
-            "thread-setup__option",
-            active ? "thread-setup__option--active" : null,
-            hoverSelectionSuppressed ? "thread-setup__option--hover-suppressed" : null,
-          ].filter(Boolean).join(" ");
-          return (
-            <button
-              key={option.provider}
-              type="button"
-              className={className}
-              onMouseEnter={() => {
-                if (busy || hoverSelectionSuppressed) {
-                  return;
-                }
-                selectProvider(option.provider);
-              }}
-              onMouseMove={() => {
-                if (busy || !hoverSelectionSuppressed) {
-                  return;
-                }
-                onHoverSelectionResume();
-                selectProvider(option.provider);
-              }}
-              onClick={() => {
-                selectProvider(option.provider);
-                onConfirm(option.provider);
-              }}
-              disabled={busy}
-            >
-              <span className="thread-setup__marker" aria-hidden="true">{active ? "›" : " "}</span>
-              <span className="thread-setup__text">
-                [{index + 1}] {option.label}{" "}
-                <span className="thread-setup__description">— {option.description}</span>
-              </span>
-            </button>
-          );
-        })}
-        {busy ? (
-          <>
-            <div className="thread-setup__spacer" />
-            <div className="thread-setup__line thread-setup__line--hint">creating thread...</div>
-          </>
-        ) : null}
+    <div className="draft-pane-header">
+      <div className="draft-pane-header__meta">
+        <span className="draft-pane-header__eyebrow">draft</span>
+        <span className="draft-pane-header__detail">
+          provider {props.setup.selectedProvider} · mode {props.setup.interactionMode}
+        </span>
+      </div>
+      <div className="draft-pane-header__providers" role="group" aria-label="Draft provider">
+        {options.map((option) => (
+          <button
+            key={option.provider}
+            type="button"
+            className={`draft-pane-header__provider${option.provider === props.setup.selectedProvider ? " draft-pane-header__provider--active" : ""}`}
+            disabled={props.busy}
+            onClick={() => props.onSelectProvider(option.provider)}
+          >
+            {option.label}
+          </button>
+        ))}
       </div>
     </div>
   );
 }
 
-interface EmptyWorkspaceSurfaceProps {
-  readonly canCreate: boolean;
-  onCreate(): void;
-}
-
-function EmptyWorkspaceSurface({
-  canCreate,
-  onCreate,
-}: EmptyWorkspaceSurfaceProps) {
+function EmptyWorkspaceSurface(props: {
+  readonly title: string;
+  readonly detail: string;
+  readonly actionLabel?: string;
+  readonly disabled?: boolean;
+  onAction?(): void;
+}) {
   return (
     <div className="empty-workspace" role="status" aria-live="polite">
       <div className="empty-workspace__content">
         <div className="empty-workspace__row">
-          <span className="thread-setup__line thread-setup__line--muted">There&apos;s nothing here...</span>
-          <button
-            type="button"
-            className="thread-setup__option thread-setup__option--active empty-workspace__action"
-            onClick={onCreate}
-            disabled={!canCreate}
-          >
-            <span className="thread-setup__text">Open new tab?</span>
-          </button>
+          <span className="thread-setup__line">{props.title}</span>
         </div>
+        <div className="empty-workspace__row">
+          <span className="thread-setup__line thread-setup__line--muted">{props.detail}</span>
+        </div>
+        {props.onAction && props.actionLabel ? (
+          <div className="empty-workspace__row">
+            <button
+              type="button"
+              className="thread-setup__option thread-setup__option--active empty-workspace__action"
+              onClick={props.onAction}
+              disabled={props.disabled}
+            >
+              <span className="thread-setup__text">{props.actionLabel}</span>
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );
-}
-
-function renderLoadingText(text: string) {
-  return Array.from(text).map((char, index) => (
-    <span
-      key={`${char}-${index}`}
-      className="loading-screen__char"
-      style={{ animationDelay: `${index * 0.028}s` }}
-    >
-      {char === " " ? "\u00A0" : char}
-    </span>
-  ));
 }
 
 export function shouldRetainPendingPromptSend(input: {
@@ -199,14 +314,17 @@ export function shouldRetainPendingPromptSend(input: {
 export function App() {
   const isDesktop = useMemo(isDesktopBridgeAvailable, []);
   const consoleData = useConsoleData();
-  const workspace = useConsoleWorkspaceSessions({
+  const projects = useMemo(
+    () => consoleData.snapshot?.projects ?? EMPTY_PROJECTS,
+    [consoleData.snapshot?.projects],
+  );
+  const workspace = useConsoleProjectLayouts({
     threads: consoleData.threads,
-    projects: consoleData.snapshot?.projects ?? [],
+    projects,
     preferredThreadId: consoleData.activeThreadId,
   });
-  const activeSession = workspace.activeSession;
+
   const getPendingUserInputs = consoleData.getPendingUserInputs;
-  const getProjectForThread = consoleData.getProjectForThread;
   const getThreadEvents = consoleData.getThreadEvents;
   const getTurnDiff = consoleData.getTurnDiff;
   const isThreadTurnRunning = consoleData.isThreadTurnRunning;
@@ -219,262 +337,106 @@ export function App() {
   const setInteractionMode = consoleData.setInteractionMode;
   const interruptTurn = consoleData.interruptTurn;
   const stopSession = consoleData.stopSession;
-  const updatePaneSetup = workspace.updatePaneSetup;
-  const completePaneSetup = workspace.completePaneSetup;
-  const createSessionWithSetup = workspace.createSessionWithSetup;
-  const activateSession = workspace.activateSession;
-  const closeSession = workspace.closeSession;
-  const activatePane = workspace.activatePane;
-  const closePane = workspace.closePane;
+
   const [nowIso, setNowIso] = useState(() => new Date().toISOString());
-  const [frozenTranscriptNowIso, setFrozenTranscriptNowIso] = useState<string | null>(null);
-  const [_submitError, setSubmitError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
-  const [pendingPromptSendStartedAtByThreadId, setPendingPromptSendStartedAtByThreadId] = useState<
-    Record<string, string>
+  const [pendingPromptSendStartedAtByThreadId, setPendingPromptSendStartedAtByThreadId] = useState<Record<string, string>>({});
+  const [composerAttachmentsByPaneId, setComposerAttachmentsByPaneId] = useState<Record<string, ReadonlyArray<ComposerImageAttachment>>>({});
+  const [composerDraftByPaneId, setComposerDraftByPaneId] = useState<Record<string, string>>(() => readPersistedPaneDrafts());
+  const [pendingThreadByPaneId, setPendingThreadByPaneId] = useState<
+    Record<string, { readonly threadId: OrchestrationThread["id"]; readonly pendingThread: PendingConsoleThread }>
   >({});
-  const [composerAttachmentsByPaneId, setComposerAttachmentsByPaneId] = useState<
-    Record<string, ReadonlyArray<ComposerImageAttachment>>
-  >({});
-  const [composerDraftByPaneId, setComposerDraftByPaneId] = useState<Record<string, string>>({});
-  const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<
-    Record<string, Record<string, string>>
-  >({});
-  const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] = useState<
-    Record<string, number>
-  >({});
-  const [pendingThreadSetupPaneIds, setPendingThreadSetupPaneIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [setupHoverSuppressedPaneIds, setSetupHoverSuppressedPaneIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [mountedSessionIds, setMountedSessionIds] = useState<ReadonlySet<string>>(
-    () => new Set(activeSession ? [activeSession.id] : []),
-  );
+  const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<Record<string, Record<string, string>>>({});
+  const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] = useState<Record<string, number>>({});
+  const [pendingDraftPaneIds, setPendingDraftPaneIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
+  const [draggedThreadId, setDraggedThreadId] = useState<string | null>(null);
+  const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null);
+  const [highlightedPaneId, setHighlightedPaneId] = useState<string | null>(null);
   const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
-  const hasInitiallyFocusedPromptRef = useRef(false);
-  const latestNowIsoRef = useRef(nowIso);
   const initializedPaneIdsRef = useRef<Record<string, true>>({});
-  const previousActiveSetupPaneIdRef = useRef<string | null>(null);
+  const hasInitiallyFocusedPromptRef = useRef(false);
   const composerAttachmentsRef = useRef(composerAttachmentsByPaneId);
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
-  const activePane = workspace.activePane;
-  const activePaneId = activePane?.id ?? null;
-  const activeThreadId = workspace.activeThreadId ?? consoleData.activeThreadId;
-  latestNowIsoRef.current = nowIso;
-  const activeThread = activeSession
-    ? workspace.activeThread
-    : (activeThreadId
-        ? (consoleData.threads.find((thread) => thread.id === activeThreadId) ?? consoleData.thread)
-        : consoleData.thread);
-  const activeProject = activeSession
-    ? workspace.activeProject
-    : (activeThreadId ? getProjectForThread(activeThreadId) : consoleData.project);
-  const availableProject = activeProject ?? consoleData.snapshot?.projects[0] ?? null;
-  const activeHistory = useMemo(
-    () => (activeSession && activePane?.historyId
-      ? (activeSession.histories.find((history) => history.id === activePane.historyId) ?? null)
-      : null),
-    [activePane?.historyId, activeSession],
-  );
-  const activePendingThread = !activeThread ? (activeHistory?.pendingThread ?? null) : null;
-  const composerDraft = activePaneId ? (composerDraftByPaneId[activePaneId] ?? "") : "";
-  const composerAttachments = activePaneId ? [...(composerAttachmentsByPaneId[activePaneId] ?? [])] : [];
-  const activePendingUserInputs = useMemo(
-    () => (activeThreadId ? getPendingUserInputs(activeThreadId) : []),
-    [activeThreadId, getPendingUserInputs],
-  );
-  const activePendingUserInput = activePendingUserInputs[0] ?? null;
-  const activeThreadTurnRunning = activeThreadId ? isThreadTurnRunning(activeThreadId) : false;
-  const activePendingPromptSendStartedAt = activeThreadId
-    ? (pendingPromptSendStartedAtByThreadId[activeThreadId] ?? null)
-    : null;
-  const activePendingQuestionIndex = activePendingUserInput
-    ? (pendingUserInputQuestionIndexByRequestId[activePendingUserInput.requestId] ?? 0)
-    : 0;
-  const activePendingQuestion = activePendingUserInput?.questions[activePendingQuestionIndex] ?? null;
-  const activePendingDraftAnswers = useMemo(
-    () => (activePendingUserInput
-      ? (pendingUserInputAnswersByRequestId[activePendingUserInput.requestId] ?? {})
-      : {}),
-    [activePendingUserInput, pendingUserInputAnswersByRequestId],
-  );
-  const activePendingShortcut = activePendingQuestion
-    ? resolvePendingUserInputShortcut(composerDraft, activePendingQuestion.options)
-    : null;
-  const activeProvider =
-    activePane?.setup?.selectedProvider ??
-    activeThread?.provider ??
-    activePendingThread?.provider ??
-    null;
-  const activeReasoningEffort =
-    activeProvider === "codex"
-      ? (activeThread?.modelOptions?.codex?.reasoningEffort ?? null)
-      : activeProvider === "copilot"
-        ? (activeThread?.modelOptions?.copilot?.reasoningEffort ?? null)
-        : null;
-  const activeReasoningOptions = useMemo(() => {
-    if (!activeProvider || !activeThread) {
-      return [];
-    }
-
-    const providerStatus = consoleData.serverConfig?.providers.find(
-      (provider) => provider.provider === activeProvider,
-    );
-    const activeModelStatus = providerStatus?.models?.find((model) => model.id === activeThread.model);
-
-    if (activeModelStatus) {
-      if (!activeModelStatus.supportsReasoningEffort) {
-        return [];
-      }
-      return activeModelStatus.supportedReasoningEfforts ??
-        REASONING_EFFORT_OPTIONS_BY_PROVIDER[activeProvider];
-    }
-
-    return REASONING_EFFORT_OPTIONS_BY_PROVIDER[activeProvider];
-  }, [activeProvider, activeThread, consoleData.serverConfig?.providers]);
-  const activeDefaultReasoningEffort = useMemo(() => {
-    if (!activeProvider || !activeThread) {
-      return null;
-    }
-
-    const providerStatus = consoleData.serverConfig?.providers.find(
-      (provider) => provider.provider === activeProvider,
-    );
-    const activeModelStatus = providerStatus?.models?.find((model) => model.id === activeThread.model);
-    return activeModelStatus?.defaultReasoningEffort ?? null;
-  }, [activeProvider, activeThread, consoleData.serverConfig?.providers]);
-
-  const anyThreadTurnRunning = useMemo(
-    () => consoleData.threads.some((thread) => isThreadTurnRunning(thread.id)),
-    [consoleData.threads, isThreadTurnRunning],
-  );
-  const hasLiveTranscriptTimer =
-    anyThreadTurnRunning || Object.keys(pendingPromptSendStartedAtByThreadId).length > 0;
 
   useEffect(() => {
-    if (!hasLiveTranscriptTimer) {
+    const handle = window.setInterval(() => {
       setNowIso(new Date().toISOString());
-      return;
-    }
-
-    setNowIso(new Date().toISOString());
-    let animationFrameId = 0;
-    let lastCommittedAt = performance.now();
-
-    const tick = (frameAt: number) => {
-      if (frameAt - lastCommittedAt >= 45) {
-        lastCommittedAt = frameAt;
-        setNowIso(new Date().toISOString());
-      }
-      animationFrameId = window.requestAnimationFrame(tick);
-    };
-
-    animationFrameId = window.requestAnimationFrame(tick);
-
-    return () => {
-      window.cancelAnimationFrame(animationFrameId);
-    };
-  }, [hasLiveTranscriptTimer]);
-
-  useEffect(() => {
-    if (typeof document === "undefined" || typeof window === "undefined") {
-      return;
-    }
-
-    const syncTranscriptSelectionFreeze = () => {
-      const selection = window.getSelection();
-      const transcriptShells = Array.from(document.querySelectorAll<HTMLElement>(".transcript-shell"));
-      const shouldFreeze = transcriptShells.some((shell) =>
-        hasNonCollapsedSelectionInsideElement(selection, shell));
-      setFrozenTranscriptNowIso((current) => {
-        if (shouldFreeze) {
-          return current ?? latestNowIsoRef.current;
-        }
-        return current === null ? current : null;
-      });
-    };
-
-    document.addEventListener("selectionchange", syncTranscriptSelectionFreeze);
-    window.addEventListener("blur", syncTranscriptSelectionFreeze);
-
-    return () => {
-      document.removeEventListener("selectionchange", syncTranscriptSelectionFreeze);
-      window.removeEventListener("blur", syncTranscriptSelectionFreeze);
-    };
+    }, 1000);
+    return () => window.clearInterval(handle);
   }, []);
 
   useEffect(() => {
-    setPendingPromptSendStartedAtByThreadId((existing) => {
-      let changed = false;
-      const next: Record<string, string> = {};
+    persistPaneDrafts(composerDraftByPaneId);
+  }, [composerDraftByPaneId]);
 
-      for (const [threadId, startedAt] of Object.entries(existing)) {
-        const thread = consoleData.threads.find((candidate) => candidate.id === threadId) ?? null;
-        const hasPendingThreadHistory = !thread && workspace.sessions.some((session) =>
-          session.histories.some((history) => history.threadId === threadId && history.pendingThread !== null),
-        );
-        const keepPendingPromptSend = shouldRetainPendingPromptSend({
-          thread,
-          startedAt,
-          hasPendingThreadHistory,
-          isThreadTurnRunning: thread ? isThreadTurnRunning(threadId) : false,
-        });
-        if (keepPendingPromptSend) {
-          next[threadId] = startedAt;
-          continue;
-        }
-        changed = true;
+  const orderedThreadsByProjectId = useMemo(() => {
+    const map = new Map<string, OrchestrationThread[]>();
+    for (const project of projects.filter((project) => project.deletedAt === null)) {
+      map.set(project.id, []);
+    }
+    for (const thread of consoleData.threads.filter((thread) => thread.deletedAt === null)) {
+      const bucket = map.get(thread.projectId);
+      if (bucket) {
+        bucket.push(thread);
       }
+    }
+    for (const bucket of map.values()) {
+      bucket.sort((left, right) => getThreadSortValue(right) - getThreadSortValue(left));
+    }
+    return map;
+  }, [consoleData.threads, projects]);
 
-      return changed ? next : existing;
-    });
-  }, [consoleData.threads, isThreadTurnRunning, workspace.sessions]);
+  const livePaneIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const projectView of workspace.projectViews) {
+      for (const tab of projectView.layout.tabs) {
+        ids.push(...tab.paneIds);
+      }
+    }
+    return ids;
+  }, [workspace.projectViews]);
+
+  const liveDraftPaneIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const projectView of workspace.projectViews) {
+      for (const pane of Object.values(projectView.layout.panesById)) {
+        if (pane.kind === "draft") {
+          ids.add(pane.id);
+        }
+      }
+    }
+    return ids;
+  }, [workspace.projectViews]);
 
   useEffect(() => {
-    const openRequestIds = new Set(
-      (activeSession
-        ? activeSession.panes.flatMap((pane) => {
-            const history = activeSession.histories.find((candidate) => candidate.id === pane.historyId);
-            return history ? getPendingUserInputs(history.threadId) : [];
-          })
-        : activePendingUserInputs).map((entry) => entry.requestId),
-    );
-    setPendingUserInputAnswersByRequestId((existing) =>
-      Object.fromEntries(
-        Object.entries(existing).filter(([requestId]) => openRequestIds.has(requestId)),
-      ),
-    );
-    setPendingUserInputQuestionIndexByRequestId((existing) =>
-      Object.fromEntries(
-        Object.entries(existing).filter(([requestId]) => openRequestIds.has(requestId)),
-      ),
-    );
-  }, [activePendingUserInputs, activeSession, getPendingUserInputs]);
+    const livePaneIdSet = new Set(livePaneIds);
 
-  const resolveModelForProvider = useCallback((preferredProvider: ProviderKind, projectId: string) => {
-    const providerStatus = consoleData.serverConfig?.providers.find(
-      (provider) => provider.provider === preferredProvider,
-    );
-    const availableModelIds = new Set((providerStatus?.models ?? []).map((model) => model.id));
-    const isAvailableModel = (model: string | null | undefined) =>
-      typeof model === "string" &&
-      model.length > 0 &&
-      (availableModelIds.size === 0 || availableModelIds.has(model));
+    setComposerAttachmentsByPaneId((existing) => {
+      const next = Object.fromEntries(Object.entries(existing).filter(([paneId]) => livePaneIdSet.has(paneId)));
+      return Object.keys(next).length === Object.keys(existing).length ? existing : next;
+    });
+    setPendingThreadByPaneId((existing) => {
+      const next = Object.fromEntries(Object.entries(existing).filter(([paneId]) => livePaneIdSet.has(paneId)));
+      return Object.keys(next).length === Object.keys(existing).length ? existing : next;
+    });
+    setComposerDraftByPaneId((existing) => {
+      const next = Object.fromEntries(
+        Object.entries(existing).filter(([paneId, value]) => liveDraftPaneIds.has(paneId) && value.length > 0),
+      );
+      return Object.keys(next).length === Object.keys(existing).length ? existing : next;
+    });
 
-    const matchingProviderThread = [...consoleData.threads]
-      .filter((thread) =>
-        thread.projectId === projectId &&
-        thread.provider === preferredProvider &&
-        isAvailableModel(thread.model),
-      )
-      .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-
-    return (
-      matchingProviderThread?.model ??
-      providerStatus?.models?.[0]?.id ??
-      DEFAULT_MODEL_BY_PROVIDER[preferredProvider]
-    );
-  }, [consoleData.serverConfig?.providers, consoleData.threads]);
+    for (const paneId of Object.keys(initializedPaneIdsRef.current)) {
+      if (!livePaneIdSet.has(paneId)) {
+        delete initializedPaneIdsRef.current[paneId];
+        delete paneRefs.current[paneId];
+      }
+    }
+  }, [liveDraftPaneIds, livePaneIds]);
 
   useEffect(() => {
     if (!workspace.activeThreadId || consoleData.activeThreadId === workspace.activeThreadId) {
@@ -483,92 +445,121 @@ export function App() {
     consoleData.setActiveThreadId(workspace.activeThreadId);
   }, [consoleData, workspace.activeThreadId]);
 
-  const focusActivePanePrompt = useCallback((options?: { readonly reveal?: boolean }) => {
-    if (!activePaneId) {
+  useEffect(() => {
+    setPendingThreadByPaneId((existing) => {
+      let changed = false;
+      const next: Record<string, { readonly threadId: OrchestrationThread["id"]; readonly pendingThread: PendingConsoleThread }> = {};
+      for (const [paneId, pendingThread] of Object.entries(existing)) {
+        const paneStillPending = workspace.projectViews.some((projectView) =>
+          Object.values(projectView.layout.panesById).some(
+            (pane) => pane.id === paneId
+              && pane.kind === "thread"
+              && pane.threadId === pendingThread.threadId
+              && !consoleData.threads.some((thread) => thread.id === pane.threadId),
+          ),
+        );
+        if (paneStillPending) {
+          next[paneId] = pendingThread;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : existing;
+    });
+  }, [consoleData.threads, workspace.projectViews]);
+
+  useEffect(() => {
+    setPendingPromptSendStartedAtByThreadId((existing) => {
+      let changed = false;
+      const next: Record<string, string> = {};
+      for (const [threadId, startedAt] of Object.entries(existing)) {
+        const thread = consoleData.threads.find((candidate) => candidate.id === threadId) ?? null;
+        const keep = shouldRetainPendingPromptSend({
+          thread,
+          startedAt,
+          hasPendingThreadHistory: Object.values(pendingThreadByPaneId).some((candidate) => candidate.threadId === threadId),
+          isThreadTurnRunning: thread ? isThreadTurnRunning(thread.id) : false,
+        });
+        if (keep) {
+          next[threadId] = startedAt;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : existing;
+    });
+  }, [consoleData.threads, isThreadTurnRunning, pendingThreadByPaneId]);
+
+  const focusPanePrompt = useCallback((paneId: string | null) => {
+    if (!paneId || paletteOpen) {
       return;
     }
-    paneRefs.current[activePaneId]?.focusPrompt(options);
-  }, [activePaneId]);
-  const handleToolbarButtonMouseDown = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-  }, []);
+    requestAnimationFrame(() => {
+      paneRefs.current[paneId]?.focusPrompt({ reveal: true });
+    });
+  }, [paletteOpen]);
 
-  const activatePaneAndFocus = useCallback((paneId: string) => {
-    activatePane(paneId);
-    requestAnimationFrame(() => {
-      paneRefs.current[paneId]?.focusPrompt();
-    });
-  }, [activatePane]);
-  const activateSessionAndFocus = useCallback((sessionId: string) => {
-    const session = workspace.sessions.find((candidate) => candidate.id === sessionId);
-    const paneId = session?.activePaneId ?? session?.panes[0]?.id ?? null;
-    activateSession(sessionId);
-    requestAnimationFrame(() => {
-      if (!paneId) {
-        return;
-      }
-      paneRefs.current[paneId]?.focusPrompt();
-    });
-  }, [activateSession, workspace.sessions]);
+  useEffect(() => {
+    if (!workspace.activePaneId || paletteOpen) {
+      return;
+    }
+    if (!hasInitiallyFocusedPromptRef.current) {
+      hasInitiallyFocusedPromptRef.current = true;
+    }
+    focusPanePrompt(workspace.activePaneId);
+  }, [focusPanePrompt, paletteOpen, workspace.activePaneId]);
 
   const setComposerDraftForPane = useCallback((paneId: string, value: string) => {
-    setComposerDraftByPaneId((existing) =>
-      existing[paneId] === value ? existing : { ...existing, [paneId]: value },
-    );
+    setComposerDraftByPaneId((existing) => (existing[paneId] === value ? existing : { ...existing, [paneId]: value }));
   }, []);
 
-  const handleAddImageFilesForPane = useCallback(
-    (paneId: string, files: ReadonlyArray<File>) => {
-      if (files.length === 0) {
-        return;
+  const handleAddImageFilesForPane = useCallback((paneId: string, files: ReadonlyArray<File>) => {
+    if (files.length === 0) {
+      return;
+    }
+
+    const existingAttachments = [...(composerAttachmentsRef.current[paneId] ?? [])];
+    const accepted: ComposerImageAttachment[] = [];
+    let nextCount = existingAttachments.length;
+    const dedupKeys = new Set(existingAttachments.map((attachment) => composerImageDedupKey(attachment)));
+    let nextError: string | null = null;
+
+    for (const file of files) {
+      if (!file.type.startsWith("image/")) {
+        nextError = `Unsupported file type for '${file.name}'. Attach image files only.`;
+        continue;
+      }
+      if (file.size === 0 || file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
+        nextError = `'${file.name}' exceeds the ${IMAGE_ATTACHMENT_SIZE_LIMIT_LABEL} attachment limit.`;
+        continue;
+      }
+      if (nextCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+        nextError = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`;
+        break;
       }
 
-      const existingAttachments = [...(composerAttachmentsByPaneId[paneId] ?? [])];
-      const accepted: ComposerImageAttachment[] = [];
-      let nextCount = existingAttachments.length;
-      const dedupKeys = new Set(
-        existingAttachments.map((attachment) => composerImageDedupKey(attachment)),
-      );
-      let nextError: string | null = null;
-
-      for (const file of files) {
-        if (!file.type.startsWith("image/")) {
-          nextError = `Unsupported file type for '${file.name}'. Attach image files only.`;
-          continue;
-        }
-        if (file.size === 0 || file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
-          nextError = `'${file.name}' exceeds the ${IMAGE_ATTACHMENT_SIZE_LIMIT_LABEL} attachment limit.`;
-          continue;
-        }
-        if (nextCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-          nextError = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`;
-          break;
-        }
-
-        const attachment = createComposerImageAttachment(file);
-        const dedupKey = composerImageDedupKey(attachment);
-        if (dedupKeys.has(dedupKey)) {
-          revokeComposerImageAttachmentPreview(attachment);
-          continue;
-        }
-
-        accepted.push(attachment);
-        dedupKeys.add(dedupKey);
-        nextCount += 1;
+      const attachment = createComposerImageAttachment(file);
+      const dedupKey = composerImageDedupKey(attachment);
+      if (dedupKeys.has(dedupKey)) {
+        revokeComposerImageAttachmentPreview(attachment);
+        continue;
       }
 
-      if (accepted.length > 0) {
-        setComposerAttachmentsByPaneId((existing) => ({
-          ...existing,
-          [paneId]: [...(existing[paneId] ?? []), ...accepted],
-        }));
-      }
-      if (nextError || accepted.length > 0) {
-        setSubmitError(nextError);
-      }
-    },
-    [composerAttachmentsByPaneId],
-  );
+      accepted.push(attachment);
+      dedupKeys.add(dedupKey);
+      nextCount += 1;
+    }
+
+    if (accepted.length > 0) {
+      setComposerAttachmentsByPaneId((existing) => ({
+        ...existing,
+        [paneId]: [...(existing[paneId] ?? []), ...accepted],
+      }));
+    }
+    if (nextError || accepted.length > 0) {
+      setSubmitError(nextError);
+    }
+  }, []);
 
   const handleRemoveImageForPane = useCallback((paneId: string, attachmentId: string) => {
     setComposerAttachmentsByPaneId((existing) => {
@@ -584,770 +575,525 @@ export function App() {
     });
   }, []);
 
-  const handleSubmit = useCallback(
-    async (
-      paneId: string,
-      threadId: string | null,
-      pendingThread: PendingConsoleThread | null,
-      pendingUserInput: typeof activePendingUserInput,
-      activeQuestion: typeof activePendingQuestion,
-      activeQuestionIndex: number,
-      draftAnswers: Record<string, string>,
-      value: string,
-    ) => {
-      const attachmentSnapshot = [...(composerAttachmentsByPaneId[paneId] ?? [])];
-      try {
-        if (pendingUserInput) {
-          if (attachmentSnapshot.length > 0) {
-            throw new Error("Image attachments are not supported while a user-input request is pending.");
-          }
-          if (!activeQuestion) {
-            throw new Error("Pending user input is missing an active question.");
-          }
+  const activeLayout = workspace.activeLayout;
+  const activeTab = workspace.activeTab;
+  const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
 
-          const answer = resolvePendingUserInputAnswer(value, activeQuestion);
-          if (!answer) {
-            throw new Error("Type an answer or enter an option number for the active user-input question.");
-          }
+  const paneViews = useMemo<ReadonlyArray<PaneView>>(() => {
+    const activeProject = workspace.activeProject;
+    if (!activeProject || !activeLayout || !activeTab) {
+      return [];
+    }
 
-          const nextAnswers = {
-            ...draftAnswers,
-            [activeQuestion.id]: answer,
-          };
+    return activeTab.paneIds
+      .flatMap((paneId) => {
+        const pane = activeLayout.panesById[paneId];
+        if (!pane) {
+          return [];
+        }
+        const thread = pane.kind === "thread"
+          ? consoleData.threads.find((candidate) => candidate.id === pane.threadId) ?? null
+          : null;
+        const pendingThreadEntry = pendingThreadByPaneId[pane.id] ?? null;
+        const pendingThread = pendingThreadEntry?.pendingThread ?? null;
+        const pendingUserInput = pane.kind === "thread" ? (getPendingUserInputs(pane.threadId)[0] ?? null) : null;
+        const pendingQuestionIndex = pendingUserInput
+          ? pendingUserInputQuestionIndexByRequestId[pendingUserInput.requestId] ?? 0
+          : 0;
+        const pendingQuestion = pendingUserInput?.questions[pendingQuestionIndex] ?? null;
+        const provider: ProviderKind = thread?.provider
+          ?? pendingThread?.provider
+          ?? (pane.kind === "draft" ? pane.setup.selectedProvider : "codex");
+        const effectiveNow = thread && (isThreadTurnRunning(thread.id) || pendingPromptSendStartedAtByThreadId[thread.id])
+          ? nowIso
+          : undefined;
+        const blocks = thread
+          ? threadToTranscriptBlocks(thread, {
+              resolveAttachmentPreviewUrl: (attachmentId) =>
+                `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
+              orchestrationEvents: getThreadEvents(thread.id),
+              ...(effectiveNow ? { now: effectiveNow } : {}),
+            })
+          : [];
+        const pendingPromptSendStartedAt = pane.kind === "thread"
+          ? pendingPromptSendStartedAtByThreadId[pane.threadId] ?? null
+          : null;
 
-          if (activeQuestionIndex < pendingUserInput.questions.length - 1) {
-            setPendingUserInputAnswersByRequestId((existing) => ({
-              ...existing,
-              [pendingUserInput.requestId]: nextAnswers,
-            }));
-            setPendingUserInputQuestionIndexByRequestId((existing) => ({
-              ...existing,
-              [pendingUserInput.requestId]: activeQuestionIndex + 1,
-            }));
-            setSubmitError(null);
-            return;
-          }
+        return [{
+          project: activeProject,
+          tabId: activeTab.id,
+          pane,
+          isActive: activeTab.activePaneId === pane.id,
+          threadId: pane.kind === "thread" ? pane.threadId : null,
+          thread,
+          pendingThread,
+          setup: pane.kind === "draft" ? pane.setup : null,
+          blocks: thread && pendingPromptSendStartedAt && effectiveNow && !isThreadTurnRunning(thread.id)
+            ? [
+                ...blocks,
+                {
+                  type: "sending-state" as const,
+                  startedAt: pendingPromptSendStartedAt,
+                  now: effectiveNow,
+                },
+              ]
+            : blocks,
+          attachments: composerAttachmentsByPaneId[pane.id] ?? [],
+          pendingPromptSendStartedAt,
+          pendingUserInput,
+          pendingQuestionIndex,
+          pendingQuestion,
+          draftAnswers: pendingUserInput ? (pendingUserInputAnswersByRequestId[pendingUserInput.requestId] ?? {}) : {},
+          cwd: thread
+            ? resolveThreadCwd(thread, projects)
+            : (pendingThread?.worktreePath ?? (pane.kind === "draft" ? pane.setup.worktreePath : null) ?? activeProject.workspaceRoot),
+          interactionMode: thread?.interactionMode ?? pendingThread?.interactionMode ?? (pane.kind === "draft" ? pane.setup.interactionMode : "default"),
+          provider,
+        } satisfies PaneView];
+      });
+  }, [
+    activeLayout,
+    activeTab,
+    attachmentPreviewBaseUrl,
+    composerAttachmentsByPaneId,
+    consoleData.threads,
+    getPendingUserInputs,
+    getThreadEvents,
+    isThreadTurnRunning,
+    nowIso,
+    pendingPromptSendStartedAtByThreadId,
+    pendingThreadByPaneId,
+    pendingUserInputAnswersByRequestId,
+    pendingUserInputQuestionIndexByRequestId,
+    projects,
+    workspace.activeProject,
+  ]);
 
-          if (!threadId) {
-            throw new Error("No orchestration thread is available.");
-          }
-          await respondToUserInput(threadId, pendingUserInput.requestId, nextAnswers);
+  const activePaneView = useMemo(
+    () => paneViews.find((paneView) => paneView.isActive) ?? null,
+    [paneViews],
+  );
+
+  const openPalette = useCallback(() => {
+    setPaletteOpen(true);
+    setPaletteQuery("");
+    setSelectedCommandIndex(0);
+  }, []);
+
+  const closePalette = useCallback(() => {
+    setPaletteOpen(false);
+    setPaletteQuery("");
+    setSelectedCommandIndex(0);
+    focusPanePrompt(workspace.activePaneId);
+  }, [focusPanePrompt, workspace.activePaneId]);
+
+  const highlightPane = useCallback((paneId: string) => {
+    setHighlightedPaneId(paneId);
+    window.setTimeout(() => {
+      setHighlightedPaneId((current) => (current === paneId ? null : current));
+    }, 1400);
+  }, []);
+
+  const handleCreateDraftTab = useCallback(() => {
+    const projectId = workspace.activeProject?.id ?? workspace.projectViews[0]?.project.id ?? null;
+    if (!projectId) {
+      setSubmitError("No project is available.");
+      return;
+    }
+    const created = workspace.createDraftTab({ projectId });
+    if (!created) {
+      return;
+    }
+    setSubmitError(null);
+    focusPanePrompt(created.paneId);
+  }, [focusPanePrompt, workspace]);
+
+  const handleSplitActivePane = useCallback(() => {
+    if (!workspace.activeProject || !workspace.activePaneId) {
+      return;
+    }
+    const created = workspace.splitPane({
+      projectId: workspace.activeProject.id,
+      paneId: workspace.activePaneId,
+    });
+    if (created) {
+      focusPanePrompt(created.paneId);
+    }
+  }, [focusPanePrompt, workspace]);
+
+  const handleCloseTab = useCallback(() => {
+    if (!workspace.activeProject || !workspace.activeTab) {
+      return;
+    }
+    workspace.closeTab(workspace.activeProject.id, workspace.activeTab.id);
+  }, [workspace]);
+
+  const handleOpenThread = useCallback((threadId: ThreadId) => {
+    const result = workspace.openThread(threadId);
+    if (!result) {
+      return;
+    }
+    focusPanePrompt(result.paneId);
+    if (result.highlightPane) {
+      highlightPane(result.paneId);
+    }
+  }, [focusPanePrompt, highlightPane, workspace]);
+
+  const handleSubmit = useCallback(async (paneView: PaneView, value: string) => {
+    const attachmentSnapshot = [...(composerAttachmentsRef.current[paneView.pane.id] ?? [])];
+
+    try {
+      if (paneView.pendingUserInput) {
+        if (attachmentSnapshot.length > 0) {
+          throw new Error("Image attachments are not supported while a user-input request is pending.");
+        }
+        if (!paneView.pendingQuestion || !paneView.threadId) {
+          throw new Error("Pending user input is missing an active question.");
+        }
+
+        const answer = resolvePendingUserInputAnswer(value, paneView.pendingQuestion);
+        if (!answer) {
+          throw new Error("Type an answer or enter an option number for the active user-input question.");
+        }
+
+        const nextAnswers = {
+          ...paneView.draftAnswers,
+          [paneView.pendingQuestion.id]: answer,
+        };
+
+        if (paneView.pendingQuestionIndex < paneView.pendingUserInput.questions.length - 1) {
           setPendingUserInputAnswersByRequestId((existing) => ({
             ...existing,
-            [pendingUserInput.requestId]: nextAnswers,
+            [paneView.pendingUserInput!.requestId]: nextAnswers,
           }));
           setPendingUserInputQuestionIndexByRequestId((existing) => ({
             ...existing,
-            [pendingUserInput.requestId]: activeQuestionIndex,
+            [paneView.pendingUserInput!.requestId]: paneView.pendingQuestionIndex + 1,
           }));
           setSubmitError(null);
           return;
         }
 
-        if (!threadId) {
-          throw new Error("No orchestration thread is available.");
+        await respondToUserInput(paneView.threadId, paneView.pendingUserInput.requestId, nextAnswers);
+        setPendingUserInputAnswersByRequestId((existing) => ({
+          ...existing,
+          [paneView.pendingUserInput!.requestId]: nextAnswers,
+        }));
+        setSubmitError(null);
+        return;
+      }
+
+      if (paneView.pane.kind === "draft") {
+        const prompt = value.trim();
+        if (prompt.length === 0 && attachmentSnapshot.length === 0) {
+          return;
         }
-        const sendingStartedAt = new Date().toISOString();
+
+        setPendingDraftPaneIds((existing) => new Set(existing).add(paneView.pane.id));
+        const created = await createThread({
+          projectId: paneView.project.id,
+          provider: paneView.pane.setup.selectedProvider,
+          title: truncateTitle(prompt || "New thread"),
+          interactionMode: paneView.pane.setup.interactionMode,
+          branch: paneView.pane.setup.branch,
+          worktreePath: paneView.pane.setup.worktreePath,
+          createdAt: paneView.pane.setup.createdAt,
+        });
+
+        workspace.mountThreadInPane({
+          projectId: paneView.project.id,
+          paneId: paneView.pane.id,
+          threadId: created.threadId,
+        });
+        setPendingThreadByPaneId((existing) => ({
+          ...existing,
+          [paneView.pane.id]: {
+            threadId: created.threadId,
+            pendingThread: created.pendingThread,
+          },
+        }));
         setPendingPromptSendStartedAtByThreadId((existing) => ({
           ...existing,
-          [threadId]: sendingStartedAt,
+          [created.threadId]: new Date().toISOString(),
         }));
+
         try {
           await submitPrompt({
-            threadId,
-            pendingThread,
+            threadId: created.threadId,
+            pendingThread: created.pendingThread,
             prompt: value,
             attachments: await Promise.all(attachmentSnapshot.map(toUploadImageAttachment)),
           });
         } catch (submitError) {
           setPendingPromptSendStartedAtByThreadId((existing) => {
-            if (!(threadId in existing)) {
-              return existing;
-            }
             const next = { ...existing };
-            delete next[threadId];
+            delete next[created.threadId];
             return next;
           });
           throw submitError;
         }
+
         for (const attachment of attachmentSnapshot) {
           revokeComposerImageAttachmentPreview(attachment);
         }
         setComposerAttachmentsByPaneId((existing) => ({
           ...existing,
-          [paneId]: (existing[paneId] ?? []).filter(
-            (attachment) => !attachmentSnapshot.some((candidate) => candidate.id === attachment.id),
-          ),
+          [paneView.pane.id]: [],
         }));
+        setComposerDraftByPaneId((existing) => {
+          const next = { ...existing };
+          delete next[paneView.pane.id];
+          return next;
+        });
         setSubmitError(null);
-      } catch (error) {
-        setSubmitError(error instanceof Error ? error.message : "Failed to submit prompt.");
+        return;
       }
-    },
-    [
-      composerAttachmentsByPaneId,
-      respondToUserInput,
-      submitPrompt,
-    ],
-  );
-  const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
-  const effectiveTranscriptNowIso = frozenTranscriptNowIso ?? nowIso;
-  const activeThreadNow =
-    activeThreadId && (activeThreadTurnRunning || activePendingPromptSendStartedAt !== null)
-      ? effectiveTranscriptNowIso
-      : undefined;
-  const blocks = useMemo(() => {
-    if (activeThread) {
-      const nextBlocks = threadToTranscriptBlocks(activeThread, {
-        resolveAttachmentPreviewUrl: (attachmentId) =>
-          `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
-        orchestrationEvents: getThreadEvents(activeThread.id),
-        ...(activeThreadNow ? { now: activeThreadNow } : {}),
-      });
-      if (
-        activePendingPromptSendStartedAt !== null
-        && activeThreadNow
-        && !activeThreadTurnRunning
-      ) {
-        return [
-          ...nextBlocks,
-          {
-            type: "sending-state" as const,
-            startedAt: activePendingPromptSendStartedAt,
-            now: activeThreadNow,
-          },
-        ];
-      }
-      return nextBlocks;
-    }
-    if (activeSession) {
-      return [{ type: "status" as const, text: "Loading session history..." }];
-    }
-    if (consoleData.snapshot) {
-      if (consoleData.snapshot.projects.length === 0) {
-        return [{ type: "status" as const, text: "No workspace is loaded yet." }];
-      }
-      return [{ type: "status" as const, text: "No thread is available yet. Press + to open a new thread tab." }];
-    }
-    if (consoleData.error) {
-      return [{ type: "status" as const, text: `Connection error: ${consoleData.error}` }];
-    }
-    return [{ type: "status" as const, text: "Waiting for orchestration snapshot..." }];
-  }, [
-    activePendingPromptSendStartedAt,
-    activeSession,
-    activeThread,
-    activeThreadNow,
-    activeThreadTurnRunning,
-    attachmentPreviewBaseUrl,
-    consoleData.snapshot,
-    consoleData.error,
-    getThreadEvents,
-  ]);
 
-  const handleCreateSession = useCallback(() => {
-    const nextSessionCwd =
-      activeSession?.cwd ?? activeThread?.worktreePath ?? availableProject?.workspaceRoot ?? null;
-    const projectId = activeSession?.projectId ?? availableProject?.id ?? null;
-    if (!nextSessionCwd || !projectId) {
-      setSubmitError("No workspace is available for a new session.");
-      return;
-    }
-    const sessionWorktreePath =
-      activeThread?.worktreePath ??
-      (availableProject && nextSessionCwd !== availableProject.workspaceRoot ? nextSessionCwd : null);
-    createSessionWithSetup({
-      cwd: nextSessionCwd,
-      projectId,
-      createdAt: new Date().toISOString(),
-      selectedProvider: "codex",
-      interactionMode: activeThread?.interactionMode ?? "default",
-      branch: activeThread?.branch ?? null,
-      worktreePath: sessionWorktreePath,
-    });
-    setSubmitError(null);
-  }, [activeSession, activeThread, availableProject, createSessionWithSetup]);
-  const handleConfirmSetupPane = useCallback(async (
-    paneId: string,
-    projectId: OrchestrationProject["id"],
-    cwd: string,
-    setup: ConsolePaneSetup,
-  ) => {
-    if (!setup || pendingThreadSetupPaneIds.has(paneId)) {
-      return;
-    }
+      if (!paneView.threadId) {
+        throw new Error("No orchestration thread is available.");
+      }
 
-    setPendingThreadSetupPaneIds((existing) => new Set(existing).add(paneId));
-    try {
-      const result = await createThread({
-        projectId,
-        provider: setup.selectedProvider,
-        title: "New thread",
-        model: resolveModelForProvider(setup.selectedProvider, projectId),
-        interactionMode: setup.interactionMode,
-        branch: setup.branch,
-        worktreePath: setup.worktreePath,
-        createdAt: setup.createdAt,
-      });
-      completePaneSetup({
-        paneId,
-        threadId: result.threadId,
-        preferredProvider: setup.selectedProvider,
-        cwd,
-        projectId,
-        createdAt: setup.createdAt,
-        pending: true,
-        pendingThread: result.pendingThread,
-      });
+      const sendingStartedAt = new Date().toISOString();
+      setPendingPromptSendStartedAtByThreadId((existing) => ({
+        ...existing,
+        [paneView.threadId!]: sendingStartedAt,
+      }));
+      try {
+        await submitPrompt({
+          threadId: paneView.threadId,
+          pendingThread: paneView.pendingThread,
+          prompt: value,
+          attachments: await Promise.all(attachmentSnapshot.map(toUploadImageAttachment)),
+        });
+      } catch (submitError) {
+        setPendingPromptSendStartedAtByThreadId((existing) => {
+          const next = { ...existing };
+          delete next[paneView.threadId!];
+          return next;
+        });
+        throw submitError;
+      }
+
+      for (const attachment of attachmentSnapshot) {
+        revokeComposerImageAttachmentPreview(attachment);
+      }
+      setComposerAttachmentsByPaneId((existing) => ({
+        ...existing,
+        [paneView.pane.id]: [],
+      }));
       setSubmitError(null);
     } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : "Failed to create a new thread.");
+      setSubmitError(error instanceof Error ? error.message : "Failed to submit prompt.");
     } finally {
-      setPendingThreadSetupPaneIds((existing) => {
-        const next = new Set(existing);
-        next.delete(paneId);
-        return next;
-      });
-    }
-  }, [completePaneSetup, createThread, pendingThreadSetupPaneIds, resolveModelForProvider]);
-  const sessionViews = useMemo(() => {
-    return workspace.sessions
-      .filter((session) => session.id === activeSession?.id || mountedSessionIds.has(session.id))
-      .map((session) => {
-        const paneViews = session.panes.map((pane, index) => {
-          const history = session.histories.find((candidate) => candidate.id === pane.historyId) ?? null;
-          const threadId = history?.threadId ?? null;
-          const thread =
-            threadId ? (consoleData.threads.find((candidate) => candidate.id === threadId) ?? null) : null;
-          const pendingThread = !thread ? (history?.pendingThread ?? null) : null;
-          const pendingUserInputs = threadId ? getPendingUserInputs(threadId) : [];
-          const pendingUserInput = pendingUserInputs[0] ?? null;
-          const pendingQuestionIndex = pendingUserInput
-            ? (pendingUserInputQuestionIndexByRequestId[pendingUserInput.requestId] ?? 0)
-            : 0;
-          const pendingQuestion = pendingUserInput?.questions[pendingQuestionIndex] ?? null;
-          const setup = pane.setup;
-          const draft = composerDraftByPaneId[pane.id] ?? "";
-          const pendingShortcut = pendingQuestion
-            ? resolvePendingUserInputShortcut(draft, pendingQuestion.options)
-            : null;
-          const panePendingPromptSendStartedAt = threadId
-            ? (pendingPromptSendStartedAtByThreadId[threadId] ?? null)
-            : null;
-          const paneNow =
-            threadId && (isThreadTurnRunning(threadId) || panePendingPromptSendStartedAt !== null)
-              ? effectiveTranscriptNowIso
-              : undefined;
-          const blocks = thread
-            ? (() => {
-                const nextBlocks = threadToTranscriptBlocks(thread, {
-                  resolveAttachmentPreviewUrl: (attachmentId) =>
-                    `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
-                  orchestrationEvents: getThreadEvents(thread.id),
-                  ...(paneNow ? { now: paneNow } : {}),
-                });
-                if (
-                  panePendingPromptSendStartedAt !== null
-                  && paneNow
-                  && !isThreadTurnRunning(threadId)
-                ) {
-                  return [
-                    ...nextBlocks,
-                    {
-                      type: "sending-state" as const,
-                      startedAt: panePendingPromptSendStartedAt,
-                      now: paneNow,
-                    },
-                  ];
-                }
-                return nextBlocks;
-              })()
-            : setup
-              ? []
-              : history?.pending && pendingThread
-                ? (panePendingPromptSendStartedAt !== null && effectiveTranscriptNowIso
-                    ? [{
-                        type: "sending-state" as const,
-                        startedAt: panePendingPromptSendStartedAt,
-                        now: effectiveTranscriptNowIso,
-                      }]
-                    : [])
-              : [{
-                  type: "status" as const,
-                  text: history?.pending ? "Loading session history..." : "History unavailable in this session.",
-                }];
-
-          return {
-            pane,
-            setup,
-            history,
-            threadId,
-            thread,
-            pendingThread,
-            isActive: pane.id === session.activePaneId,
-            index,
-            blocks,
-            draft,
-            attachments: [...(composerAttachmentsByPaneId[pane.id] ?? [])],
-            pendingUserInput,
-            pendingQuestionIndex,
-            pendingQuestion,
-            draftAnswers: pendingUserInput
-              ? (pendingUserInputAnswersByRequestId[pendingUserInput.requestId] ?? {})
-              : {},
-            pendingShortcut,
-            pendingPromptSendStartedAt: panePendingPromptSendStartedAt,
-          };
+      if (paneView.pane.kind === "draft") {
+        setPendingDraftPaneIds((existing) => {
+          const next = new Set(existing);
+          next.delete(paneView.pane.id);
+          return next;
         });
+      }
+    }
+  }, [createThread, respondToUserInput, submitPrompt, workspace]);
 
-        return {
-          session,
-          paneViews,
-          isActive: session.id === activeSession?.id,
-        };
-      });
-  }, [
-    activeSession?.id,
-    attachmentPreviewBaseUrl,
-    composerAttachmentsByPaneId,
-    composerDraftByPaneId,
-    consoleData.threads,
-    getPendingUserInputs,
-    getThreadEvents,
-    isThreadTurnRunning,
-    mountedSessionIds,
-    effectiveTranscriptNowIso,
-    pendingPromptSendStartedAtByThreadId,
-    pendingUserInputAnswersByRequestId,
-    pendingUserInputQuestionIndexByRequestId,
-    workspace.sessions,
-  ]);
-  const activeSessionView = useMemo(
-    () => sessionViews.find((sessionView) => sessionView.session.id === activeSession?.id) ?? null,
-    [activeSession?.id, sessionViews],
-  );
-  const activePaneViews = activeSessionView?.paneViews ?? [];
-  const activeSetupPaneView = useMemo(
-    () => activePaneViews.find((paneView) => paneView.isActive && paneView.setup) ?? null,
-    [activePaneViews],
-  );
-  const activeSessionPaneLayoutKey = useMemo(
-    () => (activeSessionView
-      ? `${activeSessionView.session.id}:${activeSessionView.paneViews.map((paneView) => paneView.pane.id).join(",")}`
-      : null),
-    [activeSessionView],
-  );
   const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
     const commands: AppPaletteCommand[] = [];
-    const currentSession = activeSession;
     const canDispatchBackendCommands = consoleData.connectionState === "connected";
 
-    for (const session of workspace.sessions) {
+    for (const projectView of workspace.projectViews) {
       commands.push({
-        id: `session:${session.id}`,
+        id: `project:${projectView.project.id}`,
         label:
-          session.id === currentSession?.id
-            ? `[Session] Current · ${session.title}`
-            : `[Session] Switch · ${session.title}`,
-        contextText: `${session.cwd} · ${session.histories.length} histories`,
-        keywords: ["session", session.title, session.cwd],
+          projectView.project.id === workspace.activeProject?.id
+            ? `[Project] Current · ${projectView.project.title}`
+            : `[Project] Focus · ${projectView.project.title}`,
+        contextText: projectView.project.workspaceRoot,
+        keywords: ["project", projectView.project.title, projectView.project.workspaceRoot],
         run: () => {
-          activateSessionAndFocus(session.id);
+          workspace.activateProject(projectView.project.id);
+          focusPanePrompt(projectView.layout.tabs.find((tab) => tab.id === projectView.layout.activeTabId)?.activePaneId ?? null);
         },
       });
+
+      for (const thread of orderedThreadsByProjectId.get(projectView.project.id) ?? []) {
+        commands.push({
+          id: `thread:${thread.id}`,
+          label: `[Thread] Open · ${thread.title}`,
+          contextText: projectView.project.title,
+          keywords: ["thread", thread.title, getThreadFirstPrompt(thread), projectView.project.title],
+          run: () => handleOpenThread(thread.id),
+        });
+      }
     }
 
-    if (canDispatchBackendCommands && (currentSession || availableProject)) {
+    if (canDispatchBackendCommands && workspace.projectViews.length > 0) {
       commands.push({
-        id: "thread:new-tab",
-        label: "[Thread] New tab",
-        keywords: ["thread", "new", "tab", "workspace"],
-        run: () => handleCreateSession(),
+        id: "tab:new",
+        label: "[Tab] New",
+        keywords: ["tab", "new", "draft"],
+        run: handleCreateDraftTab,
       });
     }
 
-    if (currentSession && currentSession.panes.length > 1) {
-      currentSession.panes.forEach((pane, index) => {
+    if (workspace.activeProject && workspace.activePaneId) {
+      commands.push({
+        id: "pane:split",
+        label: "[Pane] Split active",
+        keywords: ["pane", "split", "draft"],
+        run: handleSplitActivePane,
+      });
+      commands.push({
+        id: "pane:close",
+        label: "[Pane] Close active",
+        keywords: ["pane", "close"],
+        run: () => workspace.closePane(workspace.activeProject!.id, workspace.activePaneId!),
+      });
+    }
+
+    if (workspace.activeProject && workspace.activeTab && workspace.activeLayout?.tabs.length && workspace.activeLayout.tabs.length > 1) {
+      commands.push({
+        id: "tab:close",
+        label: "[Tab] Close active",
+        keywords: ["tab", "close"],
+        run: handleCloseTab,
+      });
+    }
+
+    if (activePaneView?.setup) {
+      for (const provider of ["codex", "copilot"] satisfies ProviderKind[]) {
         commands.push({
-          id: `pane:${pane.id}:focus`,
+          id: `draft-provider:${provider}`,
           label:
-            pane.id === currentSession.activePaneId
-              ? `[Pane] Current · ${index + 1}`
-              : `[Pane] Focus · ${index + 1}`,
-          keywords: ["pane", "focus", `${index + 1}`],
+            activePaneView.setup.selectedProvider === provider
+              ? `[Draft] Provider · ${provider} · current`
+              : `[Draft] Provider · ${provider}`,
+          keywords: ["draft", "provider", provider],
           run: () => {
-            activatePaneAndFocus(pane.id);
+            workspace.updateDraftPane({
+              paneId: activePaneView.pane.id,
+              updater: (setup) => ({ ...setup, selectedProvider: provider }),
+            });
           },
         });
-      });
-      commands.push({
-        id: `pane:${currentSession.activePaneId}:close`,
-        label: "[Pane] Close active",
-        keywords: ["pane", "close", "split"],
-        run: () => {
-              if (currentSession.activePaneId) {
-                closePane(currentSession.activePaneId);
-              }
-            },
-          });
-        }
+      }
+    }
 
-    if (activeThread && canDispatchBackendCommands) {
-      if (activeProvider) {
-        for (const modelOption of MODEL_OPTIONS_BY_PROVIDER[activeProvider]) {
+    if (activePaneView?.thread && canDispatchBackendCommands) {
+      const activeThread = activePaneView.thread;
+      const activeProvider = activeThread.provider;
+      const activeReasoningEffort = activeThread.modelOptions?.[activeProvider]?.reasoningEffort ?? null;
+      const activeReasoningOptions = REASONING_EFFORT_OPTIONS_BY_PROVIDER[activeProvider];
+
+      for (const modelOption of MODEL_OPTIONS_BY_PROVIDER[activeProvider]) {
+        commands.push({
+          id: `model:${activeThread.id}:${modelOption.slug}`,
+          label:
+            activeThread.model === modelOption.slug
+              ? `[Model] Current · ${modelOption.name}`
+              : `[Model] Set · ${modelOption.name}`,
+          contextText: modelOption.slug,
+          keywords: ["model", activeProvider, modelOption.name, modelOption.slug],
+          run: () => setThreadModel(activeThread.id, activeProvider, modelOption.slug),
+        });
+      }
+
+      if (activeReasoningOptions.length > 0) {
+        commands.push({
+          id: `reasoning:${activeThread.id}:default`,
+          label:
+            activeReasoningEffort === null
+              ? "[Reasoning] Current · default"
+              : "[Reasoning] Set · default",
+          keywords: ["reasoning", "default", activeProvider],
+          run: () => setThreadReasoningEffort(activeThread.id, activeProvider, null),
+        });
+        for (const option of activeReasoningOptions) {
           commands.push({
-            id: `model:${activeThread.id}:${modelOption.slug}`,
+            id: `reasoning:${activeThread.id}:${option}`,
             label:
-              activeThread.model === modelOption.slug
-                ? `[Model] Current · ${modelOption.name} · ${activeProvider}`
-                : `[Model] Set · ${modelOption.name} · ${activeProvider}`,
-            contextText: modelOption.slug,
-            keywords: ["model", activeProvider, modelOption.name, modelOption.slug],
-            run: () => setThreadModel(activeThread.id, activeProvider, modelOption.slug),
+              activeReasoningEffort === option
+                ? `[Reasoning] Current · ${option}`
+                : `[Reasoning] Set · ${option}`,
+            keywords: ["reasoning", option, activeProvider],
+            run: () => setThreadReasoningEffort(activeThread.id, activeProvider, option),
           });
-        }
-
-        if (activeReasoningOptions.length > 0) {
-          commands.push({
-            id: `reasoning:${activeThread.id}:default`,
-            label:
-              activeReasoningEffort === null
-                ? `[Reasoning] Current · Default · ${activeProvider}`
-                : `[Reasoning] Set · Default · ${activeProvider}`,
-            contextText: activeThread.model ?? undefined,
-            keywords: ["reasoning", "default", activeProvider],
-            run: () => setThreadReasoningEffort(activeThread.id, activeProvider, null),
-          });
-
-          for (const reasoningOption of activeReasoningOptions) {
-            commands.push({
-              id: `reasoning:${activeThread.id}:${reasoningOption}`,
-              label:
-                activeReasoningEffort === reasoningOption
-                  ? `[Reasoning] Current · ${reasoningOption} · ${activeProvider}`
-                  : `[Reasoning] Set · ${reasoningOption} · ${activeProvider}`,
-              contextText: activeThread.model ?? undefined,
-              keywords: ["reasoning", activeProvider, reasoningOption, activeThread.model],
-              run: () =>
-                setThreadReasoningEffort(activeThread.id, activeProvider, reasoningOption),
-            });
-          }
         }
       }
 
       commands.push(
         {
-          id: `interaction:${activeThread.id}:default`,
-          label: "[Mode] Set · Default",
-          keywords: ["interaction", "default"],
+          id: `mode:${activeThread.id}:default`,
+          label: "[Mode] Set · default",
+          keywords: ["mode", "default"],
           run: () => setInteractionMode(activeThread.id, "default"),
         },
         {
-          id: `interaction:${activeThread.id}:plan`,
-          label: "[Mode] Set · Plan",
-          keywords: ["interaction", "plan"],
+          id: `mode:${activeThread.id}:plan`,
+          label: "[Mode] Set · plan",
+          keywords: ["mode", "plan"],
           run: () => setInteractionMode(activeThread.id, "plan"),
         },
         {
           id: `session:${activeThread.id}:stop`,
           label: "[Session] Stop active",
-          keywords: ["session", "stop", "disconnect"],
+          keywords: ["session", "stop"],
           run: () => stopSession(activeThread.id),
         },
       );
 
-      if (activeThreadTurnRunning && !consoleData.isInterruptingTurn && !consoleData.isStoppingSession) {
+      if (isThreadTurnRunning(activeThread.id) && !consoleData.isInterruptingTurn && !consoleData.isStoppingSession) {
         commands.push({
           id: `turn:${activeThread.id}:interrupt`,
           label: "[Turn] Interrupt active",
-          keywords: ["interrupt", "cancel", "stop turn"],
+          keywords: ["turn", "interrupt", "stop"],
           run: () => interruptTurn(activeThread.id),
-        });
-      }
-    }
-
-    for (const pendingUserInput of activePendingUserInputs) {
-      if (!canDispatchBackendCommands) {
-        continue;
-      }
-      if (consoleData.respondingUserInputRequestIds.includes(pendingUserInput.requestId)) {
-        continue;
-      }
-      if (pendingUserInput.questions.length === 1) {
-        const question = pendingUserInput.questions[0];
-        if (!question) continue;
-        for (const option of question.options) {
-          commands.push({
-            id: `user-input:${pendingUserInput.requestId}:${question.id}:${option.label}`,
-            label: `[Input] ${question.header} · ${option.label}`,
-            contextText: option.description,
-            keywords: ["user input", question.header, question.question, option.label],
-            run: () =>
-              activeThread
-                ? respondToUserInput(activeThread.id, pendingUserInput.requestId, {
-                    [question.id]: option.label,
-                  })
-                : Promise.resolve(),
-          });
-        }
-      } else {
-        commands.push({
-          id: `user-input:${pendingUserInput.requestId}:prompt`,
-          label: `[Input] Answer in prompt · ${pendingUserInput.questions.length} questions`,
-          keywords: ["user input", "prompt", "answer"],
-            run: () => {
-              requestAnimationFrame(() => {
-                focusActivePanePrompt({ reveal: true });
-              });
-            },
         });
       }
     }
 
     return commands;
   }, [
-      activePendingUserInputs,
-      availableProject,
-    activeSession,
-    activeThread,
-    activeThreadTurnRunning,
+    activePaneView,
     consoleData.connectionState,
     consoleData.isInterruptingTurn,
     consoleData.isStoppingSession,
-    consoleData.respondingUserInputRequestIds,
-    handleCreateSession,
+    focusPanePrompt,
+    handleCloseTab,
+    handleCreateDraftTab,
+    handleOpenThread,
+    handleSplitActivePane,
     interruptTurn,
-    activatePaneAndFocus,
-    activateSessionAndFocus,
-    activeProvider,
-    activeReasoningEffort,
-    activeReasoningOptions,
-    focusActivePanePrompt,
-    respondToUserInput,
+    isThreadTurnRunning,
+    orderedThreadsByProjectId,
+    setInteractionMode,
     setThreadModel,
     setThreadReasoningEffort,
-    setInteractionMode,
     stopSession,
-    closePane,
-    workspace.sessions,
+    workspace,
   ]);
+
   const filteredCommands = useMemo(
     () => filterCommandPaletteCommands(paletteCommands, paletteQuery),
     [paletteCommands, paletteQuery],
   );
 
   useEffect(() => {
-    const livePaneIds = new Set(
-      workspace.sessions.flatMap((session) => session.panes.map((pane) => pane.id)),
-    );
-    const liveSessionIds = new Set(workspace.sessions.map((session) => session.id));
-    setComposerAttachmentsByPaneId((existing) => {
-      let changed = false;
-      const nextEntries = Object.entries(existing)
-        .filter(([paneId]) => livePaneIds.has(paneId))
-        .map(([paneId, attachments]) => {
-          if (livePaneIds.has(paneId)) {
-            return [paneId, attachments] as const;
-          }
-          changed = true;
-          attachments.forEach(revokeComposerImageAttachmentPreview);
-          return null;
-        })
-        .filter((entry): entry is readonly [string, ReadonlyArray<ComposerImageAttachment>] => entry !== null);
-      if (!changed && nextEntries.length === Object.keys(existing).length) {
-        return existing;
-      }
-      Object.entries(existing).forEach(([paneId, attachments]) => {
-        if (!livePaneIds.has(paneId)) {
-          changed = true;
-          attachments.forEach(revokeComposerImageAttachmentPreview);
-        }
-      });
-      return Object.fromEntries(nextEntries);
-    });
-    setComposerDraftByPaneId((existing) =>
-      Object.fromEntries(
-        Object.entries(existing).filter(([paneId]) => livePaneIds.has(paneId)),
-      ),
-    );
-    setMountedSessionIds((existing) => {
-      const next = new Set([...existing].filter((sessionId) => liveSessionIds.has(sessionId)));
-      if (next.size === existing.size && [...next].every((sessionId) => existing.has(sessionId))) {
-        return existing;
-      }
-      return next;
-    });
-    initializedPaneIdsRef.current = Object.fromEntries(
-      Object.entries(initializedPaneIdsRef.current).filter(([paneId]) => livePaneIds.has(paneId)),
-    );
-  }, [workspace.sessions]);
+    setSelectedCommandIndex((current) => Math.min(current, Math.max(filteredCommands.length - 1, 0)));
+  }, [filteredCommands.length]);
 
-  useEffect(() => {
-    if (!activeSession) {
-      return;
-    }
-
-    setMountedSessionIds((existing) => {
-      if (existing.has(activeSession.id)) {
-        return existing;
-      }
-      return new Set(existing).add(activeSession.id);
-    });
-  }, [activeSession]);
-
-  useEffect(() => {
-    return () => {
-      Object.values(composerAttachmentsRef.current).flat().forEach(revokeComposerImageAttachmentPreview);
-    };
-  }, []);
-
-  useEffect(() => {
-    const activeSetupPaneId = activeSetupPaneView?.pane.id ?? null;
-    const previousActiveSetupPaneId = previousActiveSetupPaneIdRef.current;
-    previousActiveSetupPaneIdRef.current = activeSetupPaneId;
-    if (!activePaneId || activeSetupPaneId === activePaneId) {
-      return;
-    }
-
-    const shouldAutoFocusInitialReadyPane = !hasInitiallyFocusedPromptRef.current;
-    const hasJustFinishedActivePaneSetup =
-      previousActiveSetupPaneId === activePaneId && activeSetupPaneId !== activePaneId;
-    if (!shouldAutoFocusInitialReadyPane && !hasJustFinishedActivePaneSetup) {
-      return;
-    }
-
-    const handle = paneRefs.current[activePaneId];
-    if (!handle) {
-      return;
-    }
-    hasInitiallyFocusedPromptRef.current = true;
-    requestAnimationFrame(() => {
-      handle.focusPrompt();
-    });
-  }, [activePaneId, activeSetupPaneView]);
-
-  useEffect(() => {
-    if (!activeSessionView || !activeSessionPaneLayoutKey) {
-      return;
-    }
-
-    requestAnimationFrame(() => {
-      activeSessionView.paneViews.forEach((paneView) => {
-        if (initializedPaneIdsRef.current[paneView.pane.id]) {
-          return;
-        }
-
-        const handle = paneRefs.current[paneView.pane.id];
-        if (!handle) {
-          return;
-        }
-
-        initializedPaneIdsRef.current[paneView.pane.id] = true;
-        handle.scrollToBottom();
-      });
-    });
-  }, [activeSessionPaneLayoutKey, activeSessionView]);
-
-  useEffect(() => {
-    if (selectedCommandIndex < filteredCommands.length) {
-      return;
-    }
-
-    setSelectedCommandIndex(0);
-  }, [filteredCommands.length, selectedCommandIndex]);
-
-  const closePalette = useCallback(() => {
-    setPaletteOpen(false);
-    setPaletteQuery("");
-    setSelectedCommandIndex(0);
-    requestAnimationFrame(() => {
-      focusActivePanePrompt();
-    });
-  }, [focusActivePanePrompt]);
-
-  const runPaletteCommand = useCallback(async (command: CommandPaletteCommand) => {
-    const executable = command as AppPaletteCommand;
-    try {
-      await executable.run();
-      setSubmitError(null);
-    } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : `Command "${command.label}" failed.`);
-    } finally {
-      closePalette();
-    }
+  const runPaletteCommand = useCallback(async (command: AppPaletteCommand) => {
+    closePalette();
+    await command.run();
   }, [closePalette]);
-
-  const routeTypedKeyToPrompt = useCallback((event: KeyboardEvent) => {
-    if (paletteOpen || activeSetupPaneView?.setup || !activePaneId || event.isComposing) {
-      return false;
-    }
-    if (event.ctrlKey || event.metaKey || event.altKey) {
-      return false;
-    }
-    const target = event.target instanceof HTMLElement ? event.target : null;
-    if (target?.closest(".transcript-prompt__input")) {
-      return false;
-    }
-    if (target?.closest("input, textarea, select, [contenteditable='true']")) {
-      return false;
-    }
-    const handle = paneRefs.current[activePaneId];
-    if (!handle) {
-      return false;
-    }
-
-    const routeToPrompt = () => {
-      handle.scrollToBottom();
-      focusActivePanePrompt();
-    };
-
-    if (event.key === "Backspace") {
-      event.preventDefault();
-      routeToPrompt();
-      handle.deletePromptBackward();
-      return true;
-    }
-    if (event.key === "Delete") {
-      event.preventDefault();
-      routeToPrompt();
-      handle.deletePromptForward();
-      return true;
-    }
-    if (event.key === "Enter") {
-      event.preventDefault();
-      routeToPrompt();
-      if (event.shiftKey) {
-        handle.insertPromptText("\n");
-      } else {
-        handle.submitPrompt();
-      }
-      return true;
-    }
-    if (event.key.length !== 1) {
-      return false;
-    }
-
-    event.preventDefault();
-    routeToPrompt();
-    handle.insertPromptText(event.key);
-    return true;
-  }, [activePaneId, activeSetupPaneView, focusActivePanePrompt, paletteOpen]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      const isPaletteShortcut =
-        event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "a";
-
-      if (isPaletteShortcut) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setPaletteOpen((open) => {
-          const nextOpen = !open;
-          if (!nextOpen) {
-            setPaletteQuery("");
-            setSelectedCommandIndex(0);
-          }
-          return nextOpen;
-        });
+        if (paletteOpen) {
+          closePalette();
+        } else {
+          openPalette();
+        }
         return;
       }
 
@@ -1359,135 +1105,71 @@ export function App() {
         return;
       }
 
-      if (
-        activeSetupPaneView?.setup &&
-        !event.ctrlKey &&
-        !event.metaKey &&
-        !event.altKey
-      ) {
-        const providers: ReadonlyArray<ProviderKind> = ["codex", "copilot"];
-        const currentIndex = providers.indexOf(activeSetupPaneView.setup.selectedProvider);
-        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-          event.preventDefault();
-          const delta = event.key === "ArrowDown" ? 1 : -1;
-          const nextProvider = providers[Math.max(0, Math.min(providers.length - 1, currentIndex + delta))];
-          if (nextProvider) {
-            setSetupHoverSuppressedPaneIds((existing) => new Set(existing).add(activeSetupPaneView.pane.id));
-            updatePaneSetup({ paneId: activeSetupPaneView.pane.id, selectedProvider: nextProvider });
-          }
-          return;
-        }
-        if (event.key === "1" || event.key === "2") {
-          event.preventDefault();
-          const nextProvider = providers[Number.parseInt(event.key, 10) - 1];
-          if (nextProvider) {
-            setSetupHoverSuppressedPaneIds((existing) => new Set(existing).add(activeSetupPaneView.pane.id));
-            updatePaneSetup({ paneId: activeSetupPaneView.pane.id, selectedProvider: nextProvider });
-          }
-          return;
-        }
-        if (event.key === "Enter") {
-          event.preventDefault();
-          const projectId = activeSession?.projectId ?? availableProject?.id ?? null;
-          const cwd = activeSession?.cwd ?? availableProject?.workspaceRoot ?? null;
-          if (!projectId || !cwd) {
-            return;
-          }
-          void handleConfirmSetupPane(
-            activeSetupPaneView.pane.id,
-            projectId,
-            cwd,
-            activeSetupPaneView.setup,
-          );
-          return;
-        }
-      }
-
-      if (routeTypedKeyToPrompt(event)) {
+      if (!workspace.activePaneId || isEditableTarget(event.target)) {
         return;
       }
 
-      if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === "1") {
+      if (
+        typeof window !== "undefined"
+        && typeof document !== "undefined"
+        && hasNonCollapsedSelectionInsideElement(window.getSelection(), document.body)
+      ) {
+        return;
+      }
+
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
         event.preventDefault();
-        focusActivePanePrompt({ reveal: true });
-      } else if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === "4") {
+        paneRefs.current[workspace.activePaneId]?.insertPromptText(event.key);
+        return;
+      }
+
+      if (event.key === "Backspace") {
         event.preventDefault();
-        if (activePaneId) {
-          paneRefs.current[activePaneId]?.focusHistory();
-        }
-      } else if (event.key === "Escape") {
-        event.preventDefault();
-        focusActivePanePrompt();
+        paneRefs.current[workspace.activePaneId]?.deletePromptBackward();
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown, true);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown, true);
-    };
-  }, [
-    activePaneId,
-    activeSession?.cwd,
-    activeSession?.projectId,
-    activeSetupPaneView,
-    availableProject?.id,
-    availableProject?.workspaceRoot,
-    closePalette,
-    focusActivePanePrompt,
-    handleConfirmSetupPane,
-    paletteOpen,
-    routeTypedKeyToPrompt,
-    updatePaneSetup,
-  ]);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [closePalette, openPalette, paletteOpen, workspace.activePaneId]);
 
   const footerText = useMemo(() => {
-    const pathText =
-      activeThread?.worktreePath
-      ?? activePendingThread?.worktreePath
-      ?? workspace.activeSession?.cwd
-      ?? availableProject?.workspaceRoot
-      ?? "no project";
-    if (workspace.sessions.length === 0 || activeSetupPaneView?.setup) {
-      return pathText;
+    if (!workspace.activeProject) {
+      return submitError ?? "No project loaded.";
     }
-    const provider = activeProvider ?? "no-provider";
-    const model = activeThread?.model ?? activePendingThread?.model ?? "no-model";
-    const reasoning =
-      activeReasoningEffort === null
-        ? activeDefaultReasoningEffort
-          ? `default (${activeDefaultReasoningEffort})`
-          : "default"
-        : activeReasoningEffort;
-    return `${provider} · ${model} · ${reasoning} · ${pathText}`;
-  }, [
-    activeDefaultReasoningEffort,
-    activePendingThread?.model,
-    activePendingThread?.worktreePath,
-    activeProvider,
-    activeSetupPaneView,
-    availableProject?.workspaceRoot,
-    activeReasoningEffort,
-    activeThread?.model,
-    workspace.sessions.length,
-    workspace.activeSession?.cwd,
-  ]);
+
+    const paneView = activePaneView;
+    if (!paneView) {
+      return submitError ?? `${workspace.activeProject.title} · ${workspace.activeProject.workspaceRoot}`;
+    }
+
+    if (paneView.setup) {
+      return submitError
+        ?? `Draft · ${paneView.setup.selectedProvider} · ${paneView.cwd ?? workspace.activeProject.workspaceRoot}`;
+    }
+
+    if (paneView.thread) {
+      return submitError
+        ?? `${paneView.thread.title} · ${paneView.thread.provider} · ${paneView.thread.model ?? DEFAULT_MODEL_BY_PROVIDER[paneView.thread.provider]} · ${paneView.cwd ?? workspace.activeProject.workspaceRoot}`;
+    }
+
+    return submitError ?? `${workspace.activeProject.title} · ${workspace.activeProject.workspaceRoot}`;
+  }, [activePaneView, submitError, workspace.activeProject]);
+
+  const shellClassName = `console-shell${isDesktop ? " console-shell--desktop" : ""}`;
+  const activePaneGridClassName = activeTab
+    ? `project-pane-grid project-pane-grid--${Math.min(Math.max(activeTab.paneIds.length, 1), 6)}`
+    : "project-pane-grid project-pane-grid--1";
 
   if (!consoleData.snapshot && !consoleData.error) {
     return (
       <>
-        <div className="bg-image" />
-        <div className="bg-gradient" />
-        <div className={isDesktop ? "console-shell console-shell--desktop" : "console-shell"}>
-          <div
-            className={isDesktop ? "session-tabs session-tabs--desktop" : "session-tabs"}
-            aria-hidden="true"
-          >
-            <div className="session-tabs__list" />
-            {isDesktop ? <div className="session-tabs__drag-space" aria-hidden="true" /> : null}
+        <div className="bg-image" aria-hidden="true" />
+        <div className="bg-gradient" aria-hidden="true" />
+        <div className={shellClassName}>
+          <div className="loading-screen loading-screen--shell">
+            <span className="loading-screen__text">{renderLoadingText("connecting to orchestration")}</span>
           </div>
-          <main className="loading-screen loading-screen--shell" role="status" aria-live="polite">
-            <span className="loading-screen__text">{renderLoadingText("connecting to backend...")}</span>
-          </main>
         </div>
       </>
     );
@@ -1495,154 +1177,269 @@ export function App() {
 
   return (
     <>
-      <div className="bg-image" />
-      <div className="bg-gradient" />
-      <div className={isDesktop ? "console-shell console-shell--desktop" : "console-shell"}>
-        <div
-          className={isDesktop ? "session-tabs session-tabs--desktop" : "session-tabs"}
-        >
-          <div className="session-tabs__list" aria-label="Workspace sessions">
-            {workspace.sessions.map((session) => (
-              <button
-                key={session.id}
-                type="button"
-                className={
-                  session.id === activeSession?.id
-                    ? "session-tab session-tab--active"
-                    : "session-tab"
-                }
-                onClick={() => activateSessionAndFocus(session.id)}
-                onMouseDown={(event) => {
-                  if (event.button !== 1) {
-                    handleToolbarButtonMouseDown(event);
-                    return;
-                  }
-                  event.preventDefault();
-                  event.stopPropagation();
-                  closeSession(session.id);
-                }}
-                tabIndex={-1}
-                title={session.cwd}
-              >
-                <span className="session-tab__title">{session.title}</span>
+      <div className="bg-image" aria-hidden="true" />
+      <div className="bg-gradient" aria-hidden="true" />
+      <div className={shellClassName}>
+        <div className="project-workspace">
+          <aside className="project-sidebar" style={{ width: workspace.sidebarWidth }}>
+            <div className="project-sidebar__toolbar">
+              <button type="button" className="project-sidebar__toolbarButton" onClick={handleCreateDraftTab}>
+                + tab
               </button>
-            ))}
-          </div>
-            <button
-              type="button"
-              className="session-tab session-tab--create"
-              onClick={() => handleCreateSession()}
-              onMouseDown={handleToolbarButtonMouseDown}
-              disabled={!availableProject}
-              tabIndex={-1}
-              title={availableProject ? "New thread" : "No workspace available"}
-            >
-              +
-            </button>
-          {isDesktop ? <div className="session-tabs__drag-space" aria-hidden="true" /> : null}
-        </div>
-        <main className={activePaneViews.length > 1 ? "conversation-scroll conversation-scroll--split" : "conversation-scroll"}>
-          {workspace.sessions.length === 0 ? (
-            <div className="conversation-session">
-              <div className="pane-grid">
-                <section className="conversation-pane conversation-pane--active">
-                  <div className="transcript-shell">
-                    <EmptyWorkspaceSurface canCreate={availableProject !== null} onCreate={handleCreateSession} />
-                  </div>
-                </section>
-              </div>
+              <span className="project-sidebar__origin">{resolveWsHttpOrigin()}</span>
             </div>
-          ) : sessionViews.length > 0 ? (
-            sessionViews.map((sessionView) => (
-              <div
-                key={sessionView.session.id}
-                className={
-                  sessionView.paneViews.length > 1
-                    ? "conversation-session conversation-session--split"
-                    : "conversation-session"
-                }
-                hidden={!sessionView.isActive}
-              >
-                <div className={sessionView.paneViews.length > 1 ? "pane-grid pane-grid--split" : "pane-grid"}>
-                  {sessionView.paneViews.map((paneView) => (
-                    <section
-                      key={paneView.pane.id}
-                      className={
-                        paneView.isActive
-                          ? "conversation-pane conversation-pane--active"
-                          : "conversation-pane"
+            <div className="project-tree" role="tree" aria-label="Projects">
+              {workspace.projectViews.map((projectView) => {
+                const threads = orderedThreadsByProjectId.get(projectView.project.id) ?? [];
+                const isActiveProject = projectView.project.id === workspace.activeProject?.id;
+
+                return (
+                  <section
+                    key={projectView.project.id}
+                    className={`project-tree__section${isActiveProject ? " project-tree__section--active" : ""}`}
+                    draggable
+                    onDragStart={() => setDraggedProjectId(projectView.project.id)}
+                    onDragOver={(event) => {
+                      if (!draggedProjectId || draggedProjectId === projectView.project.id) {
+                        return;
                       }
-                      onMouseDownCapture={() => activatePane(paneView.pane.id)}
+                      event.preventDefault();
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      if (!draggedProjectId || draggedProjectId === projectView.project.id) {
+                        return;
+                      }
+                      const reordered = workspace.projectViews.map((view) => view.project.id).filter((id) => id !== draggedProjectId);
+                      const targetIndex = reordered.indexOf(projectView.project.id);
+                      reordered.splice(targetIndex, 0, draggedProjectId as OrchestrationProject["id"]);
+                      workspace.reorderProjects(reordered);
+                      setDraggedProjectId(null);
+                    }}
+                    onDragEnd={() => setDraggedProjectId(null)}
+                  >
+                    <div className="project-tree__header">
+                      <button
+                        type="button"
+                        className="project-tree__toggle"
+                        onClick={() => workspace.toggleProjectCollapsed(projectView.project.id)}
+                        aria-label={projectView.collapsed ? "Expand project" : "Collapse project"}
+                      >
+                        {projectView.collapsed ? "+" : "−"}
+                      </button>
+                      <button
+                        type="button"
+                        className="project-tree__projectButton"
+                        onClick={() => {
+                          workspace.activateProject(projectView.project.id);
+                          focusPanePrompt(
+                            projectView.layout.tabs.find((tab) => tab.id === projectView.layout.activeTabId)?.activePaneId ?? null,
+                          );
+                        }}
+                      >
+                        <span className="project-tree__projectTitle">{projectView.project.title}</span>
+                        <span className="project-tree__projectMeta">{threads.length}</span>
+                      </button>
+                    </div>
+                    {!projectView.collapsed ? (
+                      <div className="project-tree__threads">
+                        {threads.length === 0 ? (
+                          <div className="project-tree__empty">No threads yet.</div>
+                        ) : threads.map((thread) => {
+                          const status = getThreadStatus(thread, nowIso, isThreadTurnRunning(thread.id));
+                          const tooltip = getThreadFirstPrompt(thread);
+                          const mounted = projectView.layout.tabs.some((tab) =>
+                            tab.paneIds.some((paneId) => {
+                              const pane = projectView.layout.panesById[paneId];
+                              return pane?.kind === "thread" && pane.threadId === thread.id;
+                            })
+                          );
+
+                          return (
+                            <button
+                              key={thread.id}
+                              type="button"
+                              className={`project-thread${thread.id === workspace.activeThreadId ? " project-thread--active" : ""}${mounted ? " project-thread--mounted" : ""}`}
+                              title={tooltip}
+                              draggable
+                              onDragStart={() => setDraggedThreadId(thread.id)}
+                              onDragEnd={() => setDraggedThreadId(null)}
+                              onClick={() => handleOpenThread(thread.id)}
+                            >
+                              <span className="project-thread__title">{thread.title}</span>
+                              <span className={`project-thread__status project-thread__status--${status.tone}`}>{status.label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </section>
+                );
+              })}
+            </div>
+          </aside>
+          <div
+            className="project-sidebar__resizeHandle"
+            onMouseDown={(event) => {
+              event.preventDefault();
+              const startX = event.clientX;
+              const startWidth = workspace.sidebarWidth;
+              const handleMouseMove = (moveEvent: MouseEvent) => {
+                workspace.setSidebarWidth(startWidth + (moveEvent.clientX - startX));
+              };
+              const handleMouseUp = () => {
+                window.removeEventListener("mousemove", handleMouseMove);
+                window.removeEventListener("mouseup", handleMouseUp);
+              };
+              window.addEventListener("mousemove", handleMouseMove);
+              window.addEventListener("mouseup", handleMouseUp);
+            }}
+          />
+          <main className="project-main">
+            {workspace.activeProject && activeLayout && activeTab ? (
+              <>
+                <div className="project-tabs">
+                  {activeLayout.tabs.map((tab, index) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      className={`project-tab${tab.id === activeLayout.activeTabId ? " project-tab--active" : ""}`}
+                      onClick={() => {
+                        workspace.activateTab(workspace.activeProject!.id, tab.id);
+                        focusPanePrompt(tab.activePaneId);
+                      }}
                     >
-                      <div className="transcript-shell">
+                      <span className="project-tab__title">Tab {index + 1}</span>
+                      <span className="project-tab__meta">{tab.paneIds.length}</span>
+                    </button>
+                  ))}
+                  <button type="button" className="project-tab project-tab--create" onClick={handleCreateDraftTab}>
+                    +
+                  </button>
+                </div>
+                <div className={activePaneGridClassName}>
+                  {paneViews.map((paneView) => {
+                    const status = paneView.thread ? getThreadStatus(paneView.thread, nowIso, isThreadTurnRunning(paneView.thread.id)) : null;
+                    const dropAllowed = draggedThreadId
+                      ? (consoleData.threads.find((thread) => thread.id === draggedThreadId)?.projectId === paneView.project.id)
+                      : false;
+
+                    return (
+                      <section
+                        key={paneView.pane.id}
+                        className={`conversation-pane${paneView.isActive ? " conversation-pane--active" : ""}${dragOverPaneId === paneView.pane.id ? " conversation-pane--drag-over" : ""}${highlightedPaneId === paneView.pane.id ? " conversation-pane--highlight" : ""}`}
+                        onClick={() => workspace.activatePane(paneView.project.id, paneView.tabId, paneView.pane.id)}
+                        onDragOver={(event: ReactDragEvent<HTMLElement>) => {
+                          if (!dropAllowed) {
+                            return;
+                          }
+                          event.preventDefault();
+                          setDragOverPaneId(paneView.pane.id);
+                        }}
+                        onDragLeave={() => {
+                          setDragOverPaneId((current) => (current === paneView.pane.id ? null : current));
+                        }}
+                        onDrop={(event: ReactDragEvent<HTMLElement>) => {
+                          event.preventDefault();
+                          setDragOverPaneId(null);
+                          if (!draggedThreadId) {
+                            return;
+                          }
+                          const thread = consoleData.threads.find((candidate) => candidate.id === draggedThreadId) ?? null;
+                          if (!thread || thread.projectId !== paneView.project.id) {
+                            return;
+                          }
+                          workspace.mountThreadInPane({
+                            projectId: paneView.project.id,
+                            paneId: paneView.pane.id,
+                            threadId: draggedThreadId as ThreadId,
+                          });
+                          focusPanePrompt(paneView.pane.id);
+                          setDraggedThreadId(null);
+                        }}
+                      >
+                        <header className="conversation-pane__header">
+                          <div className="conversation-pane__titleBlock">
+                            <div className="conversation-pane__eyebrow">
+                              {paneView.setup ? "Draft thread" : paneView.project.title}
+                            </div>
+                            <div className="conversation-pane__title">
+                              {paneView.thread
+                                ? paneView.thread.title
+                                : paneView.setup
+                                  ? "New thread"
+                                  : "Loading thread"}
+                            </div>
+                            <div className="conversation-pane__meta">
+                              {paneView.setup
+                                ? `${paneView.setup.selectedProvider} · ${paneView.cwd ?? paneView.project.workspaceRoot}`
+                                : paneView.thread
+                                  ? `${paneView.thread.provider} · ${paneView.thread.model} · ${status?.label ?? ""}`
+                                  : `${paneView.provider} · connecting`}
+                            </div>
+                          </div>
+                          <div className="conversation-pane__actions">
+                            <button type="button" className="conversation-pane__action" onClick={(event) => {
+                              event.stopPropagation();
+                              workspace.activatePane(paneView.project.id, paneView.tabId, paneView.pane.id);
+                              handleSplitActivePane();
+                            }}
+                            >
+                              split
+                            </button>
+                            <button
+                              type="button"
+                              className="conversation-pane__action"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                workspace.closePane(paneView.project.id, paneView.pane.id);
+                              }}
+                            >
+                              close
+                            </button>
+                          </div>
+                        </header>
                         {paneView.setup ? (
-                          (() => {
-                            const setup = paneView.setup;
-                            return (
-                          <ThreadSetupSurface
-                            selectedProvider={setup.selectedProvider}
-                            busy={pendingThreadSetupPaneIds.has(paneView.pane.id)}
-                            hoverSelectionSuppressed={setupHoverSuppressedPaneIds.has(paneView.pane.id)}
-                            onHoverSelectionResume={() =>
-                              setSetupHoverSuppressedPaneIds((existing) => {
-                                if (!existing.has(paneView.pane.id)) {
-                                  return existing;
-                                }
-                                const next = new Set(existing);
-                                next.delete(paneView.pane.id);
-                                return next;
-                              })}
-                            onSelect={(provider) =>
-                              updatePaneSetup({ paneId: paneView.pane.id, selectedProvider: provider })}
-                            onConfirm={(provider) => {
-                              updatePaneSetup({ paneId: paneView.pane.id, selectedProvider: provider });
-                              void handleConfirmSetupPane(
-                                paneView.pane.id,
-                                sessionView.session.projectId,
-                                sessionView.session.cwd,
-                                {
-                                  type: setup.type,
-                                  selectedProvider: provider,
-                                  createdAt: setup.createdAt,
-                                  interactionMode: setup.interactionMode,
-                                  branch: setup.branch,
-                                  worktreePath: setup.worktreePath,
-                                },
-                              );
+                          <DraftPaneHeader
+                            setup={paneView.setup}
+                            busy={pendingDraftPaneIds.has(paneView.pane.id)}
+                            onSelectProvider={(provider) => {
+                              workspace.updateDraftPane({
+                                paneId: paneView.pane.id,
+                                updater: (setup) => ({ ...setup, selectedProvider: provider }),
+                              });
                             }}
                           />
-                            );
-                          })()
-                        ) : (
+                        ) : null}
+                        <div className="conversation-pane__body">
                           <TranscriptRenderer
                             ref={(handle) => {
+                              if (!handle) {
+                                delete paneRefs.current[paneView.pane.id];
+                                return;
+                              }
                               paneRefs.current[paneView.pane.id] = handle;
+                              if (!initializedPaneIdsRef.current[paneView.pane.id]) {
+                                initializedPaneIdsRef.current[paneView.pane.id] = true;
+                                const persistedDraft = composerDraftByPaneId[paneView.pane.id];
+                                if (persistedDraft) {
+                                  handle.insertPromptText(persistedDraft);
+                                }
+                              }
                             }}
                             blocks={paneView.blocks}
                             composerAttachments={paneView.attachments}
-                            cwd={
-                              sessionView.session.cwd
-                              ?? paneView.thread?.worktreePath
-                              ?? paneView.pendingThread?.worktreePath
-                              ?? null
-                            }
-                            interactionMode={
-                              paneView.thread?.interactionMode
-                              ?? paneView.pendingThread?.interactionMode
-                              ?? "default"
-                            }
+                            cwd={paneView.cwd}
+                            interactionMode={paneView.interactionMode}
                             promptFocusDisabled={paletteOpen}
                             {...(paneView.pendingUserInput && paneView.pendingQuestion
-                              ? {
-                                  pendingUserInputHighlight: {
-                                    requestId: paneView.pendingUserInput.requestId,
-                                    questionIndex: paneView.pendingQuestionIndex,
-                                    ...(paneView.pendingShortcut
-                                      ? { optionIndex: paneView.pendingShortcut.optionIndex }
-                                      : {}),
-                                  },
-                                }
-                              : {})}
+                                ? {
+                                    pendingUserInputHighlight: {
+                                      requestId: paneView.pendingUserInput.requestId,
+                                      questionIndex: paneView.pendingQuestionIndex,
+                                    },
+                                  }
+                                : {})}
                             onAddImageFiles={(files) => handleAddImageFilesForPane(paneView.pane.id, files)}
                             onDraftChange={(value) => setComposerDraftForPane(paneView.pane.id, value)}
                             onRemoveImage={(attachmentId) => handleRemoveImageForPane(paneView.pane.id, attachmentId)}
@@ -1652,76 +1449,33 @@ export function App() {
                                 fromTurnCount: lookup.fromTurnCount,
                                 toTurnCount: lookup.toTurnCount,
                               })}
-                            onSubmit={(value) =>
-                              handleSubmit(
-                                paneView.pane.id,
-                                paneView.threadId,
-                                paneView.pendingThread,
-                                paneView.pendingUserInput,
-                                paneView.pendingQuestion,
-                                paneView.pendingQuestionIndex,
-                                paneView.draftAnswers,
-                                value,
-                              )}
+                            onSubmit={(value) => handleSubmit(paneView, value)}
                             submitDisabled={
-                              paneView.pendingPromptSendStartedAt !== null
-                              || !canSubmitPromptForThread(paneView.threadId, paneView.pendingThread)
+                              pendingDraftPaneIds.has(paneView.pane.id)
+                              || paneView.pendingPromptSendStartedAt !== null
+                              || (paneView.threadId
+                                ? !canSubmitPromptForThread(paneView.threadId, paneView.pendingThread)
+                                : false)
                             }
                           />
-                        )}
-                      </div>
-                    </section>
-                  ))}
-                </div>
-              </div>
-            ))
-          ) : (
-            <div className="transcript-shell">
-              <TranscriptRenderer
-                ref={(handle) => {
-                  paneRefs.current.bootstrap = handle;
-                }}
-                blocks={blocks}
-                composerAttachments={composerAttachments}
-                cwd={activeSession?.cwd ?? activeThread?.worktreePath ?? availableProject?.workspaceRoot ?? null}
-                interactionMode={activeThread?.interactionMode ?? "default"}
-                promptFocusDisabled={paletteOpen}
-                resolveInlineDiff={(lookup) =>
-                  getTurnDiff({
-                    threadId: lookup.threadId as ThreadId,
-                    fromTurnCount: lookup.fromTurnCount,
-                    toTurnCount: lookup.toTurnCount,
+                        </div>
+                      </section>
+                    );
                   })}
-                {...(activePendingUserInput && activePendingQuestion
-                  ? {
-                      pendingUserInputHighlight: {
-                        requestId: activePendingUserInput.requestId,
-                        questionIndex: activePendingQuestionIndex,
-                        ...(activePendingShortcut
-                          ? { optionIndex: activePendingShortcut.optionIndex }
-                          : {}),
-                      },
-                    }
-                  : {})}
-                onAddImageFiles={(files) => activePaneId && handleAddImageFilesForPane(activePaneId, files)}
-                onDraftChange={(value) => activePaneId && setComposerDraftForPane(activePaneId, value)}
-                onRemoveImage={(attachmentId) => activePaneId && handleRemoveImageForPane(activePaneId, attachmentId)}
-                onSubmit={(value) =>
-                  handleSubmit(
-                    activePaneId ?? "bootstrap",
-                    activeThreadId,
-                    activePendingThread,
-                    activePendingUserInput,
-                    activePendingQuestion,
-                    activePendingQuestionIndex,
-                    activePendingDraftAnswers,
-                    value,
-                  )}
-                submitDisabled={!canSubmitPromptForThread(activeThreadId, activePendingThread)}
+                </div>
+              </>
+            ) : projects.length === 0 ? (
+              <EmptyWorkspaceSurface title="No project loaded." detail="Create or sync a project first." />
+            ) : (
+              <EmptyWorkspaceSurface
+                title="No tab is active."
+                detail="Open a draft tab to start a new thread."
+                actionLabel="Open draft tab"
+                onAction={handleCreateDraftTab}
               />
-            </div>
-          )}
-        </main>
+            )}
+          </main>
+        </div>
         <footer className="status-line">{footerText}</footer>
       </div>
       <CommandPalette
@@ -1732,7 +1486,7 @@ export function App() {
         onClose={closePalette}
         onQueryChange={setPaletteQuery}
         onSelectedIndexChange={setSelectedCommandIndex}
-        onRun={runPaletteCommand}
+        onRun={(command) => void runPaletteCommand(command as AppPaletteCommand)}
       />
     </>
   );

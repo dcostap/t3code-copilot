@@ -6,42 +6,10 @@ import type {
 } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-const STORAGE_KEY = "t3code:console-workspace-sessions:v3";
-const PENDING_HISTORY_MAX_AGE_MS = 60_000;
-
-export interface ConsoleHistoryRef {
-  readonly id: string;
-  readonly threadId: OrchestrationThread["id"];
-  readonly preferredProvider: ProviderKind;
-  readonly cwd: string;
-  readonly createdAt: string;
-  readonly archivedAt: string | null;
-  readonly pending: boolean;
-  readonly pendingThread: ConsolePendingThreadRef | null;
-}
-
-export interface ConsolePendingThreadRef {
-  readonly provider: ProviderKind;
-  readonly model: string;
-  readonly interactionMode: ProviderInteractionMode;
-  readonly worktreePath: string | null;
-}
-
-export interface ConsolePane {
-  readonly id: string;
-  readonly historyId: string | null;
-  readonly setup: ConsolePaneSetup | null;
-}
-
-interface PersistedConsolePane {
-  readonly id: string;
-  readonly historyId: string | null;
-  readonly setup?: ConsolePaneSetup | null;
-}
-
-interface PersistedConsoleHistory extends Omit<ConsoleHistoryRef, "pendingThread"> {
-  readonly pendingThread?: ConsolePendingThreadRef | null;
-}
+const STORAGE_KEY = "t3code:console-project-layouts:v1";
+const DEFAULT_SIDEBAR_WIDTH = 300;
+const MIN_SIDEBAR_WIDTH = 220;
+const MAX_SIDEBAR_WIDTH = 520;
 
 export interface ConsolePaneSetup {
   readonly type: "new-thread";
@@ -52,119 +20,430 @@ export interface ConsolePaneSetup {
   readonly worktreePath: string | null;
 }
 
-export interface ConsoleWorkspaceSession {
+export interface ConsoleDraftPane {
   readonly id: string;
-  readonly title: string;
-  readonly cwd: string;
-  readonly projectId: OrchestrationProject["id"];
-  readonly createdAt: string;
-  readonly updatedAt: string;
+  readonly kind: "draft";
+  readonly setup: ConsolePaneSetup;
+}
+
+export interface ConsoleThreadPane {
+  readonly id: string;
+  readonly kind: "thread";
+  readonly threadId: OrchestrationThread["id"];
+}
+
+export type ConsoleProjectPane = ConsoleDraftPane | ConsoleThreadPane;
+
+export interface ConsoleProjectTab {
+  readonly id: string;
+  readonly paneIds: ReadonlyArray<string>;
   readonly activePaneId: string;
-  readonly panes: ReadonlyArray<ConsolePane>;
-  readonly histories: ReadonlyArray<ConsoleHistoryRef>;
+  readonly createdAt: string;
 }
 
-export interface ConsoleWorkspaceState {
-  readonly sessions: ReadonlyArray<ConsoleWorkspaceSession>;
-  readonly activeSessionId: string | null;
-  readonly suppressAutoSeed?: boolean;
+export interface ConsoleProjectLayout {
+  readonly projectId: OrchestrationProject["id"];
+  readonly tabs: ReadonlyArray<ConsoleProjectTab>;
+  readonly panesById: Record<string, ConsoleProjectPane>;
+  readonly activeTabId: string;
+  readonly updatedAt: string;
 }
 
-export interface ConsoleWorkspaceModel {
-  readonly sessions: ReadonlyArray<ConsoleWorkspaceSession>;
-  readonly activeSession: ConsoleWorkspaceSession | null;
-  readonly activePane: ConsolePane | null;
-  readonly activeThreadId: string | null;
-  readonly activeThread: OrchestrationThread | null;
+export interface ConsoleProjectLayoutsState {
+  readonly projectOrder: ReadonlyArray<OrchestrationProject["id"]>;
+  readonly collapsedProjectIds: ReadonlyArray<OrchestrationProject["id"]>;
+  readonly activeProjectId: OrchestrationProject["id"] | null;
+  readonly layoutsByProjectId: Record<string, ConsoleProjectLayout>;
+  readonly lastChosenProvider: ProviderKind;
+  readonly sidebarWidth: number;
+}
+
+export interface ConsoleProjectView {
+  readonly project: OrchestrationProject;
+  readonly layout: ConsoleProjectLayout;
+  readonly collapsed: boolean;
+}
+
+export interface OpenThreadResult {
+  readonly paneId: string;
+  readonly highlightPane: boolean;
+}
+
+export interface ConsoleProjectLayoutsModel {
+  readonly state: ConsoleProjectLayoutsState;
+  readonly projectViews: ReadonlyArray<ConsoleProjectView>;
   readonly activeProject: OrchestrationProject | null;
-  activateSession(sessionId: string): void;
-  closeSession(sessionId: string): void;
-  activatePane(paneId: string): void;
-  updatePaneSetup(input: {
+  readonly activeLayout: ConsoleProjectLayout | null;
+  readonly activeTab: ConsoleProjectTab | null;
+  readonly activePane: ConsoleProjectPane | null;
+  readonly activeThread: OrchestrationThread | null;
+  readonly activeThreadId: OrchestrationThread["id"] | null;
+  readonly activePaneId: string | null;
+  readonly lastChosenProvider: ProviderKind;
+  readonly sidebarWidth: number;
+  activateProject(projectId: OrchestrationProject["id"]): void;
+  toggleProjectCollapsed(projectId: OrchestrationProject["id"]): void;
+  reorderProjects(projectIds: ReadonlyArray<OrchestrationProject["id"]>): void;
+  setSidebarWidth(width: number): void;
+  activateTab(projectId: OrchestrationProject["id"], tabId: string): void;
+  activatePane(projectId: OrchestrationProject["id"], tabId: string, paneId: string): void;
+  createDraftTab(input: {
+    projectId: OrchestrationProject["id"];
+    interactionMode?: ProviderInteractionMode;
+    branch?: string | null;
+    worktreePath?: string | null;
+  }): { tabId: string; paneId: string } | null;
+  splitPane(input: {
+    projectId: OrchestrationProject["id"];
     paneId: string;
-    selectedProvider: ProviderKind;
+  }): { tabId: string; paneId: string } | null;
+  closePane(projectId: OrchestrationProject["id"], paneId: string): void;
+  closeTab(projectId: OrchestrationProject["id"], tabId: string): void;
+  updateDraftPane(input: {
+    paneId: string;
+    updater: (setup: ConsolePaneSetup) => ConsolePaneSetup;
   }): void;
-  completePaneSetup(input: {
+  completeDraftPane(input: {
     paneId: string;
     threadId: OrchestrationThread["id"];
-    preferredProvider: ProviderKind;
-    cwd: string;
-    projectId: OrchestrationProject["id"];
-    createdAt: string;
-    pending?: boolean;
-    pendingThread?: ConsolePendingThreadRef | null;
   }): void;
-  closePane(paneId: string): void;
-  createSessionWithSetup(input: {
-    cwd: string;
+  openThread(threadId: OrchestrationThread["id"]): OpenThreadResult | null;
+  mountThreadInPane(input: {
     projectId: OrchestrationProject["id"];
-    createdAt: string;
-    selectedProvider: ProviderKind;
-    interactionMode: ProviderInteractionMode;
-    branch: string | null;
-    worktreePath: string | null;
-  }): void;
-  createSessionFromHistory(input: {
+    paneId: string;
     threadId: OrchestrationThread["id"];
-    preferredProvider: ProviderKind;
-    cwd: string;
-    projectId: OrchestrationProject["id"];
-    createdAt: string;
-    pending?: boolean;
-  }): void;
+  }): boolean;
+}
+
+interface PersistedConsolePaneSetup {
+  readonly type?: unknown;
+  readonly selectedProvider?: unknown;
+  readonly createdAt?: unknown;
+  readonly interactionMode?: unknown;
+  readonly branch?: unknown;
+  readonly worktreePath?: unknown;
+}
+
+interface PersistedConsoleProjectPane {
+  readonly id?: unknown;
+  readonly kind?: unknown;
+  readonly threadId?: unknown;
+  readonly setup?: PersistedConsolePaneSetup;
+}
+
+interface PersistedConsoleProjectTab {
+  readonly id?: unknown;
+  readonly paneIds?: unknown;
+  readonly activePaneId?: unknown;
+  readonly createdAt?: unknown;
+}
+
+interface PersistedConsoleProjectLayout {
+  readonly projectId?: unknown;
+  readonly tabs?: unknown;
+  readonly panesById?: unknown;
+  readonly activeTabId?: unknown;
+  readonly updatedAt?: unknown;
+}
+
+interface PersistedConsoleProjectLayoutsState {
+  readonly projectOrder?: unknown;
+  readonly collapsedProjectIds?: unknown;
+  readonly activeProjectId?: unknown;
+  readonly layoutsByProjectId?: unknown;
+  readonly lastChosenProvider?: unknown;
+  readonly sidebarWidth?: unknown;
 }
 
 function makeId(prefix: string) {
   return `${prefix}:${crypto.randomUUID()}`;
 }
 
-function readPersistedState(): ConsoleWorkspaceState {
-  if (typeof window === "undefined") {
-    return { sessions: [], activeSessionId: null };
-  }
+function nowIso() {
+  return new Date().toISOString();
+}
 
+function clampSidebarWidth(width: number) {
+  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, Math.round(width)));
+}
+
+function isProviderKind(value: unknown): value is ProviderKind {
+  return value === "codex" || value == "copilot";
+}
+
+function isInteractionMode(value: unknown): value is ProviderInteractionMode {
+  return value === "default" || value === "plan";
+}
+
+function defaultPaneSetup(input?: {
+  readonly selectedProvider?: ProviderKind;
+  readonly createdAt?: string;
+  readonly interactionMode?: ProviderInteractionMode;
+  readonly branch?: string | null;
+  readonly worktreePath?: string | null;
+}): ConsolePaneSetup {
+  return {
+    type: "new-thread",
+    selectedProvider: input?.selectedProvider ?? "codex",
+    createdAt: input?.createdAt ?? nowIso(),
+    interactionMode: input?.interactionMode ?? "default",
+    branch: input?.branch ?? null,
+    worktreePath: input?.worktreePath ?? null,
+  };
+}
+
+function createDraftPane(input?: {
+  readonly id?: string;
+  readonly selectedProvider?: ProviderKind;
+  readonly createdAt?: string;
+  readonly interactionMode?: ProviderInteractionMode;
+  readonly branch?: string | null;
+  readonly worktreePath?: string | null;
+}): ConsoleDraftPane {
+  return {
+    id: input?.id ?? makeId("pane"),
+    kind: "draft",
+    setup: defaultPaneSetup(input),
+  };
+}
+
+function createThreadPane(threadId: OrchestrationThread["id"], id?: string): ConsoleThreadPane {
+  return {
+    id: id ?? makeId("pane"),
+    kind: "thread",
+    threadId,
+  };
+}
+
+function createDraftTabRef(input?: {
+  readonly tabId?: string;
+  readonly paneId?: string;
+  readonly selectedProvider?: ProviderKind;
+  readonly createdAt?: string;
+  readonly interactionMode?: ProviderInteractionMode;
+  readonly branch?: string | null;
+  readonly worktreePath?: string | null;
+}): { tab: ConsoleProjectTab; pane: ConsoleDraftPane } {
+  const pane = createDraftPane({
+    ...(input?.paneId ? { id: input.paneId } : {}),
+    ...(input?.selectedProvider ? { selectedProvider: input.selectedProvider } : {}),
+    ...(input?.createdAt ? { createdAt: input.createdAt } : {}),
+    ...(input?.interactionMode ? { interactionMode: input.interactionMode } : {}),
+    ...(input?.branch !== undefined ? { branch: input.branch ?? null } : {}),
+    ...(input?.worktreePath !== undefined ? { worktreePath: input.worktreePath ?? null } : {}),
+  });
+  const createdAt = input?.createdAt ?? pane.setup.createdAt;
+  return {
+    tab: {
+      id: input?.tabId ?? makeId("tab"),
+      paneIds: [pane.id],
+      activePaneId: pane.id,
+      createdAt,
+    },
+    pane,
+  };
+}
+
+function createProjectLayout(projectId: OrchestrationProject["id"], input?: {
+  readonly selectedProvider?: ProviderKind;
+  readonly interactionMode?: ProviderInteractionMode;
+  readonly branch?: string | null;
+  readonly worktreePath?: string | null;
+}): ConsoleProjectLayout {
+  const { tab, pane } = createDraftTabRef({
+    ...(input?.selectedProvider ? { selectedProvider: input.selectedProvider } : {}),
+    ...(input?.interactionMode ? { interactionMode: input.interactionMode } : {}),
+    ...(input?.branch !== undefined ? { branch: input.branch ?? null } : {}),
+    ...(input?.worktreePath !== undefined ? { worktreePath: input.worktreePath ?? null } : {}),
+  });
+  const updatedAt = pane.setup.createdAt;
+  return {
+    projectId,
+    tabs: [tab],
+    panesById: {
+      [pane.id]: pane,
+    },
+    activeTabId: tab.id,
+    updatedAt,
+  };
+}
+
+function normalizePaneSetup(candidate: PersistedConsolePaneSetup | undefined, fallbackProvider: ProviderKind): ConsolePaneSetup {
+  return {
+    type: "new-thread",
+    selectedProvider: isProviderKind(candidate?.selectedProvider) ? candidate.selectedProvider : fallbackProvider,
+    createdAt: typeof candidate?.createdAt == "string" && candidate.createdAt.length > 0 ? candidate.createdAt : nowIso(),
+    interactionMode: isInteractionMode(candidate?.interactionMode) ? candidate.interactionMode : "default",
+    branch: typeof candidate?.branch == "string" && candidate.branch.length > 0 ? candidate.branch : null,
+    worktreePath:
+      typeof candidate?.worktreePath == "string" && candidate.worktreePath.length > 0
+        ? candidate.worktreePath
+        : null,
+  };
+}
+
+function normalizePane(candidate: PersistedConsoleProjectPane, fallbackProvider: ProviderKind): ConsoleProjectPane | null {
+  if (typeof candidate?.id != "string" || candidate.id.length == 0) {
+    return null;
+  }
+  if (candidate.kind == "thread" && typeof candidate.threadId == "string" && candidate.threadId.length > 0) {
+    return {
+      id: candidate.id,
+      kind: "thread",
+      threadId: candidate.threadId as OrchestrationThread["id"],
+    };
+  }
+  return {
+    id: candidate.id,
+    kind: "draft",
+    setup: normalizePaneSetup(candidate.setup, fallbackProvider),
+  };
+}
+
+function normalizeTab(candidate: PersistedConsoleProjectTab): ConsoleProjectTab | null {
+  if (
+    typeof candidate?.id != "string"
+    || candidate.id.length == 0
+    || !Array.isArray(candidate.paneIds)
+  ) {
+    return null;
+  }
+  const paneIds = candidate.paneIds.filter((paneId): paneId is string => typeof paneId == "string" && paneId.length > 0);
+  if (paneIds.length == 0) {
+    return null;
+  }
+  const activePaneId =
+    typeof candidate.activePaneId == "string" && paneIds.includes(candidate.activePaneId)
+      ? candidate.activePaneId
+      : paneIds[0]!;
+  return {
+    id: candidate.id,
+    paneIds,
+    activePaneId,
+    createdAt:
+      typeof candidate.createdAt == "string" && candidate.createdAt.length > 0
+        ? candidate.createdAt
+        : nowIso(),
+  };
+}
+
+function readPersistedState(): ConsoleProjectLayoutsState {
+  if (typeof window == "undefined") {
+    return {
+      projectOrder: [],
+      collapsedProjectIds: [],
+      activeProjectId: null,
+      layoutsByProjectId: {},
+      lastChosenProvider: "codex",
+      sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+    };
+  }
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) {
-      return { sessions: [], activeSessionId: null };
+      return {
+        projectOrder: [],
+        collapsedProjectIds: [],
+        activeProjectId: null,
+        layoutsByProjectId: {},
+        lastChosenProvider: "codex",
+        sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+      };
     }
-    const parsed = JSON.parse(raw) as ConsoleWorkspaceState;
-    if (!parsed || typeof parsed !== "object") {
-      return { sessions: [], activeSessionId: null };
+    const parsed = JSON.parse(raw) as PersistedConsoleProjectLayoutsState;
+    const lastChosenProvider = isProviderKind(parsed.lastChosenProvider) ? parsed.lastChosenProvider : "codex";
+    const layoutsByProjectId: Record<string, ConsoleProjectLayout> = {};
+    if (parsed.layoutsByProjectId && typeof parsed.layoutsByProjectId == "object") {
+      for (const [projectId, candidate] of Object.entries(parsed.layoutsByProjectId)) {
+        const persistedLayout = candidate as PersistedConsoleProjectLayout;
+        if (typeof projectId != "string" || projectId.length == 0) {
+          continue;
+        }
+        if (!persistedLayout || persistedLayout.projectId != projectId) {
+          continue;
+        }
+        const panesById: Record<string, ConsoleProjectPane> = {};
+        if (persistedLayout.panesById && typeof persistedLayout.panesById == "object") {
+          for (const candidatePane of Object.values(persistedLayout.panesById as Record<string, PersistedConsoleProjectPane>)) {
+            const pane = normalizePane(candidatePane, lastChosenProvider);
+            if (pane) {
+              panesById[pane.id] = pane;
+            }
+          }
+        }
+        const tabs = Array.isArray(persistedLayout.tabs)
+          ? persistedLayout.tabs
+              .map((candidateTab) => normalizeTab(candidateTab as PersistedConsoleProjectTab))
+              .filter((tab): tab is ConsoleProjectTab => tab !== null)
+          : [];
+        if (tabs.length == 0) {
+          continue;
+        }
+        const activeTabId =
+          typeof persistedLayout.activeTabId == "string" && tabs.some((tab) => tab.id == persistedLayout.activeTabId)
+            ? persistedLayout.activeTabId
+            : tabs[0]!.id;
+        layoutsByProjectId[projectId] = {
+          projectId: projectId as OrchestrationProject["id"],
+          tabs,
+          panesById,
+          activeTabId,
+          updatedAt:
+            typeof persistedLayout.updatedAt == "string" && persistedLayout.updatedAt.length > 0
+              ? persistedLayout.updatedAt
+              : nowIso(),
+        };
+      }
     }
+
+    const projectOrder = Array.isArray(parsed.projectOrder)
+      ? parsed.projectOrder.filter((projectId): projectId is OrchestrationProject["id"] => typeof projectId == "string" && projectId.length > 0)
+      : [];
+    const collapsedProjectIds = Array.isArray(parsed.collapsedProjectIds)
+      ? parsed.collapsedProjectIds.filter((projectId): projectId is OrchestrationProject["id"] => typeof projectId == "string" && projectId.length > 0)
+      : [];
+
     return {
-      sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
-      activeSessionId:
-        typeof parsed.activeSessionId === "string" ? parsed.activeSessionId : null,
-      suppressAutoSeed: parsed.suppressAutoSeed === true,
+      projectOrder,
+      collapsedProjectIds,
+      activeProjectId:
+        typeof parsed.activeProjectId == "string" && parsed.activeProjectId.length > 0
+          ? parsed.activeProjectId as OrchestrationProject["id"]
+          : null,
+      layoutsByProjectId,
+      lastChosenProvider,
+      sidebarWidth:
+        typeof parsed.sidebarWidth == "number" && Number.isFinite(parsed.sidebarWidth)
+          ? clampSidebarWidth(parsed.sidebarWidth)
+          : DEFAULT_SIDEBAR_WIDTH,
     };
   } catch {
-    return { sessions: [], activeSessionId: null };
+    return {
+      projectOrder: [],
+      collapsedProjectIds: [],
+      activeProjectId: null,
+      layoutsByProjectId: {},
+      lastChosenProvider: "codex",
+      sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+    };
   }
 }
 
-function persistState(state: ConsoleWorkspaceState) {
-  if (typeof window === "undefined") {
+function persistState(state: ConsoleProjectLayoutsState) {
+  if (typeof window == "undefined") {
     return;
   }
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // Ignore storage failures and keep the in-memory workspace model usable.
-  }
-}
-
-function lastPathSegment(path: string): string {
-  const parts = path.split(/[/\\]/).filter((segment) => segment.length > 0);
-  return parts.at(-1) ?? path;
-}
-
-export function makeSessionTitle(cwd: string, sessions: ReadonlyArray<ConsoleWorkspaceSession>): string {
-  const base = lastPathSegment(cwd);
-  const escapedBase = base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const duplicatePattern = new RegExp(`^${escapedBase} \\d+$`);
-  const matching = sessions.filter((session) => session.title === base || duplicatePattern.test(session.title));
-  return matching.length === 0 ? base : `${base} ${matching.length + 1}`;
+  window.localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      projectOrder: state.projectOrder,
+      collapsedProjectIds: state.collapsedProjectIds,
+      activeProjectId: state.activeProjectId,
+      layoutsByProjectId: state.layoutsByProjectId,
+      lastChosenProvider: state.lastChosenProvider,
+      sidebarWidth: state.sidebarWidth,
+    }),
+  );
 }
 
 export function resolveThreadCwd(
@@ -179,702 +458,619 @@ export function resolveThreadCwd(
 
 function findThreadById(
   threads: ReadonlyArray<OrchestrationThread>,
-  threadId: string,
+  threadId: OrchestrationThread["id"] | null,
 ): OrchestrationThread | null {
+  if (!threadId) {
+    return null;
+  }
   return threads.find((thread) => thread.id === threadId) ?? null;
 }
 
-function preferredProviderFromThread(thread: OrchestrationThread | null): ProviderKind {
-  return thread?.provider === "copilot" ? "copilot" : "codex";
-}
-
-function createHistoryRef(input: {
-  threadId: OrchestrationThread["id"];
-  preferredProvider: ProviderKind;
-  cwd: string;
-  createdAt: string;
-  pending?: boolean;
-  pendingThread?: ConsolePendingThreadRef | null;
-}): ConsoleHistoryRef {
-  return {
-    id: makeId("history"),
-    threadId: input.threadId,
-    preferredProvider: input.preferredProvider,
-    cwd: input.cwd,
-    createdAt: input.createdAt,
-    archivedAt: null,
-    pending: input.pending ?? false,
-    pendingThread: input.pendingThread ?? null,
-  };
-}
-
-export function createSessionFromHistoryRef(
-  input: {
-    threadId: OrchestrationThread["id"];
-    preferredProvider: ProviderKind;
-    cwd: string;
-    projectId: OrchestrationProject["id"];
-    createdAt: string;
-    pending?: boolean;
-    pendingThread?: ConsolePendingThreadRef | null;
-  },
-  existingSessions: ReadonlyArray<ConsoleWorkspaceSession>,
-): ConsoleWorkspaceSession {
-  const history = createHistoryRef(input);
-  const paneId = makeId("pane");
-  return {
-    id: makeId("session"),
-    title: makeSessionTitle(input.cwd, existingSessions),
-    cwd: input.cwd,
-    projectId: input.projectId,
-    createdAt: input.createdAt,
-    updatedAt: input.createdAt,
-    activePaneId: paneId,
-    panes: [{ id: paneId, historyId: history.id, setup: null }],
-    histories: [history],
-  };
-}
-
-export function createSessionWithSetupRef(
-  input: {
-    cwd: string;
-    projectId: OrchestrationProject["id"];
-    createdAt: string;
-    selectedProvider: ProviderKind;
-    interactionMode: ProviderInteractionMode;
-    branch: string | null;
-    worktreePath: string | null;
-  },
-  existingSessions: ReadonlyArray<ConsoleWorkspaceSession>,
-): ConsoleWorkspaceSession {
-  const paneId = makeId("pane");
-  return {
-    id: makeId("session"),
-    title: makeSessionTitle(input.cwd, existingSessions),
-    cwd: input.cwd,
-    projectId: input.projectId,
-    createdAt: input.createdAt,
-    updatedAt: input.createdAt,
-    activePaneId: paneId,
-    panes: [{
-      id: paneId,
-      historyId: null,
-      setup: {
-        type: "new-thread",
-        selectedProvider: input.selectedProvider,
-        createdAt: input.createdAt,
-        interactionMode: input.interactionMode,
-        branch: input.branch,
-        worktreePath: input.worktreePath,
-      },
-    }],
-    histories: [],
-  };
-}
-
-function activePaneForSession(session: ConsoleWorkspaceSession): ConsolePane | null {
-  return session.panes.find((pane) => pane.id === session.activePaneId) ?? session.panes[0] ?? null;
-}
-
-function updateSession(
-  existing: ReadonlyArray<ConsoleWorkspaceSession>,
-  sessionId: string,
-  updater: (session: ConsoleWorkspaceSession) => ConsoleWorkspaceSession,
-) {
-  let changed = false;
-  const sessions = existing.map((session) => {
-    if (session.id !== sessionId) {
-      return session;
-    }
-    const next = updater(session);
-    if (next !== session) {
-      changed = true;
-    }
-    return next;
-  });
-  return changed ? sessions : existing;
-}
-
-export function closeWorkspaceSession(
-  state: ConsoleWorkspaceState,
-  sessionId: string,
-): ConsoleWorkspaceState {
-  if (!state.sessions.some((session) => session.id === sessionId)) {
-    return state;
-  }
-
-  if (state.sessions.length === 1) {
-    if (state.activeSessionId === null && state.suppressAutoSeed === true) {
-      return state;
-    }
-    return {
-      sessions: [],
-      activeSessionId: null,
-      suppressAutoSeed: true,
-    };
-  }
-
-  const closingIndex = state.sessions.findIndex((session) => session.id === sessionId);
-  if (closingIndex === -1) {
-    return state;
-  }
-
-  const sessions = state.sessions.filter((session) => session.id !== sessionId);
-  const activeSessionId =
-    state.activeSessionId === sessionId
-      ? (sessions[Math.max(0, closingIndex - 1)]?.id ?? sessions[0]?.id ?? null)
-      : state.activeSessionId;
-
-  if (sessions.length === state.sessions.length && activeSessionId === state.activeSessionId) {
-    return state;
-  }
-
-  return {
-    sessions,
-    activeSessionId,
-  };
-}
-
-function withSessionUpdatedAt(
-  session: ConsoleWorkspaceSession,
-  input: Omit<ConsoleWorkspaceSession, "updatedAt">,
-): ConsoleWorkspaceSession {
+function withUpdatedLayout(layout: ConsoleProjectLayout, input: Omit<ConsoleProjectLayout, "updatedAt">): ConsoleProjectLayout {
   return {
     ...input,
-    updatedAt: new Date().toISOString(),
+    updatedAt: nowIso(),
   };
 }
 
-export function splitSessionWithHistoryRef(
-  session: ConsoleWorkspaceSession,
-  historyInput: {
-    threadId: OrchestrationThread["id"];
-    preferredProvider: ProviderKind;
-    cwd: string;
-    createdAt: string;
-    pending?: boolean;
-  },
-): ConsoleWorkspaceSession {
-  if (session.panes.length >= 2) {
-    return session;
-  }
-
-  const history = createHistoryRef(historyInput);
-  const nextPane: ConsolePane = { id: makeId("pane"), historyId: history.id, setup: null };
-  const activePaneIndex = session.panes.findIndex((pane) => pane.id === session.activePaneId);
-  const insertAt = activePaneIndex >= 0 ? activePaneIndex + 1 : session.panes.length;
-  const panes = [...session.panes];
-  panes.splice(insertAt, 0, nextPane);
-
-  return withSessionUpdatedAt(session, {
-    ...session,
-    activePaneId: nextPane.id,
-    panes,
-    histories: [...session.histories, history],
-  });
-}
-
-export function activateSessionPane(
-  session: ConsoleWorkspaceSession,
-  paneId: string,
-): ConsoleWorkspaceSession {
-  if (session.activePaneId === paneId || !session.panes.some((pane) => pane.id === paneId)) {
-    return session;
-  }
-  return withSessionUpdatedAt(session, {
-    ...session,
-    activePaneId: paneId,
-  });
-}
-
-export function closeSessionPane(
-  session: ConsoleWorkspaceSession,
-  paneId: string,
-): ConsoleWorkspaceSession {
-  if (session.panes.length <= 1 || !session.panes.some((pane) => pane.id === paneId)) {
-    return session;
-  }
-
-  const panes = session.panes.filter((pane) => pane.id !== paneId);
-  const nextActivePaneId =
-    session.activePaneId === paneId
-      ? (panes[0]?.id ?? session.activePaneId)
-      : session.activePaneId;
-  if (panes.length === session.panes.length && nextActivePaneId === session.activePaneId) {
-    return session;
-  }
-
-  return withSessionUpdatedAt(session, {
-    ...session,
-    activePaneId: nextActivePaneId,
-    panes,
-  });
-}
-
-function isPendingHistoryStillFresh(history: ConsoleHistoryRef, nowMs: number) {
-  return history.pending && nowMs - Date.parse(history.createdAt) <= PENDING_HISTORY_MAX_AGE_MS;
-}
-
-function hasRenderableSetup(session: ConsoleWorkspaceSession) {
-  return session.panes.some((pane) => pane.setup !== null);
-}
-
-function isHistoryAvailable(
-  history: ConsoleHistoryRef,
-  threadsById: ReadonlyMap<string, OrchestrationThread>,
-) {
-  return threadsById.has(history.threadId);
-}
-
-function hasRenderableHistory(
-  history: ConsoleHistoryRef,
-  threadsById: ReadonlyMap<string, OrchestrationThread>,
-  nowMs: number,
-) {
-  return isHistoryAvailable(history, threadsById) || isPendingHistoryStillFresh(history, nowMs);
-}
-
-function reconcilePersistedSessionShape(
-  session: ConsoleWorkspaceSession,
-  threadsById: ReadonlyMap<string, OrchestrationThread>,
-  projectsById: ReadonlyMap<string, OrchestrationProject>,
-): ConsoleWorkspaceSession | null {
-  const projectId =
-    projectsById.has(session.projectId)
-      ? session.projectId
-      : (session.histories
-          .map((history) => threadsById.get(history.threadId)?.projectId)
-          .find((candidate): candidate is OrchestrationProject["id"] => candidate !== undefined) ?? session.projectId);
-  let setupNormalized = false;
-  const panes = (session.panes as ReadonlyArray<PersistedConsolePane>).map<ConsolePane>((pane) => {
-    if (pane.setup !== undefined) {
-      return pane as ConsolePane;
+function locatePane(layout: ConsoleProjectLayout, paneId: string): { tab: ConsoleProjectTab; pane: ConsoleProjectPane } | null {
+  for (const tab of layout.tabs) {
+    if (!tab.paneIds.includes(paneId)) {
+      continue;
     }
-    setupNormalized = true;
-    return {
-      id: pane.id,
-      historyId: pane.historyId,
-      setup: null,
-    };
-  });
-  if (session.histories.length === 0 && !panes.some((pane) => pane.setup !== null)) {
-    return null;
+    const pane = layout.panesById[paneId];
+    if (!pane) {
+      return null;
+    }
+    return { tab, pane };
   }
+  return null;
+}
 
-  const histories = (session.histories as ReadonlyArray<PersistedConsoleHistory>).map<ConsoleHistoryRef>((history) => {
-    if (history.preferredProvider === "codex" || history.preferredProvider === "copilot") {
-      if (history.pendingThread === null) {
-        return history as ConsoleHistoryRef;
+function locateThreadPane(layout: ConsoleProjectLayout, threadId: OrchestrationThread["id"]): { tab: ConsoleProjectTab; pane: ConsoleThreadPane } | null {
+  for (const tab of layout.tabs) {
+    for (const paneId of tab.paneIds) {
+      const pane = layout.panesById[paneId];
+      if (pane?.kind == "thread" && pane.threadId === threadId) {
+        return { tab, pane };
       }
-      return {
-        ...history,
-        pendingThread: history.pendingThread ?? null,
+    }
+  }
+  return null;
+}
+
+function ensureActiveLayoutState(layout: ConsoleProjectLayout, fallbackProvider: ProviderKind): ConsoleProjectLayout {
+  const seenThreadIds = new Set<string>();
+  const panesById: Record<string, ConsoleProjectPane> = {};
+  const tabs: ConsoleProjectTab[] = [];
+
+  for (const tab of layout.tabs) {
+    const nextPaneIds: string[] = [];
+    for (const paneId of tab.paneIds.slice(0, 6)) {
+      const pane = layout.panesById[paneId];
+      if (!pane) {
+        continue;
+      }
+      if (pane.kind === "thread") {
+        if (seenThreadIds.has(pane.threadId)) {
+          const draftPane = createDraftPane({ id: pane.id, selectedProvider: fallbackProvider });
+          panesById[draftPane.id] = draftPane;
+          nextPaneIds.push(draftPane.id);
+          continue;
+        }
+        seenThreadIds.add(pane.threadId);
+        panesById[pane.id] = pane;
+        nextPaneIds.push(pane.id);
+        continue;
+      }
+      const draftPane: ConsoleDraftPane = {
+        ...pane,
+        setup: normalizePaneSetup(pane.setup, fallbackProvider),
       };
+      panesById[draftPane.id] = draftPane;
+      nextPaneIds.push(draftPane.id);
     }
-
-    const preferredProvider = preferredProviderFromThread(threadsById.get(history.threadId) ?? null);
-    if (history.preferredProvider === preferredProvider && history.pendingThread === null) {
-      return history as ConsoleHistoryRef;
+    const uniquePaneIds = nextPaneIds.filter((paneId, index) => nextPaneIds.indexOf(paneId) === index);
+    if (uniquePaneIds.length == 0) {
+      continue;
     }
-    return {
-      ...history,
-      preferredProvider,
-      pendingThread: history.pendingThread ?? null,
-    };
-  });
-  const availableHistoryIds = new Set(
-    histories
-      .filter((history) => isHistoryAvailable(history, threadsById))
-      .map((history) => history.id),
-  );
-
-  const activePane = activePaneForSession(session);
-  const activeHistoryStillExists =
-    activePane !== null &&
-    activePane.historyId !== null &&
-    availableHistoryIds.has(activePane.historyId);
-  const fallbackHistoryId =
-    activeHistoryStillExists
-      ? activePane?.historyId ?? null
-      : (histories.find((history) => history.archivedAt === null && availableHistoryIds.has(history.id))?.id ??
-        activePane?.historyId ??
-        histories.find((history) => history.archivedAt === null)?.id ??
-        null);
-
-  const normalizedPanes =
-    panes.length > 0
-      ? panes.map((pane) => {
-          if (pane.setup !== null) {
-            return pane;
-          }
-          return pane.id === session.activePaneId && pane.historyId !== fallbackHistoryId
-            ? { ...pane, historyId: fallbackHistoryId }
-            : pane;
-        })
-      : fallbackHistoryId !== null
-        ? [{ id: makeId("pane"), historyId: fallbackHistoryId, setup: null }]
-        : [];
-  const activePaneId =
-    normalizedPanes.find((pane) => pane.id === session.activePaneId)?.id ??
-    normalizedPanes[0]?.id ??
-    makeId("pane");
-
-  const historiesChanged =
-    histories.length !== session.histories.length ||
-    histories.some((history, index) => history !== session.histories[index]);
-  const panesChanged =
-    setupNormalized ||
-    normalizedPanes.length !== session.panes.length ||
-    normalizedPanes.some((pane, index) => pane !== session.panes[index]);
-  const projectChanged = session.projectId !== projectId;
-  if (!historiesChanged && !panesChanged && !projectChanged && activePaneId === session.activePaneId) {
-    return session;
+    tabs.push({
+      ...tab,
+      paneIds: uniquePaneIds,
+      activePaneId: uniquePaneIds.includes(tab.activePaneId) ? tab.activePaneId : uniquePaneIds[0]!,
+    });
   }
 
+  if (tabs.length == 0) {
+    const fresh = createProjectLayout(layout.projectId, { selectedProvider: fallbackProvider });
+    return fresh;
+  }
+
+  const activeTabId = tabs.some((tab) => tab.id === layout.activeTabId) ? layout.activeTabId : tabs[0]!.id;
   return {
-    ...session,
-      projectId,
-      updatedAt: new Date().toISOString(),
-      activePaneId,
-      panes: normalizedPanes,
-      histories,
-    };
-  }
+    projectId: layout.projectId,
+    tabs,
+    panesById,
+    activeTabId,
+    updatedAt: layout.updatedAt,
+  };
+}
 
-function reconcileSessionWithThreads(
-  session: ConsoleWorkspaceSession,
-  threads: ReadonlyArray<OrchestrationThread>,
-  projects: ReadonlyArray<OrchestrationProject>,
-): ConsoleWorkspaceSession | null {
-  const threadsById = new Map(threads.map((thread) => [thread.id, thread] as const));
+export function reconcileProjectLayoutsState(input: {
+  readonly state: ConsoleProjectLayoutsState;
+  readonly projects: ReadonlyArray<OrchestrationProject>;
+  readonly threads: ReadonlyArray<OrchestrationThread>;
+  readonly preferredThreadId: string | null;
+}): ConsoleProjectLayoutsState {
+  const projects = input.projects.filter((project) => project.deletedAt === null);
   const projectsById = new Map(projects.map((project) => [project.id, project] as const));
+  const threads = input.threads.filter((thread) => thread.deletedAt === null);
+  const threadsById = new Map(threads.map((thread) => [thread.id, thread] as const));
+  const preferredThread = input.preferredThreadId ? (threadsById.get(input.preferredThreadId as OrchestrationThread["id"]) ?? null) : null;
 
-  const normalizedSession = reconcilePersistedSessionShape(session, threadsById, projectsById);
-  if (!normalizedSession) {
-    return null;
-  }
-
-  const nowMs = Date.now();
-  const histories = normalizedSession.histories.map<ConsoleHistoryRef>((history) => {
-    const thread = threadsById.get(history.threadId);
-    if (!history.pending) {
-      const providerName = thread?.provider;
-      if (thread && (providerName === "codex" || providerName === "copilot") && history.preferredProvider !== providerName) {
-        return { ...history, preferredProvider: providerName, pendingThread: null };
-      }
-      return history;
+  const projectOrder = input.state.projectOrder.filter((projectId) => projectsById.has(projectId));
+  projects.forEach((project) => {
+    if (!projectOrder.includes(project.id)) {
+      projectOrder.push(project.id);
     }
-    if (!thread && isPendingHistoryStillFresh(history, nowMs)) {
-      return history;
-    }
-    const providerName = thread?.provider;
-    const preferredProvider =
-      providerName === "codex" || providerName === "copilot"
-        ? providerName
-        : history.preferredProvider;
-    return {
-      ...history,
-      pending: false,
-      preferredProvider,
-      pendingThread: null,
-    };
   });
-  const historiesChanged = histories.some((history, index) => history !== normalizedSession.histories[index]);
-  if (!historiesChanged) {
-    return normalizedSession;
-  }
+
+  const collapsedProjectIds = input.state.collapsedProjectIds.filter((projectId) => projectsById.has(projectId));
+  const layoutsByProjectId: Record<string, ConsoleProjectLayout> = {};
+
+  projectOrder.forEach((projectId) => {
+    const existingLayout = input.state.layoutsByProjectId[projectId];
+    const reconciled = ensureActiveLayoutState(
+      existingLayout ?? createProjectLayout(projectId, { selectedProvider: input.state.lastChosenProvider }),
+      input.state.lastChosenProvider,
+    );
+    const panesById: Record<string, ConsoleProjectPane> = {};
+    const validTabs: ConsoleProjectTab[] = [];
+    const seenThreadIds = new Set<string>();
+    for (const tab of reconciled.tabs) {
+      const nextPaneIds: string[] = [];
+      for (const paneId of tab.paneIds.slice(0, 6)) {
+        const pane = reconciled.panesById[paneId];
+        if (!pane) {
+          continue;
+        }
+        if (pane.kind === "thread") {
+          const thread = threadsById.get(pane.threadId);
+          if (!thread || thread.projectId !== projectId || seenThreadIds.has(pane.threadId)) {
+            const draftPane = createDraftPane({ id: pane.id, selectedProvider: input.state.lastChosenProvider });
+            panesById[draftPane.id] = draftPane;
+            nextPaneIds.push(draftPane.id);
+            continue;
+          }
+          seenThreadIds.add(pane.threadId);
+          panesById[pane.id] = pane;
+          nextPaneIds.push(pane.id);
+          continue;
+        }
+        panesById[pane.id] = pane;
+        nextPaneIds.push(pane.id);
+      }
+      const uniquePaneIds = nextPaneIds.filter((paneId, index) => nextPaneIds.indexOf(paneId) == index);
+      if (uniquePaneIds.length == 0) {
+        continue;
+      }
+      validTabs.push({
+        ...tab,
+        paneIds: uniquePaneIds,
+        activePaneId: uniquePaneIds.includes(tab.activePaneId) ? tab.activePaneId : uniquePaneIds[0]!,
+      });
+    }
+
+    let layout: ConsoleProjectLayout = {
+      projectId,
+      tabs: validTabs,
+      panesById,
+      activeTabId: validTabs.some((tab) => tab.id === reconciled.activeTabId)
+        ? reconciled.activeTabId
+        : (validTabs[0]?.id ?? ""),
+      updatedAt: reconciled.updatedAt,
+    };
+
+    if (layout.tabs.length == 0) {
+      layout = createProjectLayout(projectId, { selectedProvider: input.state.lastChosenProvider });
+    }
+
+    layoutsByProjectId[projectId] = layout;
+  });
+
+  const nextActiveProjectId =
+    input.state.activeProjectId && projectsById.has(input.state.activeProjectId)
+      ? input.state.activeProjectId
+      : (preferredThread?.projectId ?? projectOrder[0] ?? null);
 
   return {
-    ...normalizedSession,
-    histories,
-    updatedAt: new Date().toISOString(),
+    projectOrder,
+    collapsedProjectIds,
+    activeProjectId: nextActiveProjectId,
+    layoutsByProjectId,
+    lastChosenProvider: input.state.lastChosenProvider,
+    sidebarWidth: clampSidebarWidth(input.state.sidebarWidth),
   };
 }
 
-export function reconcileWorkspaceState(input: {
-  readonly state: ConsoleWorkspaceState;
-  readonly threads: ReadonlyArray<OrchestrationThread>;
-  readonly projects: ReadonlyArray<OrchestrationProject>;
-  readonly preferredThreadId: string | null;
-}): ConsoleWorkspaceState {
-  const suppressAutoSeed = input.state.suppressAutoSeed === true && input.state.sessions.length === 0;
-  const preferredThread =
-    (input.preferredThreadId ? findThreadById(input.threads, input.preferredThreadId) : null) ??
-    input.threads[0] ??
-    null;
-  const threadsById = new Map(input.threads.map((thread) => [thread.id, thread] as const));
-  const nowMs = Date.now();
-
-  let sessions = input.state.sessions
-    .map((session) => reconcileSessionWithThreads(session, input.threads, input.projects))
-    .filter((session): session is ConsoleWorkspaceSession => session !== null);
-  let activeSessionId = input.state.activeSessionId;
-  const claimedThreadIds = new Set(
-    sessions.flatMap((session) => session.histories.map((history) => history.threadId)),
-  );
-
-  if (preferredThread && !claimedThreadIds.has(preferredThread.id) && !suppressAutoSeed) {
-    const cwd = resolveThreadCwd(preferredThread, input.projects);
-    if (cwd) {
-      const seeded = createSessionFromHistoryRef(
-        {
-          threadId: preferredThread.id,
-          preferredProvider: preferredProviderFromThread(preferredThread),
-          cwd,
-          projectId: preferredThread.projectId,
-          createdAt: preferredThread.createdAt,
-        },
-        sessions,
-      );
-      const reconciledSeeded = reconcileSessionWithThreads(seeded, input.threads, input.projects);
-      if (reconciledSeeded) {
-        sessions = [...sessions, reconciledSeeded];
-        activeSessionId = activeSessionId ?? reconciledSeeded.id;
-      }
-    }
+function updateLayoutState(
+  state: ConsoleProjectLayoutsState,
+  projectId: OrchestrationProject["id"],
+  updater: (layout: ConsoleProjectLayout) => ConsoleProjectLayout,
+): ConsoleProjectLayoutsState {
+  const currentLayout = state.layoutsByProjectId[projectId] ?? createProjectLayout(projectId, { selectedProvider: state.lastChosenProvider });
+  const nextLayout = updater(currentLayout);
+  if (nextLayout === currentLayout && state.activeProjectId === projectId) {
+    return state;
   }
-
-  const activeSession = activeSessionId
-    ? (sessions.find((session) => session.id === activeSessionId) ?? null)
-    : null;
-  const activeSessionHasRenderableHistory =
-    activeSession !== null &&
-    (
-      activeSession.histories.some((history) => hasRenderableHistory(history, threadsById, nowMs))
-      || hasRenderableSetup(activeSession)
-    );
-
-  if (
-    activeSessionId &&
-    (!sessions.some((session) => session.id === activeSessionId) || !activeSessionHasRenderableHistory)
-  ) {
-    activeSessionId =
-      (preferredThread
-        ? sessions.find((session) =>
-            session.histories.some((history) => history.threadId === preferredThread.id),
-          )?.id
-        : null) ??
-      sessions[0]?.id ??
-      null;
-  }
-
-  if (!activeSessionId && sessions.length > 0) {
-    activeSessionId = sessions[0]?.id ?? null;
-  }
-
-  const nextSuppressAutoSeed = sessions.length === 0 ? suppressAutoSeed : false;
-  const sessionsUnchanged =
-    sessions.length === input.state.sessions.length &&
-    sessions.every((session, index) => session === input.state.sessions[index]);
-  if (
-    sessionsUnchanged
-    && activeSessionId === input.state.activeSessionId
-    && nextSuppressAutoSeed === (input.state.suppressAutoSeed === true)
-  ) {
-    return input.state;
-  }
-
-  const nextState = {
-    sessions,
-    activeSessionId,
+  return {
+    ...state,
+    activeProjectId: projectId,
+    layoutsByProjectId: {
+      ...state.layoutsByProjectId,
+      [projectId]: nextLayout,
+    },
   };
-  return nextSuppressAutoSeed ? { ...nextState, suppressAutoSeed: true } : nextState;
 }
 
-export function useConsoleWorkspaceSessions(input: {
+function createFreshDraftReplacement(state: ConsoleProjectLayoutsState, paneId: string): ConsoleDraftPane {
+  return createDraftPane({ id: paneId, selectedProvider: state.lastChosenProvider });
+}
+
+export function useConsoleProjectLayouts(input: {
   readonly threads: ReadonlyArray<OrchestrationThread>;
   readonly projects: ReadonlyArray<OrchestrationProject>;
   readonly preferredThreadId: string | null;
-}): ConsoleWorkspaceModel {
-  const [state, setState] = useState<ConsoleWorkspaceState>(() => readPersistedState());
+}): ConsoleProjectLayoutsModel {
+  const [state, setState] = useState<ConsoleProjectLayoutsState>(() => readPersistedState());
 
   useEffect(() => {
-    setState((existing) =>
-      reconcileWorkspaceState({
-        state: existing,
-        threads: input.threads,
-        projects: input.projects,
-        preferredThreadId: input.preferredThreadId,
-      }),
-    );
+    setState((existing) => reconcileProjectLayoutsState({
+      state: existing,
+      threads: input.threads,
+      projects: input.projects,
+      preferredThreadId: input.preferredThreadId,
+    }));
   }, [input.preferredThreadId, input.projects, input.threads]);
 
   useEffect(() => {
     persistState(state);
   }, [state]);
 
-  const activeSession = useMemo(
-    () => state.sessions.find((session) => session.id === state.activeSessionId) ?? null,
-    [state.activeSessionId, state.sessions],
-  );
-  const activePane = useMemo(
-    () => (activeSession ? activePaneForSession(activeSession) : null),
-    [activeSession],
-  );
+  const orderedProjects = useMemo(() => {
+    const projectsById = new Map(input.projects.map((project) => [project.id, project] as const));
+    return state.projectOrder
+      .map((projectId) => projectsById.get(projectId) ?? null)
+      .filter((project): project is OrchestrationProject => project !== null);
+  }, [input.projects, state.projectOrder]);
 
-  const activeThreadId = useMemo(() => {
-    if (!activeSession || !activePane) {
-      return null;
-    }
-    if (!activePane.historyId) {
-      return null;
-    }
-    return activeSession.histories.find((history) => history.id === activePane.historyId)?.threadId ?? null;
-  }, [activePane, activeSession]);
-
-  const activeThread = useMemo(
-    () => (activeThreadId ? findThreadById(input.threads, activeThreadId) : null),
-    [activeThreadId, input.threads],
-  );
+  const projectViews = useMemo(() => orderedProjects.map((project) => ({
+    project,
+    layout: state.layoutsByProjectId[project.id] ?? createProjectLayout(project.id, { selectedProvider: state.lastChosenProvider }),
+    collapsed: state.collapsedProjectIds.includes(project.id),
+  })), [orderedProjects, state.collapsedProjectIds, state.layoutsByProjectId, state.lastChosenProvider]);
 
   const activeProject = useMemo(
-    () =>
-      activeSession
-        ? (input.projects.find((project) => project.id === activeSession.projectId) ?? null)
-        : (activeThread
-            ? (input.projects.find((project) => project.id === activeThread.projectId) ?? null)
-            : null),
-    [activeSession, activeThread, input.projects],
+    () => (state.activeProjectId ? input.projects.find((project) => project.id === state.activeProjectId) ?? null : null),
+    [input.projects, state.activeProjectId],
   );
+  const activeLayout = useMemo(
+    () => (activeProject ? state.layoutsByProjectId[activeProject.id] ?? null : null),
+    [activeProject, state.layoutsByProjectId],
+  );
+  const activeTab = useMemo(
+    () => (activeLayout ? activeLayout.tabs.find((tab) => tab.id === activeLayout.activeTabId) ?? activeLayout.tabs[0] ?? null : null),
+    [activeLayout],
+  );
+  const activePane = useMemo(
+    () => (activeLayout && activeTab ? activeLayout.panesById[activeTab.activePaneId] ?? null : null),
+    [activeLayout, activeTab],
+  );
+  const activeThreadId = activePane?.kind === "thread" ? activePane.threadId : null;
+  const activeThread = useMemo(
+    () => findThreadById(input.threads, activeThreadId),
+    [activeThreadId, input.threads],
+  );
+  const activePaneId = activePane?.id ?? null;
 
-  const activateSession = useCallback((sessionId: string) => {
-    setState((existing) =>
-      existing.activeSessionId === sessionId && existing.suppressAutoSeed !== true
-        ? existing
-        : { ...existing, activeSessionId: sessionId, suppressAutoSeed: false },
-    );
+  const activateProject = useCallback((projectId: OrchestrationProject["id"]) => {
+    setState((existing) => existing.activeProjectId === projectId ? existing : { ...existing, activeProjectId: projectId });
   }, []);
 
-  const closeSession = useCallback((sessionId: string) => {
-    setState((existing) => closeWorkspaceSession(existing, sessionId));
-  }, []);
-
-  const activatePane = useCallback((paneId: string) => {
+  const toggleProjectCollapsed = useCallback((projectId: OrchestrationProject["id"]) => {
     setState((existing) => {
-      if (!existing.activeSessionId) {
+      const collapsed = existing.collapsedProjectIds.includes(projectId)
+        ? existing.collapsedProjectIds.filter((id) => id !== projectId)
+        : [...existing.collapsedProjectIds, projectId];
+      return { ...existing, collapsedProjectIds: collapsed };
+    });
+  }, []);
+
+  const reorderProjects = useCallback((projectIds: ReadonlyArray<OrchestrationProject["id"]>) => {
+    setState((existing) => {
+      const nextOrder = projectIds.filter((projectId, index) => projectIds.indexOf(projectId) === index);
+      if (nextOrder.length === 0) {
         return existing;
       }
-      const sessions = updateSession(existing.sessions, existing.activeSessionId, (session) =>
-        activateSessionPane(session, paneId),
+      return { ...existing, projectOrder: nextOrder };
+    });
+  }, []);
+
+  const setSidebarWidth = useCallback((width: number) => {
+    setState((existing) => ({ ...existing, sidebarWidth: clampSidebarWidth(width) }));
+  }, []);
+
+  const activateTab = useCallback((projectId: OrchestrationProject["id"], tabId: string) => {
+    setState((existing) => updateLayoutState(existing, projectId, (layout) => {
+      if (!layout.tabs.some((tab) => tab.id === tabId)) {
+        return layout;
+      }
+      if (layout.activeTabId === tabId) {
+        return layout;
+      }
+      return withUpdatedLayout(layout, {
+        ...layout,
+        activeTabId: tabId,
+      });
+    }));
+  }, []);
+
+  const activatePane = useCallback((projectId: OrchestrationProject["id"], tabId: string, paneId: string) => {
+    setState((existing) => updateLayoutState(existing, projectId, (layout) => {
+      const tab = layout.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab || !tab.paneIds.includes(paneId)) {
+        return layout;
+      }
+      if (layout.activeTabId === tabId && tab.activePaneId === paneId) {
+        return layout;
+      }
+      const tabs = layout.tabs.map((candidate) => candidate.id === tabId ? { ...candidate, activePaneId: paneId } : candidate);
+      return withUpdatedLayout(layout, {
+        ...layout,
+        activeTabId: tabId,
+        tabs,
+      });
+    }));
+  }, []);
+
+  const createDraftTab = useCallback((inputValue: {
+    projectId: OrchestrationProject["id"];
+    interactionMode?: ProviderInteractionMode;
+    branch?: string | null;
+    worktreePath?: string | null;
+  }) => {
+    let created: { tabId: string; paneId: string } | null = null;
+    setState((existing) => updateLayoutState(existing, inputValue.projectId, (layout) => {
+      const next = createDraftTabRef({
+        selectedProvider: existing.lastChosenProvider,
+        ...(inputValue.interactionMode ? { interactionMode: inputValue.interactionMode } : {}),
+        ...(inputValue.branch !== undefined ? { branch: inputValue.branch ?? null } : {}),
+        ...(inputValue.worktreePath !== undefined ? { worktreePath: inputValue.worktreePath ?? null } : {}),
+      });
+      created = { tabId: next.tab.id, paneId: next.pane.id };
+      return withUpdatedLayout(layout, {
+        ...layout,
+        tabs: [...layout.tabs, next.tab],
+        panesById: {
+          ...layout.panesById,
+          [next.pane.id]: next.pane,
+        },
+        activeTabId: next.tab.id,
+      });
+    }));
+    return created;
+  }, []);
+
+  const splitPane = useCallback((inputValue: { projectId: OrchestrationProject["id"]; paneId: string }) => {
+    let created: { tabId: string; paneId: string } | null = null;
+    setState((existing) => updateLayoutState(existing, inputValue.projectId, (layout) => {
+      const located = locatePane(layout, inputValue.paneId);
+      if (!located || located.tab.paneIds.length >= 6) {
+        return layout;
+      }
+      const pane = createDraftPane({ selectedProvider: existing.lastChosenProvider });
+      created = { tabId: located.tab.id, paneId: pane.id };
+      const tabs = layout.tabs.map((tab) =>
+        tab.id === located.tab.id
+          ? { ...tab, paneIds: [...tab.paneIds, pane.id], activePaneId: pane.id }
+          : tab,
       );
-      return sessions === existing.sessions ? existing : { ...existing, sessions, suppressAutoSeed: false };
-    });
+      return withUpdatedLayout(layout, {
+        ...layout,
+        activeTabId: located.tab.id,
+        tabs,
+        panesById: {
+          ...layout.panesById,
+          [pane.id]: pane,
+        },
+      });
+    }));
+    return created;
   }, []);
 
-  const updatePaneSetup = useCallback((input: { paneId: string; selectedProvider: ProviderKind }) => {
-    setState((existing) => {
-      const sessionWithPane = existing.sessions.find((session) => session.panes.some((pane) => pane.id === input.paneId));
-      if (!sessionWithPane) {
-        return existing;
+  const closeTab = useCallback((projectId: OrchestrationProject["id"], tabId: string) => {
+    setState((existing) => updateLayoutState(existing, projectId, (layout) => {
+      const closingIndex = layout.tabs.findIndex((tab) => tab.id === tabId);
+      if (closingIndex === -1) {
+        return layout;
       }
-      const sessions = updateSession(existing.sessions, sessionWithPane.id, (session) => withSessionUpdatedAt(session, {
-        ...session,
-        panes: session.panes.map((pane) =>
-          pane.id === input.paneId && pane.setup
-            ? {
-                ...pane,
-                setup: { ...pane.setup, selectedProvider: input.selectedProvider },
-              }
-            : pane),
-      }));
-      return sessions === existing.sessions ? existing : { ...existing, sessions, suppressAutoSeed: false };
+      const remainingTabs = layout.tabs.filter((tab) => tab.id !== tabId);
+      const nextPanesById = { ...layout.panesById };
+      layout.tabs[closingIndex]?.paneIds.forEach((paneId) => {
+        delete nextPanesById[paneId];
+      });
+
+      if (remainingTabs.length === 0) {
+        const fresh = createProjectLayout(projectId, { selectedProvider: existing.lastChosenProvider });
+        return fresh;
+      }
+
+      const nextActiveTab = remainingTabs[Math.max(0, closingIndex - 1)] ?? remainingTabs[0]!;
+      return withUpdatedLayout(layout, {
+        ...layout,
+        tabs: remainingTabs,
+        panesById: nextPanesById,
+        activeTabId: nextActiveTab.id,
+      });
+    }));
+  }, []);
+
+  const closePane = useCallback((projectId: OrchestrationProject["id"], paneId: string) => {
+    setState((existing) => updateLayoutState(existing, projectId, (layout) => {
+      const located = locatePane(layout, paneId);
+      if (!located) {
+        return layout;
+      }
+      if (located.tab.paneIds.length <= 1) {
+        const tabsExcluding = layout.tabs.filter((tab) => tab.id !== located.tab.id);
+        if (tabsExcluding.length === 0) {
+          return createProjectLayout(projectId, { selectedProvider: existing.lastChosenProvider });
+        }
+        const nextPanesById = { ...layout.panesById };
+        delete nextPanesById[paneId];
+        const nextActiveTab = tabsExcluding[Math.max(0, layout.tabs.findIndex((tab) => tab.id === located.tab.id) - 1)] ?? tabsExcluding[0]!;
+        return withUpdatedLayout(layout, {
+          ...layout,
+          tabs: tabsExcluding,
+          panesById: nextPanesById,
+          activeTabId: nextActiveTab.id,
+        });
+      }
+      const nextPaneIds = located.tab.paneIds.filter((candidateId) => candidateId !== paneId);
+      const removedIndex = located.tab.paneIds.indexOf(paneId);
+      const nextActivePaneId =
+        located.tab.activePaneId === paneId
+          ? (nextPaneIds[Math.max(0, removedIndex - 1)] ?? nextPaneIds[0]!)
+          : located.tab.activePaneId;
+      const tabs = layout.tabs.map((tab) =>
+        tab.id === located.tab.id
+          ? { ...tab, paneIds: nextPaneIds, activePaneId: nextActivePaneId }
+          : tab,
+      );
+      const nextPanesById = { ...layout.panesById };
+      delete nextPanesById[paneId];
+      return withUpdatedLayout(layout, {
+        ...layout,
+        tabs,
+        panesById: nextPanesById,
+      });
+    }));
+  }, []);
+
+  const updateDraftPane = useCallback((inputValue: {
+    paneId: string;
+    updater: (setup: ConsolePaneSetup) => ConsolePaneSetup;
+  }) => {
+    setState((existing) => {
+      let nextState = existing;
+      for (const [projectId, layout] of Object.entries(existing.layoutsByProjectId)) {
+        const located = locatePane(layout, inputValue.paneId);
+        if (!located || located.pane.kind !== "draft") {
+          continue;
+        }
+        const nextSetup = inputValue.updater(located.pane.setup);
+        const nextPane: ConsoleDraftPane = {
+          ...located.pane,
+          setup: nextSetup,
+        };
+        const nextLayout = withUpdatedLayout(layout, {
+          ...layout,
+          panesById: {
+            ...layout.panesById,
+            [nextPane.id]: nextPane,
+          },
+        });
+        nextState = {
+          ...existing,
+          activeProjectId: projectId as OrchestrationProject["id"],
+          lastChosenProvider: nextSetup.selectedProvider,
+          layoutsByProjectId: {
+            ...existing.layoutsByProjectId,
+            [projectId]: nextLayout,
+          },
+        };
+        break;
+      }
+      return nextState;
     });
   }, []);
 
-  const completePaneSetup = useCallback((history: {
+  const mountThreadInPane = useCallback((inputValue: {
+    projectId: OrchestrationProject["id"];
     paneId: string;
     threadId: OrchestrationThread["id"];
-    preferredProvider: ProviderKind;
-    cwd: string;
-    projectId: OrchestrationProject["id"];
-    createdAt: string;
-    pending?: boolean;
-    pendingThread?: ConsolePendingThreadRef | null;
   }) => {
-    setState((existing) => {
-      const sessionWithPane = existing.sessions.find((session) => session.panes.some((pane) => pane.id === history.paneId));
-      if (!sessionWithPane) {
-        return existing;
+    let didMount = false;
+    setState((existing) => updateLayoutState(existing, inputValue.projectId, (layout) => {
+      const target = locatePane(layout, inputValue.paneId);
+      if (!target) {
+        return layout;
       }
-      const sessions = updateSession(existing.sessions, sessionWithPane.id, (session) => {
-        const nextHistory = createHistoryRef(history);
-        return withSessionUpdatedAt(session, {
-          ...session,
-          panes: session.panes.map((pane) =>
-            pane.id === history.paneId
-              ? { ...pane, historyId: nextHistory.id, setup: null }
-              : pane),
-          histories: [...session.histories, nextHistory],
-          activePaneId: history.paneId,
-        });
+      const source = locateThreadPane(layout, inputValue.threadId);
+      const nextPanesById = { ...layout.panesById };
+      if (source && source.pane.id !== target.pane.id) {
+        nextPanesById[source.pane.id] = createFreshDraftReplacement(existing, source.pane.id);
+      }
+      nextPanesById[target.pane.id] = createThreadPane(inputValue.threadId, target.pane.id);
+      const tabs = layout.tabs.map((tab) => {
+        if (tab.id === target.tab.id) {
+          return { ...tab, activePaneId: target.pane.id };
+        }
+        return tab;
       });
-      return sessions === existing.sessions ? existing : { ...existing, sessions, suppressAutoSeed: false };
-    });
+      didMount = true;
+      return withUpdatedLayout(layout, {
+        ...layout,
+        activeTabId: target.tab.id,
+        tabs,
+        panesById: nextPanesById,
+      });
+    }));
+    return didMount;
   }, []);
 
-  const closePane = useCallback((paneId: string) => {
-    setState((existing) => {
-      if (!existing.activeSessionId) {
-        return existing;
+  const completeDraftPane = useCallback((inputValue: { paneId: string; threadId: OrchestrationThread["id"] }) => {
+    const thread = input.threads.find((candidate) => candidate.id === inputValue.threadId) ?? null;
+    if (!thread) {
+      return;
+    }
+    void mountThreadInPane({
+      projectId: thread.projectId,
+      paneId: inputValue.paneId,
+      threadId: inputValue.threadId,
+    });
+  }, [input.threads, mountThreadInPane]);
+
+  const openThread = useCallback((threadId: OrchestrationThread["id"]) => {
+    const thread = input.threads.find((candidate) => candidate.id === threadId) ?? null;
+    if (!thread) {
+      return null;
+    }
+    let result: OpenThreadResult | null = null;
+    setState((existing) => updateLayoutState(existing, thread.projectId, (layout) => {
+      const existingPane = locateThreadPane(layout, threadId);
+      if (existingPane) {
+        const tabs = layout.tabs.map((tab) =>
+          tab.id === existingPane.tab.id
+            ? { ...tab, activePaneId: existingPane.pane.id }
+            : tab,
+        );
+        result = {
+          paneId: existingPane.pane.id,
+          highlightPane: existingPane.tab.paneIds.length > 1,
+        };
+        return withUpdatedLayout(layout, {
+          ...layout,
+          activeTabId: existingPane.tab.id,
+          tabs,
+        });
       }
-      const sessions = updateSession(existing.sessions, existing.activeSessionId, (session) =>
-        closeSessionPane(session, paneId),
-      );
-      return sessions === existing.sessions ? existing : { ...existing, sessions, suppressAutoSeed: false };
-    });
-  }, []);
-
-  const createSessionWithSetup = useCallback((input: {
-    cwd: string;
-    projectId: OrchestrationProject["id"];
-    createdAt: string;
-    selectedProvider: ProviderKind;
-    interactionMode: ProviderInteractionMode;
-    branch: string | null;
-    worktreePath: string | null;
-  }) => {
-    setState((existing) => {
-      const nextSession = createSessionWithSetupRef(input, existing.sessions);
-      return {
-        sessions: [...existing.sessions, nextSession],
-        activeSessionId: nextSession.id,
-        suppressAutoSeed: false,
+      const pane = createThreadPane(threadId);
+      const tab: ConsoleProjectTab = {
+        id: makeId("tab"),
+        paneIds: [pane.id],
+        activePaneId: pane.id,
+        createdAt: nowIso(),
       };
-    });
-  }, []);
-
-  const createSessionFromHistory = useCallback((history: {
-    threadId: OrchestrationThread["id"];
-    preferredProvider: ProviderKind;
-    cwd: string;
-    projectId: OrchestrationProject["id"];
-    createdAt: string;
-    pending?: boolean;
-  }) => {
-    setState((existing) => {
-      const nextSession = createSessionFromHistoryRef(history, existing.sessions);
-      return {
-        sessions: [...existing.sessions, nextSession],
-        activeSessionId: nextSession.id,
-        suppressAutoSeed: false,
-      };
-    });
-  }, []);
+      result = { paneId: pane.id, highlightPane: false };
+      return withUpdatedLayout(layout, {
+        ...layout,
+        tabs: [...layout.tabs, tab],
+        panesById: {
+          ...layout.panesById,
+          [pane.id]: pane,
+        },
+        activeTabId: tab.id,
+      });
+    }));
+    return result;
+  }, [input.threads]);
 
   return {
-    sessions: state.sessions,
-    activeSession,
-    activePane,
-    activeThreadId,
-    activeThread,
+    state,
+    projectViews,
     activeProject,
-    activateSession,
-    closeSession,
+    activeLayout,
+    activeTab,
+    activePane,
+    activeThread,
+    activeThreadId,
+    activePaneId,
+    lastChosenProvider: state.lastChosenProvider,
+    sidebarWidth: state.sidebarWidth,
+    activateProject,
+    toggleProjectCollapsed,
+    reorderProjects,
+    setSidebarWidth,
+    activateTab,
     activatePane,
-    updatePaneSetup,
-    completePaneSetup,
+    createDraftTab,
+    splitPane,
     closePane,
-    createSessionWithSetup,
-    createSessionFromHistory,
+    closeTab,
+    updateDraftPane,
+    completeDraftPane,
+    openThread,
+    mountThreadInPane,
   };
 }

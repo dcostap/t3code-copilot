@@ -1,15 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import type { OrchestrationProject, OrchestrationThread } from "@t3tools/contracts";
+import type {
+  OrchestrationProject,
+  OrchestrationThread,
+} from "@t3tools/contracts";
 
 import {
-  activateSessionPane,
-  closeSessionPane,
-  closeWorkspaceSession,
-  createSessionFromHistoryRef,
-  reconcileWorkspaceState,
+  reconcileProjectLayoutsState,
   resolveThreadCwd,
-  splitSessionWithHistoryRef,
+  type ConsoleProjectLayoutsState,
 } from "./consoleSessions";
 
 const project: OrchestrationProject = {
@@ -23,17 +22,23 @@ const project: OrchestrationProject = {
   deletedAt: null,
 };
 
+const otherProject: OrchestrationProject = {
+  ...project,
+  id: "project:2" as OrchestrationProject["id"],
+  title: "Repo 2",
+  workspaceRoot: "C:\\Projects\\repo-2",
+};
+
 function makeThread(input: {
   id: string;
   createdAt: string;
   projectId?: OrchestrationProject["id"];
   worktreePath?: string | null;
-  providerName?: "codex" | "copilot" | null;
 }): OrchestrationThread {
   return {
     id: input.id as OrchestrationThread["id"],
     projectId: input.projectId ?? project.id,
-    provider: input.providerName === "copilot" ? "copilot" : "codex",
+    provider: "codex",
     title: "Thread",
     model: "gpt-5-codex",
     runtimeMode: "full-access",
@@ -48,17 +53,19 @@ function makeThread(input: {
     proposedPlans: [],
     activities: [],
     checkpoints: [],
-    session: input.providerName
-      ? {
-          threadId: input.id as OrchestrationThread["id"],
-          status: "ready",
-          providerName: input.providerName,
-          runtimeMode: "full-access",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: input.createdAt,
-        }
-      : null,
+    session: null,
+    modelOptions: undefined,
+  };
+}
+
+function createEmptyState(): ConsoleProjectLayoutsState {
+  return {
+    projectOrder: [],
+    collapsedProjectIds: [],
+    activeProjectId: null,
+    layoutsByProjectId: {},
+    lastChosenProvider: "codex",
+    sidebarWidth: 300,
   };
 }
 
@@ -74,424 +81,113 @@ describe("resolveThreadCwd", () => {
   });
 });
 
-describe("reconcileWorkspaceState", () => {
-  it("seeds a first session from the preferred thread", () => {
-    const thread = makeThread({
-      id: "thread:1",
-      createdAt: "2026-03-12T10:00:00.000Z",
-    });
-
-    const state = reconcileWorkspaceState({
-      state: { sessions: [], activeSessionId: null },
-      threads: [thread],
-      projects: [project],
-      preferredThreadId: thread.id,
-    });
-
-    expect(state.sessions).toHaveLength(1);
-    expect(state.activeSessionId).toBe(state.sessions[0]?.id ?? null);
-    expect(state.sessions[0]?.cwd).toBe(project.workspaceRoot);
-    expect(state.sessions[0]?.projectId).toBe(project.id);
-    expect(state.sessions[0]?.histories.map((history) => history.threadId)).toEqual([thread.id]);
-    expect(state.sessions[0]?.histories[0]?.preferredProvider).toBe("codex");
-  });
-
-  it("preserves the live provider when seeding a first session", () => {
-    const thread = makeThread({
-      id: "thread:copilot",
-      createdAt: "2026-03-12T10:00:00.000Z",
-      providerName: "copilot",
-    });
-
-    const state = reconcileWorkspaceState({
-      state: { sessions: [], activeSessionId: null },
-      threads: [thread],
-      projects: [project],
-      preferredThreadId: thread.id,
-    });
-
-    expect(state.sessions[0]?.histories[0]?.preferredProvider).toBe("copilot");
-  });
-
-  it("keeps the workspace empty after the user closes the last tab", () => {
-    const thread = makeThread({
-      id: "thread:1",
-      createdAt: "2026-03-12T10:00:00.000Z",
-    });
-
-    const state = reconcileWorkspaceState({
-      state: { sessions: [], activeSessionId: null, suppressAutoSeed: true },
-      threads: [thread],
-      projects: [project],
-      preferredThreadId: thread.id,
-    });
-
-    expect(state).toEqual({
-      sessions: [],
-      activeSessionId: null,
-      suppressAutoSeed: true,
-    });
-  });
-
-  it("does not merge unrelated same-cwd threads into an existing session", () => {
-    const firstThread = makeThread({
-      id: "thread:1",
-      createdAt: "2026-03-12T10:00:00.000Z",
-    });
-    const secondThread = makeThread({
+describe("reconcileProjectLayoutsState", () => {
+  it("creates a default layout per project and focuses the preferred thread project", () => {
+    const preferredThread = makeThread({
       id: "thread:2",
       createdAt: "2026-03-12T10:05:00.000Z",
-    });
-    const seededSession = createSessionFromHistoryRef(
-      {
-        threadId: firstThread.id,
-        preferredProvider: "codex",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: firstThread.createdAt,
-      },
-      [],
-    );
-
-    const state = reconcileWorkspaceState({
-      state: { sessions: [seededSession], activeSessionId: seededSession.id },
-      threads: [firstThread, secondThread],
-      projects: [project],
-      preferredThreadId: firstThread.id,
+      projectId: otherProject.id,
     });
 
-    expect(state.sessions).toHaveLength(1);
-    expect(state.sessions[0]?.histories.map((history) => history.threadId)).toEqual([firstThread.id]);
+    const state = reconcileProjectLayoutsState({
+      state: createEmptyState(),
+      threads: [preferredThread],
+      projects: [project, otherProject],
+      preferredThreadId: preferredThread.id,
+    });
+
+    expect(state.projectOrder).toEqual([project.id, otherProject.id]);
+    expect(state.activeProjectId).toBe(otherProject.id);
+    expect(state.layoutsByProjectId[project.id]?.tabs).toHaveLength(1);
+    expect(state.layoutsByProjectId[otherProject.id]?.tabs).toHaveLength(1);
+    expect(state.layoutsByProjectId[project.id]?.panesById[
+      state.layoutsByProjectId[project.id]!.tabs[0]!.paneIds[0]!
+    ]?.kind).toBe("draft");
   });
 
-  it("keeps stale persisted sessions but switches focus to a valid live one", () => {
-    const staleSession = createSessionFromHistoryRef(
-      {
-        threadId: "thread:missing" as OrchestrationThread["id"],
-        preferredProvider: "codex",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: "2026-03-12T10:00:00.000Z",
+  it("replaces duplicate thread panes with a draft pane so a thread stays mounted once per project", () => {
+    const thread = makeThread({
+      id: "thread:dup",
+      createdAt: "2026-03-12T10:00:00.000Z",
+    });
+
+    const state = reconcileProjectLayoutsState({
+      state: {
+        ...createEmptyState(),
+        projectOrder: [project.id],
+        activeProjectId: project.id,
+        layoutsByProjectId: {
+          [project.id]: {
+            projectId: project.id,
+            activeTabId: "tab:1",
+            updatedAt: "2026-03-12T10:00:00.000Z",
+            tabs: [
+              {
+                id: "tab:1",
+                paneIds: ["pane:1"],
+                activePaneId: "pane:1",
+                createdAt: "2026-03-12T10:00:00.000Z",
+              },
+              {
+                id: "tab:2",
+                paneIds: ["pane:2"],
+                activePaneId: "pane:2",
+                createdAt: "2026-03-12T10:01:00.000Z",
+              },
+            ],
+            panesById: {
+              "pane:1": { id: "pane:1", kind: "thread", threadId: thread.id },
+              "pane:2": { id: "pane:2", kind: "thread", threadId: thread.id },
+            },
+          },
+        },
       },
-      [],
-    );
-    const freshThread = makeThread({
-      id: "thread:fresh",
-      createdAt: "2026-03-12T10:05:00.000Z",
-    });
-
-    const state = reconcileWorkspaceState({
-      state: { sessions: [staleSession], activeSessionId: staleSession.id },
-      threads: [freshThread],
+      threads: [thread],
       projects: [project],
-      preferredThreadId: freshThread.id,
+      preferredThreadId: thread.id,
     });
 
-    expect(state.sessions).toHaveLength(2);
-    expect(state.sessions[0]?.histories.map((history) => history.threadId)).toEqual(["thread:missing"]);
-    expect(state.sessions[1]?.histories.map((history) => history.threadId)).toEqual([freshThread.id]);
-    expect(state.activeSessionId).toBe(state.sessions[1]?.id ?? null);
+    const layout = state.layoutsByProjectId[project.id]!;
+    expect(layout.panesById["pane:1"]?.kind).toBe("thread");
+    expect(layout.panesById["pane:2"]?.kind).toBe("draft");
   });
 
-  it("keeps a newly created pending history until the backend snapshot catches up", () => {
-    const pendingSession = createSessionFromHistoryRef(
-      {
-        threadId: "thread:pending" as OrchestrationThread["id"],
-        preferredProvider: "codex",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: new Date().toISOString(),
-        pending: true,
-      },
-      [],
-    );
+  it("replaces thread panes that no longer belong to the project with fresh drafts", () => {
+    const foreignThread = makeThread({
+      id: "thread:foreign",
+      createdAt: "2026-03-12T10:00:00.000Z",
+      projectId: otherProject.id,
+    });
 
-    const state = reconcileWorkspaceState({
-      state: { sessions: [pendingSession], activeSessionId: pendingSession.id },
-      threads: [],
-      projects: [project],
+    const state = reconcileProjectLayoutsState({
+      state: {
+        ...createEmptyState(),
+        projectOrder: [project.id],
+        activeProjectId: project.id,
+        layoutsByProjectId: {
+          [project.id]: {
+            projectId: project.id,
+            activeTabId: "tab:1",
+            updatedAt: "2026-03-12T10:00:00.000Z",
+            tabs: [
+              {
+                id: "tab:1",
+                paneIds: ["pane:1"],
+                activePaneId: "pane:1",
+                createdAt: "2026-03-12T10:00:00.000Z",
+              },
+            ],
+            panesById: {
+              "pane:1": { id: "pane:1", kind: "thread", threadId: foreignThread.id },
+            },
+          },
+        },
+      },
+      threads: [foreignThread],
+      projects: [project, otherProject],
       preferredThreadId: null,
     });
 
-    expect(state.sessions).toHaveLength(1);
-    expect(state.sessions[0]?.histories[0]?.threadId).toBe("thread:pending");
-  });
-
-  it("keeps an active pending session selected while older sessions remain available", () => {
-    const existingThread = makeThread({
-      id: "thread:existing",
-      createdAt: "2026-03-12T10:00:00.000Z",
-    });
-    const existingSession = createSessionFromHistoryRef(
-      {
-        threadId: existingThread.id,
-        preferredProvider: "codex",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: existingThread.createdAt,
-      },
-      [],
-    );
-    const pendingSession = createSessionFromHistoryRef(
-      {
-        threadId: "thread:pending" as OrchestrationThread["id"],
-        preferredProvider: "copilot",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: new Date().toISOString(),
-        pending: true,
-      },
-      [existingSession],
-    );
-
-    const state = reconcileWorkspaceState({
-      state: {
-        sessions: [existingSession, pendingSession],
-        activeSessionId: pendingSession.id,
-      },
-      threads: [existingThread],
-      projects: [project],
-      preferredThreadId: existingThread.id,
-    });
-
-    expect(state.activeSessionId).toBe(pendingSession.id);
-  });
-
-  it("falls back to the preferred thread session when the active session is invalid", () => {
-    const firstThread = makeThread({
-      id: "thread:1",
-      createdAt: "2026-03-12T10:00:00.000Z",
-    });
-    const secondThread = makeThread({
-      id: "thread:2",
-      createdAt: "2026-03-12T10:05:00.000Z",
-    });
-    const firstSession = createSessionFromHistoryRef(
-      {
-        threadId: firstThread.id,
-        preferredProvider: "codex",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: firstThread.createdAt,
-      },
-      [],
-    );
-    const secondSession = createSessionFromHistoryRef(
-      {
-        threadId: secondThread.id,
-        preferredProvider: "copilot",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: secondThread.createdAt,
-      },
-      [firstSession],
-    );
-
-    const state = reconcileWorkspaceState({
-      state: {
-        sessions: [firstSession, secondSession],
-        activeSessionId: "session:missing",
-      },
-      threads: [firstThread, secondThread],
-      projects: [project],
-      preferredThreadId: secondThread.id,
-    });
-
-    expect(state.activeSessionId).toBe(secondSession.id);
-  });
-
-  it("returns the existing state object when reconciliation makes no changes", () => {
-    const thread = makeThread({
-      id: "thread:1",
-      createdAt: "2026-03-12T10:00:00.000Z",
-    });
-    const seededSession = createSessionFromHistoryRef(
-      {
-        threadId: thread.id,
-        preferredProvider: "codex",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: thread.createdAt,
-      },
-      [],
-    );
-    const state = {
-      sessions: [seededSession],
-      activeSessionId: seededSession.id,
-    };
-
-    expect(reconcileWorkspaceState({
-      state,
-      threads: [thread],
-      projects: [project],
-      preferredThreadId: thread.id,
-    })).toBe(state);
-  });
-});
-
-describe("session pane operations", () => {
-  it("splits the active pane into a second pane with a new history", () => {
-    const thread = makeThread({
-      id: "thread:1",
-      createdAt: "2026-03-12T10:00:00.000Z",
-    });
-    const session = createSessionFromHistoryRef(
-      {
-        threadId: thread.id,
-        preferredProvider: "codex",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: thread.createdAt,
-      },
-      [],
-    );
-
-    const split = splitSessionWithHistoryRef(session, {
-      threadId: "thread:2" as OrchestrationThread["id"],
-      preferredProvider: "copilot",
-      cwd: project.workspaceRoot,
-      createdAt: "2026-03-12T10:05:00.000Z",
-      pending: true,
-    });
-
-    expect(split.panes).toHaveLength(2);
-    expect(split.activePaneId).toBe(split.panes[1]?.id);
-    expect(split.histories.map((history) => history.threadId)).toEqual([
-      thread.id,
-      "thread:2",
-    ]);
-    expect(split.histories[1]?.preferredProvider).toBe("copilot");
-  });
-
-  it("activates a different pane without mutating histories", () => {
-    const thread = makeThread({
-      id: "thread:1",
-      createdAt: "2026-03-12T10:00:00.000Z",
-    });
-    const session = splitSessionWithHistoryRef(
-      createSessionFromHistoryRef(
-        {
-          threadId: thread.id,
-          preferredProvider: "codex",
-          cwd: project.workspaceRoot,
-          projectId: project.id,
-          createdAt: thread.createdAt,
-        },
-        [],
-      ),
-      {
-        threadId: "thread:2" as OrchestrationThread["id"],
-        preferredProvider: "codex",
-        cwd: project.workspaceRoot,
-        createdAt: "2026-03-12T10:05:00.000Z",
-      },
-    );
-
-    const activated = activateSessionPane(session, session.panes[0]?.id ?? "");
-
-    expect(activated.activePaneId).toBe(session.panes[0]?.id);
-    expect(activated.histories).toEqual(session.histories);
-  });
-
-  it("closes a pane without deleting its history", () => {
-    const thread = makeThread({
-      id: "thread:1",
-      createdAt: "2026-03-12T10:00:00.000Z",
-    });
-    const session = splitSessionWithHistoryRef(
-      createSessionFromHistoryRef(
-        {
-          threadId: thread.id,
-          preferredProvider: "codex",
-          cwd: project.workspaceRoot,
-          projectId: project.id,
-          createdAt: thread.createdAt,
-        },
-        [],
-      ),
-      {
-        threadId: "thread:2" as OrchestrationThread["id"],
-        preferredProvider: "copilot",
-        cwd: project.workspaceRoot,
-        createdAt: "2026-03-12T10:05:00.000Z",
-      },
-    );
-
-    const closed = closeSessionPane(session, session.activePaneId);
-
-    expect(closed.panes).toHaveLength(1);
-    expect(closed.histories).toHaveLength(2);
-  });
-});
-
-describe("workspace session operations", () => {
-  it("closes an active session and focuses the previous remaining session", () => {
-    const firstThread = makeThread({
-      id: "thread:1",
-      createdAt: "2026-03-12T10:00:00.000Z",
-    });
-    const secondThread = makeThread({
-      id: "thread:2",
-      createdAt: "2026-03-12T10:05:00.000Z",
-    });
-    const firstSession = createSessionFromHistoryRef(
-      {
-        threadId: firstThread.id,
-        preferredProvider: "codex",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: firstThread.createdAt,
-      },
-      [],
-    );
-    const secondSession = createSessionFromHistoryRef(
-      {
-        threadId: secondThread.id,
-        preferredProvider: "copilot",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: secondThread.createdAt,
-      },
-      [firstSession],
-    );
-
-    const closed = closeWorkspaceSession(
-      {
-        sessions: [firstSession, secondSession],
-        activeSessionId: secondSession.id,
-      },
-      secondSession.id,
-    );
-
-    expect(closed.sessions).toHaveLength(1);
-    expect(closed.sessions[0]?.id).toBe(firstSession.id);
-    expect(closed.activeSessionId).toBe(firstSession.id);
-  });
-
-  it("does nothing when trying to close the last remaining session", () => {
-    const thread = makeThread({
-      id: "thread:1",
-      createdAt: "2026-03-12T10:00:00.000Z",
-    });
-    const session = createSessionFromHistoryRef(
-      {
-        threadId: thread.id,
-        preferredProvider: "codex",
-        cwd: project.workspaceRoot,
-        projectId: project.id,
-        createdAt: thread.createdAt,
-      },
-      [],
-    );
-    const state = {
-      sessions: [session],
-      activeSessionId: session.id,
-    };
-
-    expect(closeWorkspaceSession(state, session.id)).toEqual({
-      sessions: [],
-      activeSessionId: null,
-      suppressAutoSeed: true,
-    });
+    expect(state.layoutsByProjectId[project.id]?.panesById["pane:1"]?.kind).toBe("draft");
   });
 });
