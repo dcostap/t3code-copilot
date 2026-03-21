@@ -2102,9 +2102,18 @@ function buildEditorTheme() {
       ".cm-line-diffHeader": { color: "#8b929a", fontWeight: "500" },
       ".cm-line-divider": { color: "#40464d" },
       ".cm-line-status": { color: "#6c737b", fontStyle: "italic" },
-      ".cm-line-approvalPrompt": { color: "#e8a84c" },
-      ".cm-line-userInputQuestion": { color: "#cfa764" },
-      ".cm-line-userInputOption": { color: "#d1a65f" },
+      ".cm-line-approvalPrompt": {
+        color: "#e8a84c",
+        overflowWrap: "anywhere",
+      },
+      ".cm-line-userInputQuestion": {
+        color: "#cfa764",
+        overflowWrap: "anywhere",
+      },
+      ".cm-line-userInputOption": {
+        color: "#d1a65f",
+        overflowWrap: "anywhere",
+      },
       ".cm-line-userInputResolved": { opacity: "0.54" },
       ".cm-line-userInputResolvedOption": {
         color: "#737a82",
