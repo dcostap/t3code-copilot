@@ -76,6 +76,10 @@ function stripSimpleMarkdown(text: string): string {
     .replace(/_(.*?)_/g, "$1");
 }
 
+function shouldHideSystemMessage(text: string) {
+  return text.trim().toLowerCase() === "checkpoint captured";
+}
+
 function splitReasoningSummaryIntoBlocks(text: string): TranscriptBlock[] {
   const headingMatches = [...text.matchAll(/\*\*([^*\n][^*]*?)\*\*/g)];
   if (headingMatches.length === 0) {
@@ -800,6 +804,10 @@ function activityToBlocks(
 ): TranscriptBlock[] {
   const payload = asRecord(activity.payload);
 
+  if (shouldHideSystemMessage(activity.summary)) {
+    return [];
+  }
+
   switch (activity.kind) {
     case "approval.requested":
     case "approval.resolved":
@@ -1116,6 +1124,10 @@ function createFinishedStateBlock(startedAt: string, finishedAt: string): Finish
   };
 }
 
+function isAssistantMessageEntry(entry: TimelineEntry) {
+  return entry.source === "message" && entry.blocks?.some((block) => block.type === "assistant-text");
+}
+
 function appendFinishedStateToLatestTurnEntries(
   thread: OrchestrationThread,
   entries: TimelineEntry[],
@@ -1127,7 +1139,7 @@ function appendFinishedStateToLatestTurnEntries(
 
   let targetIndex = -1;
   for (let index = entries.length - 1; index >= 0; index -= 1) {
-    if (entries[index]?.turnId === latestTurn.turnId) {
+    if (entries[index]?.turnId === latestTurn.turnId && isAssistantMessageEntry(entries[index]!)) {
       targetIndex = index;
       break;
     }
@@ -1170,6 +1182,9 @@ export function threadToTranscriptBlocks(
       message.attachments && message.attachments.length > 0 && message.text === IMAGE_ONLY_BOOTSTRAP_PROMPT
         ? ""
         : message.text;
+    if (message.role === "system" && shouldHideSystemMessage(text)) {
+      continue;
+    }
     const attachments = message.attachments?.map((attachment) => ({
       id: attachment.id,
       name: attachment.name,

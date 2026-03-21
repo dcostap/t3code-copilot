@@ -136,6 +136,7 @@ interface TranscriptRendererProps {
   readonly cwd?: string | null;
   readonly interactionMode?: "default" | "plan";
   readonly promptFocusDisabled?: boolean;
+  readonly promptInputDisabled?: boolean;
   readonly pendingUserInputHighlight?: {
     readonly requestId: string;
     readonly questionIndex: number;
@@ -1791,7 +1792,6 @@ function buildEditorTheme() {
         color: "#69737d",
         fontSize: "13px",
         fontStyle: "italic",
-        paddingBottom: "4px",
       },
       ".cm-line-table": {
         color: "#d8dde2",
@@ -2913,6 +2913,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       cwd,
       interactionMode: _interactionMode = "default",
       promptFocusDisabled = false,
+      promptInputDisabled = false,
       pendingUserInputHighlight,
       onAddImageFiles,
       onDraftChange,
@@ -2975,9 +2976,20 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       onDraftChange,
       onSubmit,
       promptFocusDisabled,
+      promptInputDisabled,
       resolveInlineDiff,
       submitDisabled,
     ]);
+
+    useEffect(() => {
+      if (!promptInputDisabled) {
+        return;
+      }
+      const textarea = promptTextareaRef.current;
+      if (textarea && document.activeElement === textarea) {
+        textarea.blur();
+      }
+    }, [promptInputDisabled]);
 
     const docModel = useMemo(
       () =>
@@ -3754,6 +3766,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                   autoCorrect="off"
                   autoCapitalize="off"
                   aria-label="Prompt input"
+                  aria-disabled={promptInputDisabled}
+                  readOnly={promptInputDisabled}
                   onChange={handlePromptInputChange}
                   onClick={handlePromptInputSelectionChange}
                   onFocus={(event) => {

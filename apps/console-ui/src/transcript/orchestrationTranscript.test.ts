@@ -98,6 +98,77 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("omits checkpoint captured system messages from transcript history", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      checkpoints: [],
+      proposedPlans: [],
+      activities: [],
+      messages: [
+        {
+          id: MessageId.makeUnsafe("message-system-checkpoint"),
+          role: "system",
+          text: "Checkpoint captured",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-03-11T09:00:00.000Z",
+          updatedAt: "2026-03-11T09:00:00.000Z",
+        },
+        {
+          id: MessageId.makeUnsafe("message-assistant"),
+          role: "assistant",
+          text: "Still here",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-03-11T09:00:01.000Z",
+          updatedAt: "2026-03-11T09:00:01.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      { type: "assistant-text", text: "Still here", streaming: false },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        finishedAt: "2026-03-11T09:00:01.000Z",
+      },
+    ]);
+  });
+
+  it("omits checkpoint captured activities from transcript history", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      checkpoints: [],
+      proposedPlans: [],
+      messages: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-checkpoint-captured"),
+          tone: "info",
+          kind: "checkpoint.captured",
+          summary: "Checkpoint captured",
+          payload: {
+            turnCount: 3,
+            status: "ready",
+          },
+          turnId: TurnId.makeUnsafe("turn-checkpoint-captured"),
+          createdAt: "2026-03-11T09:00:00.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([]);
+  });
+
   it("groups contiguous work activity into one work-group block", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
@@ -1033,6 +1104,77 @@ describe("threadToTranscriptBlocks", () => {
         type: "finished-state",
         startedAt: "2026-03-11T09:00:00.000Z",
         finishedAt: "2026-03-11T09:00:02.000Z",
+      },
+    ]);
+  });
+
+  it("does not append a duplicate finished-state to later non-message entries in a completed turn", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    expect(thread!.latestTurn).toBeDefined();
+
+    const turnId = TurnId.makeUnsafe("turn-finished-before-reasoning");
+    const messageId = MessageId.makeUnsafe("assistant-finished-before-reasoning");
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      checkpoints: [],
+      proposedPlans: [],
+      messages: [
+        {
+          id: messageId,
+          role: "assistant",
+          text: "Listing top-level files first.",
+          attachments: [],
+          turnId,
+          streaming: false,
+          createdAt: "2026-03-11T09:00:00.000Z",
+          updatedAt: "2026-03-11T09:00:01.000Z",
+        },
+      ],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-reasoning-after-message"),
+          tone: "info",
+          kind: "reasoning.summary",
+          summary: "Exploring filesystem",
+          payload: {
+            streamKind: "reasoning_summary_text",
+            text: "**Exploring filesystem**\n\nNeed an accurate top-level snapshot first.",
+          },
+          turnId,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:03.000Z",
+        },
+      ],
+      latestTurn: {
+        ...thread!.latestTurn!,
+        turnId,
+        state: "completed",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        completedAt: "2026-03-11T09:00:02.500Z",
+        assistantMessageId: messageId,
+      },
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Listing top-level files first.",
+        streaming: false,
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        finishedAt: "2026-03-11T09:00:02.500Z",
+      },
+      {
+        type: "reasoning-summary",
+        text: "Exploring filesystem",
+      },
+      {
+        type: "reasoning-text",
+        text: "Need an accurate top-level snapshot first.",
       },
     ]);
   });
