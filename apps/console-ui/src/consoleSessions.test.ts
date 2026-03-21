@@ -65,7 +65,10 @@ function createEmptyState(): ConsoleProjectLayoutsState {
     activeProjectId: null,
     layoutsByProjectId: {},
     lastChosenProvider: "codex",
-    sidebarWidth: 300,
+    lastChosenModelByProvider: {
+      codex: "gpt-5-codex",
+      copilot: "gpt-5",
+    },
   };
 }
 
@@ -100,9 +103,39 @@ describe("reconcileProjectLayoutsState", () => {
     expect(state.activeProjectId).toBe(otherProject.id);
     expect(state.layoutsByProjectId[project.id]?.tabs).toHaveLength(1);
     expect(state.layoutsByProjectId[otherProject.id]?.tabs).toHaveLength(1);
-    expect(state.layoutsByProjectId[project.id]?.panesById[
+    const initialPane = state.layoutsByProjectId[project.id]?.panesById[
       state.layoutsByProjectId[project.id]!.tabs[0]!.paneIds[0]!
-    ]?.kind).toBe("draft");
+    ];
+    expect(initialPane?.kind).toBe("draft");
+    if (initialPane?.kind === "draft") {
+      expect(initialPane.setup.selectedProvider).toBe("codex");
+      expect(initialPane.setup.selectedModel).toBe("gpt-5-codex");
+    }
+  });
+
+  it("uses the persisted last model for the draft provider when creating default drafts", () => {
+    const state = reconcileProjectLayoutsState({
+      state: {
+        ...createEmptyState(),
+        lastChosenProvider: "copilot",
+        lastChosenModelByProvider: {
+          codex: "gpt-5-codex",
+          copilot: "claude-sonnet-4.5",
+        },
+      },
+      threads: [],
+      projects: [project],
+      preferredThreadId: null,
+    });
+
+    const pane = state.layoutsByProjectId[project.id]?.panesById[
+      state.layoutsByProjectId[project.id]!.tabs[0]!.paneIds[0]!
+    ];
+    expect(pane?.kind).toBe("draft");
+    if (pane?.kind === "draft") {
+      expect(pane.setup.selectedProvider).toBe("copilot");
+      expect(pane.setup.selectedModel).toBe("claude-sonnet-4.5");
+    }
   });
 
   it("replaces duplicate thread panes with a draft pane so a thread stays mounted once per project", () => {

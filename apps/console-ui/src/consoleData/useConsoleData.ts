@@ -65,6 +65,11 @@ export interface ConsoleDataState {
   readonly isStoppingSession: boolean;
   readonly error: string | null;
   setActiveThreadId(threadId: string): void;
+  createProject(input: {
+    workspaceRoot: string;
+    title?: string;
+    defaultModel?: string;
+  }): Promise<{ projectId: OrchestrationProject["id"] }>;
   createThread(input?: {
     projectId: OrchestrationProject["id"];
     provider: ProviderKind;
@@ -99,6 +104,7 @@ export interface ConsoleDataState {
     reasoningEffort: CodexReasoningEffort | null,
   ): Promise<void>;
   setInteractionMode(threadId: string, interactionMode: ProviderInteractionMode): Promise<void>;
+  deleteThread(threadId: string): Promise<void>;
   interruptTurn(threadId: string): Promise<void>;
   stopSession(threadId: string): Promise<void>;
 }
@@ -822,6 +828,36 @@ export function useConsoleData(): ConsoleDataState {
     }
   }, [connectionState]);
 
+  const createProject = useCallback(
+    async (input: {
+      workspaceRoot: string;
+      title?: string;
+      defaultModel?: string;
+    }) => {
+      const workspaceRoot = input.workspaceRoot.trim();
+      const title = input.title?.trim();
+      if (workspaceRoot.length === 0) {
+        throw new Error("Project path is required.");
+      }
+      if (!title) {
+        throw new Error("Project title is required.");
+      }
+      assertLiveCommandReady();
+      const projectId = makeId("project") as OrchestrationProject["id"];
+      await backend.dispatchCommand({
+        type: "project.create",
+        commandId: makeId("command") as CommandId,
+        projectId,
+        title,
+        workspaceRoot,
+        ...(input.defaultModel?.trim() ? { defaultModel: input.defaultModel.trim() } : {}),
+        createdAt: new Date().toISOString(),
+      });
+      return { projectId };
+    },
+    [assertLiveCommandReady, backend],
+  );
+
   const createThread = useCallback(
     async (input?: {
       projectId: OrchestrationProject["id"];
@@ -1121,6 +1157,19 @@ export function useConsoleData(): ConsoleDataState {
     [assertLiveCommandReady, backend, threads],
   );
 
+  const deleteThread = useCallback(async (threadId: string) => {
+    const targetThread = findThreadById(threads, threadId);
+    if (!targetThread) {
+      throw new Error("No orchestration thread is available.");
+    }
+    assertLiveCommandReady();
+    await backend.dispatchCommand({
+      type: "thread.delete",
+      commandId: makeCommandId(),
+      threadId: targetThread.id,
+    });
+  }, [assertLiveCommandReady, backend, threads]);
+
   const interruptTurn = useCallback(async (threadId: string) => {
     const targetThread = findThreadById(threads, threadId);
     if (!targetThread) {
@@ -1198,6 +1247,7 @@ export function useConsoleData(): ConsoleDataState {
     isStoppingSession,
     error,
     setActiveThreadId,
+    createProject,
     createThread,
     getThreadEvents,
     getPendingUserInputs,
@@ -1210,6 +1260,7 @@ export function useConsoleData(): ConsoleDataState {
     setThreadModel,
     setThreadReasoningEffort,
     setInteractionMode,
+    deleteThread,
     interruptTurn,
     stopSession,
   };

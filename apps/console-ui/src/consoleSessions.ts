@@ -1,19 +1,18 @@
-import type {
-  OrchestrationProject,
-  OrchestrationThread,
-  ProviderInteractionMode,
-  ProviderKind,
+import {
+  DEFAULT_MODEL_BY_PROVIDER,
+  type OrchestrationProject,
+  type OrchestrationThread,
+  type ProviderInteractionMode,
+  type ProviderKind,
 } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 const STORAGE_KEY = "t3code:console-project-layouts:v1";
-const DEFAULT_SIDEBAR_WIDTH = 300;
-const MIN_SIDEBAR_WIDTH = 220;
-const MAX_SIDEBAR_WIDTH = 520;
 
 export interface ConsolePaneSetup {
   readonly type: "new-thread";
   readonly selectedProvider: ProviderKind;
+  readonly selectedModel: string;
   readonly createdAt: string;
   readonly interactionMode: ProviderInteractionMode;
   readonly branch: string | null;
@@ -55,7 +54,7 @@ export interface ConsoleProjectLayoutsState {
   readonly activeProjectId: OrchestrationProject["id"] | null;
   readonly layoutsByProjectId: Record<string, ConsoleProjectLayout>;
   readonly lastChosenProvider: ProviderKind;
-  readonly sidebarWidth: number;
+  readonly lastChosenModelByProvider: Record<ProviderKind, string>;
 }
 
 export interface ConsoleProjectView {
@@ -80,11 +79,10 @@ export interface ConsoleProjectLayoutsModel {
   readonly activeThreadId: OrchestrationThread["id"] | null;
   readonly activePaneId: string | null;
   readonly lastChosenProvider: ProviderKind;
-  readonly sidebarWidth: number;
+  readonly lastChosenModelByProvider: Record<ProviderKind, string>;
   activateProject(projectId: OrchestrationProject["id"]): void;
   toggleProjectCollapsed(projectId: OrchestrationProject["id"]): void;
   reorderProjects(projectIds: ReadonlyArray<OrchestrationProject["id"]>): void;
-  setSidebarWidth(width: number): void;
   activateTab(projectId: OrchestrationProject["id"], tabId: string): void;
   activatePane(projectId: OrchestrationProject["id"], tabId: string, paneId: string): void;
   createDraftTab(input: {
@@ -113,11 +111,13 @@ export interface ConsoleProjectLayoutsModel {
     paneId: string;
     threadId: OrchestrationThread["id"];
   }): boolean;
+  rememberProviderModel(provider: ProviderKind, model: string): void;
 }
 
 interface PersistedConsolePaneSetup {
   readonly type?: unknown;
   readonly selectedProvider?: unknown;
+  readonly selectedModel?: unknown;
   readonly createdAt?: unknown;
   readonly interactionMode?: unknown;
   readonly branch?: unknown;
@@ -152,7 +152,7 @@ interface PersistedConsoleProjectLayoutsState {
   readonly activeProjectId?: unknown;
   readonly layoutsByProjectId?: unknown;
   readonly lastChosenProvider?: unknown;
-  readonly sidebarWidth?: unknown;
+  readonly lastChosenModelByProvider?: unknown;
 }
 
 function makeId(prefix: string) {
@@ -163,10 +163,6 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function clampSidebarWidth(width: number) {
-  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, Math.round(width)));
-}
-
 function isProviderKind(value: unknown): value is ProviderKind {
   return value === "codex" || value == "copilot";
 }
@@ -175,16 +171,54 @@ function isInteractionMode(value: unknown): value is ProviderInteractionMode {
   return value === "default" || value === "plan";
 }
 
+function createDefaultLastChosenModelByProvider(): Record<ProviderKind, string> {
+  return {
+    codex: DEFAULT_MODEL_BY_PROVIDER.codex,
+    copilot: DEFAULT_MODEL_BY_PROVIDER.copilot,
+  };
+}
+
+function resolveProviderModelSelection(
+  provider: ProviderKind,
+  candidateModel: unknown,
+  fallbackModelsByProvider: Readonly<Record<ProviderKind, string>>,
+) {
+  if (typeof candidateModel == "string") {
+    const trimmed = candidateModel.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+  return fallbackModelsByProvider[provider];
+}
+
+function resolveLastChosenModelByProvider(candidate: unknown): Record<ProviderKind, string> {
+  const defaults = createDefaultLastChosenModelByProvider();
+  if (!candidate || typeof candidate != "object") {
+    return defaults;
+  }
+  const parsed = candidate as { readonly codex?: unknown; readonly copilot?: unknown };
+  return {
+    codex: resolveProviderModelSelection("codex", parsed.codex, defaults),
+    copilot: resolveProviderModelSelection("copilot", parsed.copilot, defaults),
+  };
+}
+
 function defaultPaneSetup(input?: {
   readonly selectedProvider?: ProviderKind;
+  readonly selectedModel?: string;
+  readonly fallbackModelsByProvider?: Readonly<Record<ProviderKind, string>>;
   readonly createdAt?: string;
   readonly interactionMode?: ProviderInteractionMode;
   readonly branch?: string | null;
   readonly worktreePath?: string | null;
 }): ConsolePaneSetup {
+  const selectedProvider = input?.selectedProvider ?? "codex";
+  const fallbackModelsByProvider = input?.fallbackModelsByProvider ?? createDefaultLastChosenModelByProvider();
   return {
     type: "new-thread",
-    selectedProvider: input?.selectedProvider ?? "codex",
+    selectedProvider,
+    selectedModel: resolveProviderModelSelection(selectedProvider, input?.selectedModel, fallbackModelsByProvider),
     createdAt: input?.createdAt ?? nowIso(),
     interactionMode: input?.interactionMode ?? "default",
     branch: input?.branch ?? null,
@@ -195,6 +229,8 @@ function defaultPaneSetup(input?: {
 function createDraftPane(input?: {
   readonly id?: string;
   readonly selectedProvider?: ProviderKind;
+  readonly selectedModel?: string;
+  readonly fallbackModelsByProvider?: Readonly<Record<ProviderKind, string>>;
   readonly createdAt?: string;
   readonly interactionMode?: ProviderInteractionMode;
   readonly branch?: string | null;
@@ -219,6 +255,8 @@ function createDraftTabRef(input?: {
   readonly tabId?: string;
   readonly paneId?: string;
   readonly selectedProvider?: ProviderKind;
+  readonly selectedModel?: string;
+  readonly fallbackModelsByProvider?: Readonly<Record<ProviderKind, string>>;
   readonly createdAt?: string;
   readonly interactionMode?: ProviderInteractionMode;
   readonly branch?: string | null;
@@ -227,6 +265,8 @@ function createDraftTabRef(input?: {
   const pane = createDraftPane({
     ...(input?.paneId ? { id: input.paneId } : {}),
     ...(input?.selectedProvider ? { selectedProvider: input.selectedProvider } : {}),
+    ...(input?.selectedModel ? { selectedModel: input.selectedModel } : {}),
+    ...(input?.fallbackModelsByProvider ? { fallbackModelsByProvider: input.fallbackModelsByProvider } : {}),
     ...(input?.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input?.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input?.branch !== undefined ? { branch: input.branch ?? null } : {}),
@@ -246,12 +286,16 @@ function createDraftTabRef(input?: {
 
 function createProjectLayout(projectId: OrchestrationProject["id"], input?: {
   readonly selectedProvider?: ProviderKind;
+  readonly selectedModel?: string;
+  readonly fallbackModelsByProvider?: Readonly<Record<ProviderKind, string>>;
   readonly interactionMode?: ProviderInteractionMode;
   readonly branch?: string | null;
   readonly worktreePath?: string | null;
 }): ConsoleProjectLayout {
   const { tab, pane } = createDraftTabRef({
     ...(input?.selectedProvider ? { selectedProvider: input.selectedProvider } : {}),
+    ...(input?.selectedModel ? { selectedModel: input.selectedModel } : {}),
+    ...(input?.fallbackModelsByProvider ? { fallbackModelsByProvider: input.fallbackModelsByProvider } : {}),
     ...(input?.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input?.branch !== undefined ? { branch: input.branch ?? null } : {}),
     ...(input?.worktreePath !== undefined ? { worktreePath: input.worktreePath ?? null } : {}),
@@ -268,10 +312,16 @@ function createProjectLayout(projectId: OrchestrationProject["id"], input?: {
   };
 }
 
-function normalizePaneSetup(candidate: PersistedConsolePaneSetup | undefined, fallbackProvider: ProviderKind): ConsolePaneSetup {
+function normalizePaneSetup(
+  candidate: PersistedConsolePaneSetup | undefined,
+  fallbackProvider: ProviderKind,
+  fallbackModelsByProvider: Readonly<Record<ProviderKind, string>>,
+): ConsolePaneSetup {
+  const selectedProvider = isProviderKind(candidate?.selectedProvider) ? candidate.selectedProvider : fallbackProvider;
   return {
     type: "new-thread",
-    selectedProvider: isProviderKind(candidate?.selectedProvider) ? candidate.selectedProvider : fallbackProvider,
+    selectedProvider,
+    selectedModel: resolveProviderModelSelection(selectedProvider, candidate?.selectedModel, fallbackModelsByProvider),
     createdAt: typeof candidate?.createdAt == "string" && candidate.createdAt.length > 0 ? candidate.createdAt : nowIso(),
     interactionMode: isInteractionMode(candidate?.interactionMode) ? candidate.interactionMode : "default",
     branch: typeof candidate?.branch == "string" && candidate.branch.length > 0 ? candidate.branch : null,
@@ -282,7 +332,11 @@ function normalizePaneSetup(candidate: PersistedConsolePaneSetup | undefined, fa
   };
 }
 
-function normalizePane(candidate: PersistedConsoleProjectPane, fallbackProvider: ProviderKind): ConsoleProjectPane | null {
+function normalizePane(
+  candidate: PersistedConsoleProjectPane,
+  fallbackProvider: ProviderKind,
+  fallbackModelsByProvider: Readonly<Record<ProviderKind, string>>,
+): ConsoleProjectPane | null {
   if (typeof candidate?.id != "string" || candidate.id.length == 0) {
     return null;
   }
@@ -296,7 +350,7 @@ function normalizePane(candidate: PersistedConsoleProjectPane, fallbackProvider:
   return {
     id: candidate.id,
     kind: "draft",
-    setup: normalizePaneSetup(candidate.setup, fallbackProvider),
+    setup: normalizePaneSetup(candidate.setup, fallbackProvider, fallbackModelsByProvider),
   };
 }
 
@@ -328,6 +382,7 @@ function normalizeTab(candidate: PersistedConsoleProjectTab): ConsoleProjectTab 
 }
 
 function readPersistedState(): ConsoleProjectLayoutsState {
+  const defaultLastChosenModelByProvider = createDefaultLastChosenModelByProvider();
   if (typeof window == "undefined") {
     return {
       projectOrder: [],
@@ -335,7 +390,7 @@ function readPersistedState(): ConsoleProjectLayoutsState {
       activeProjectId: null,
       layoutsByProjectId: {},
       lastChosenProvider: "codex",
-      sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+      lastChosenModelByProvider: defaultLastChosenModelByProvider,
     };
   }
   try {
@@ -347,11 +402,12 @@ function readPersistedState(): ConsoleProjectLayoutsState {
         activeProjectId: null,
         layoutsByProjectId: {},
         lastChosenProvider: "codex",
-        sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+        lastChosenModelByProvider: defaultLastChosenModelByProvider,
       };
     }
     const parsed = JSON.parse(raw) as PersistedConsoleProjectLayoutsState;
     const lastChosenProvider = isProviderKind(parsed.lastChosenProvider) ? parsed.lastChosenProvider : "codex";
+    const lastChosenModelByProvider = resolveLastChosenModelByProvider(parsed.lastChosenModelByProvider);
     const layoutsByProjectId: Record<string, ConsoleProjectLayout> = {};
     if (parsed.layoutsByProjectId && typeof parsed.layoutsByProjectId == "object") {
       for (const [projectId, candidate] of Object.entries(parsed.layoutsByProjectId)) {
@@ -365,7 +421,7 @@ function readPersistedState(): ConsoleProjectLayoutsState {
         const panesById: Record<string, ConsoleProjectPane> = {};
         if (persistedLayout.panesById && typeof persistedLayout.panesById == "object") {
           for (const candidatePane of Object.values(persistedLayout.panesById as Record<string, PersistedConsoleProjectPane>)) {
-            const pane = normalizePane(candidatePane, lastChosenProvider);
+            const pane = normalizePane(candidatePane, lastChosenProvider, lastChosenModelByProvider);
             if (pane) {
               panesById[pane.id] = pane;
             }
@@ -412,10 +468,7 @@ function readPersistedState(): ConsoleProjectLayoutsState {
           : null,
       layoutsByProjectId,
       lastChosenProvider,
-      sidebarWidth:
-        typeof parsed.sidebarWidth == "number" && Number.isFinite(parsed.sidebarWidth)
-          ? clampSidebarWidth(parsed.sidebarWidth)
-          : DEFAULT_SIDEBAR_WIDTH,
+      lastChosenModelByProvider,
     };
   } catch {
     return {
@@ -424,7 +477,7 @@ function readPersistedState(): ConsoleProjectLayoutsState {
       activeProjectId: null,
       layoutsByProjectId: {},
       lastChosenProvider: "codex",
-      sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+      lastChosenModelByProvider: defaultLastChosenModelByProvider,
     };
   }
 }
@@ -441,7 +494,7 @@ function persistState(state: ConsoleProjectLayoutsState) {
       activeProjectId: state.activeProjectId,
       layoutsByProjectId: state.layoutsByProjectId,
       lastChosenProvider: state.lastChosenProvider,
-      sidebarWidth: state.sidebarWidth,
+      lastChosenModelByProvider: state.lastChosenModelByProvider,
     }),
   );
 }
@@ -499,7 +552,11 @@ function locateThreadPane(layout: ConsoleProjectLayout, threadId: OrchestrationT
   return null;
 }
 
-function ensureActiveLayoutState(layout: ConsoleProjectLayout, fallbackProvider: ProviderKind): ConsoleProjectLayout {
+function ensureActiveLayoutState(
+  layout: ConsoleProjectLayout,
+  fallbackProvider: ProviderKind,
+  fallbackModelsByProvider: Readonly<Record<ProviderKind, string>>,
+): ConsoleProjectLayout {
   const seenThreadIds = new Set<string>();
   const panesById: Record<string, ConsoleProjectPane> = {};
   const tabs: ConsoleProjectTab[] = [];
@@ -513,7 +570,12 @@ function ensureActiveLayoutState(layout: ConsoleProjectLayout, fallbackProvider:
       }
       if (pane.kind === "thread") {
         if (seenThreadIds.has(pane.threadId)) {
-          const draftPane = createDraftPane({ id: pane.id, selectedProvider: fallbackProvider });
+          const draftPane = createDraftPane({
+            id: pane.id,
+            selectedProvider: fallbackProvider,
+            selectedModel: fallbackModelsByProvider[fallbackProvider],
+            fallbackModelsByProvider,
+          });
           panesById[draftPane.id] = draftPane;
           nextPaneIds.push(draftPane.id);
           continue;
@@ -525,7 +587,7 @@ function ensureActiveLayoutState(layout: ConsoleProjectLayout, fallbackProvider:
       }
       const draftPane: ConsoleDraftPane = {
         ...pane,
-        setup: normalizePaneSetup(pane.setup, fallbackProvider),
+        setup: normalizePaneSetup(pane.setup, fallbackProvider, fallbackModelsByProvider),
       };
       panesById[draftPane.id] = draftPane;
       nextPaneIds.push(draftPane.id);
@@ -542,7 +604,11 @@ function ensureActiveLayoutState(layout: ConsoleProjectLayout, fallbackProvider:
   }
 
   if (tabs.length == 0) {
-    const fresh = createProjectLayout(layout.projectId, { selectedProvider: fallbackProvider });
+    const fresh = createProjectLayout(layout.projectId, {
+      selectedProvider: fallbackProvider,
+      selectedModel: fallbackModelsByProvider[fallbackProvider],
+      fallbackModelsByProvider,
+    });
     return fresh;
   }
 
@@ -579,11 +645,16 @@ export function reconcileProjectLayoutsState(input: {
   const layoutsByProjectId: Record<string, ConsoleProjectLayout> = {};
 
   projectOrder.forEach((projectId) => {
-    const existingLayout = input.state.layoutsByProjectId[projectId];
-    const reconciled = ensureActiveLayoutState(
-      existingLayout ?? createProjectLayout(projectId, { selectedProvider: input.state.lastChosenProvider }),
+      const existingLayout = input.state.layoutsByProjectId[projectId];
+      const reconciled = ensureActiveLayoutState(
+      existingLayout ?? createProjectLayout(projectId, {
+        selectedProvider: input.state.lastChosenProvider,
+        selectedModel: input.state.lastChosenModelByProvider[input.state.lastChosenProvider],
+        fallbackModelsByProvider: input.state.lastChosenModelByProvider,
+      }),
       input.state.lastChosenProvider,
-    );
+      input.state.lastChosenModelByProvider,
+      );
     const panesById: Record<string, ConsoleProjectPane> = {};
     const validTabs: ConsoleProjectTab[] = [];
     const seenThreadIds = new Set<string>();
@@ -597,7 +668,12 @@ export function reconcileProjectLayoutsState(input: {
         if (pane.kind === "thread") {
           const thread = threadsById.get(pane.threadId);
           if (!thread || thread.projectId !== projectId || seenThreadIds.has(pane.threadId)) {
-            const draftPane = createDraftPane({ id: pane.id, selectedProvider: input.state.lastChosenProvider });
+            const draftPane = createDraftPane({
+              id: pane.id,
+              selectedProvider: input.state.lastChosenProvider,
+              selectedModel: input.state.lastChosenModelByProvider[input.state.lastChosenProvider],
+              fallbackModelsByProvider: input.state.lastChosenModelByProvider,
+            });
             panesById[draftPane.id] = draftPane;
             nextPaneIds.push(draftPane.id);
             continue;
@@ -632,7 +708,11 @@ export function reconcileProjectLayoutsState(input: {
     };
 
     if (layout.tabs.length == 0) {
-      layout = createProjectLayout(projectId, { selectedProvider: input.state.lastChosenProvider });
+      layout = createProjectLayout(projectId, {
+        selectedProvider: input.state.lastChosenProvider,
+        selectedModel: input.state.lastChosenModelByProvider[input.state.lastChosenProvider],
+        fallbackModelsByProvider: input.state.lastChosenModelByProvider,
+      });
     }
 
     layoutsByProjectId[projectId] = layout;
@@ -649,7 +729,7 @@ export function reconcileProjectLayoutsState(input: {
     activeProjectId: nextActiveProjectId,
     layoutsByProjectId,
     lastChosenProvider: input.state.lastChosenProvider,
-    sidebarWidth: clampSidebarWidth(input.state.sidebarWidth),
+    lastChosenModelByProvider: input.state.lastChosenModelByProvider,
   };
 }
 
@@ -658,7 +738,11 @@ function updateLayoutState(
   projectId: OrchestrationProject["id"],
   updater: (layout: ConsoleProjectLayout) => ConsoleProjectLayout,
 ): ConsoleProjectLayoutsState {
-  const currentLayout = state.layoutsByProjectId[projectId] ?? createProjectLayout(projectId, { selectedProvider: state.lastChosenProvider });
+  const currentLayout = state.layoutsByProjectId[projectId] ?? createProjectLayout(projectId, {
+    selectedProvider: state.lastChosenProvider,
+    selectedModel: state.lastChosenModelByProvider[state.lastChosenProvider],
+    fallbackModelsByProvider: state.lastChosenModelByProvider,
+  });
   const nextLayout = updater(currentLayout);
   if (nextLayout === currentLayout && state.activeProjectId === projectId) {
     return state;
@@ -674,7 +758,12 @@ function updateLayoutState(
 }
 
 function createFreshDraftReplacement(state: ConsoleProjectLayoutsState, paneId: string): ConsoleDraftPane {
-  return createDraftPane({ id: paneId, selectedProvider: state.lastChosenProvider });
+  return createDraftPane({
+    id: paneId,
+    selectedProvider: state.lastChosenProvider,
+    selectedModel: state.lastChosenModelByProvider[state.lastChosenProvider],
+    fallbackModelsByProvider: state.lastChosenModelByProvider,
+  });
 }
 
 export function useConsoleProjectLayouts(input: {
@@ -706,9 +795,13 @@ export function useConsoleProjectLayouts(input: {
 
   const projectViews = useMemo(() => orderedProjects.map((project) => ({
     project,
-    layout: state.layoutsByProjectId[project.id] ?? createProjectLayout(project.id, { selectedProvider: state.lastChosenProvider }),
+    layout: state.layoutsByProjectId[project.id] ?? createProjectLayout(project.id, {
+      selectedProvider: state.lastChosenProvider,
+      selectedModel: state.lastChosenModelByProvider[state.lastChosenProvider],
+      fallbackModelsByProvider: state.lastChosenModelByProvider,
+    }),
     collapsed: state.collapsedProjectIds.includes(project.id),
-  })), [orderedProjects, state.collapsedProjectIds, state.layoutsByProjectId, state.lastChosenProvider]);
+  })), [orderedProjects, state.collapsedProjectIds, state.layoutsByProjectId, state.lastChosenModelByProvider, state.lastChosenProvider]);
 
   const activeProject = useMemo(
     () => (state.activeProjectId ? input.projects.find((project) => project.id === state.activeProjectId) ?? null : null),
@@ -756,10 +849,6 @@ export function useConsoleProjectLayouts(input: {
     });
   }, []);
 
-  const setSidebarWidth = useCallback((width: number) => {
-    setState((existing) => ({ ...existing, sidebarWidth: clampSidebarWidth(width) }));
-  }, []);
-
   const activateTab = useCallback((projectId: OrchestrationProject["id"], tabId: string) => {
     setState((existing) => updateLayoutState(existing, projectId, (layout) => {
       if (!layout.tabs.some((tab) => tab.id === tabId)) {
@@ -803,6 +892,8 @@ export function useConsoleProjectLayouts(input: {
     setState((existing) => updateLayoutState(existing, inputValue.projectId, (layout) => {
       const next = createDraftTabRef({
         selectedProvider: existing.lastChosenProvider,
+        selectedModel: existing.lastChosenModelByProvider[existing.lastChosenProvider],
+        fallbackModelsByProvider: existing.lastChosenModelByProvider,
         ...(inputValue.interactionMode ? { interactionMode: inputValue.interactionMode } : {}),
         ...(inputValue.branch !== undefined ? { branch: inputValue.branch ?? null } : {}),
         ...(inputValue.worktreePath !== undefined ? { worktreePath: inputValue.worktreePath ?? null } : {}),
@@ -828,7 +919,11 @@ export function useConsoleProjectLayouts(input: {
       if (!located || located.tab.paneIds.length >= 6) {
         return layout;
       }
-      const pane = createDraftPane({ selectedProvider: existing.lastChosenProvider });
+      const pane = createDraftPane({
+        selectedProvider: existing.lastChosenProvider,
+        selectedModel: existing.lastChosenModelByProvider[existing.lastChosenProvider],
+        fallbackModelsByProvider: existing.lastChosenModelByProvider,
+      });
       created = { tabId: located.tab.id, paneId: pane.id };
       const tabs = layout.tabs.map((tab) =>
         tab.id === located.tab.id
@@ -861,7 +956,11 @@ export function useConsoleProjectLayouts(input: {
       });
 
       if (remainingTabs.length === 0) {
-        const fresh = createProjectLayout(projectId, { selectedProvider: existing.lastChosenProvider });
+        const fresh = createProjectLayout(projectId, {
+          selectedProvider: existing.lastChosenProvider,
+          selectedModel: existing.lastChosenModelByProvider[existing.lastChosenProvider],
+          fallbackModelsByProvider: existing.lastChosenModelByProvider,
+        });
         return fresh;
       }
 
@@ -884,7 +983,11 @@ export function useConsoleProjectLayouts(input: {
       if (located.tab.paneIds.length <= 1) {
         const tabsExcluding = layout.tabs.filter((tab) => tab.id !== located.tab.id);
         if (tabsExcluding.length === 0) {
-          return createProjectLayout(projectId, { selectedProvider: existing.lastChosenProvider });
+          return createProjectLayout(projectId, {
+            selectedProvider: existing.lastChosenProvider,
+            selectedModel: existing.lastChosenModelByProvider[existing.lastChosenProvider],
+            fallbackModelsByProvider: existing.lastChosenModelByProvider,
+          });
         }
         const nextPanesById = { ...layout.panesById };
         delete nextPanesById[paneId];
@@ -928,7 +1031,19 @@ export function useConsoleProjectLayouts(input: {
         if (!located || located.pane.kind !== "draft") {
           continue;
         }
-        const nextSetup = inputValue.updater(located.pane.setup);
+        const updatedSetup = inputValue.updater(located.pane.setup);
+        const providerChanged = updatedSetup.selectedProvider !== located.pane.setup.selectedProvider;
+        const nextSetup: ConsolePaneSetup = {
+          ...updatedSetup,
+          selectedModel:
+            providerChanged && updatedSetup.selectedModel === located.pane.setup.selectedModel
+              ? existing.lastChosenModelByProvider[updatedSetup.selectedProvider]
+              : resolveProviderModelSelection(
+                  updatedSetup.selectedProvider,
+                  updatedSetup.selectedModel,
+                  existing.lastChosenModelByProvider,
+                ),
+        };
         const nextPane: ConsoleDraftPane = {
           ...located.pane,
           setup: nextSetup,
@@ -944,6 +1059,10 @@ export function useConsoleProjectLayouts(input: {
           ...existing,
           activeProjectId: projectId as OrchestrationProject["id"],
           lastChosenProvider: nextSetup.selectedProvider,
+          lastChosenModelByProvider: {
+            ...existing.lastChosenModelByProvider,
+            [nextSetup.selectedProvider]: nextSetup.selectedModel,
+          },
           layoutsByProjectId: {
             ...existing.layoutsByProjectId,
             [projectId]: nextLayout,
@@ -1046,6 +1165,23 @@ export function useConsoleProjectLayouts(input: {
     return result;
   }, [input.threads]);
 
+  const rememberProviderModel = useCallback((provider: ProviderKind, model: string) => {
+    setState((existing) => {
+      const normalizedModel = resolveProviderModelSelection(provider, model, existing.lastChosenModelByProvider);
+      if (existing.lastChosenModelByProvider[provider] === normalizedModel) {
+        return existing;
+      }
+      return {
+        ...existing,
+        lastChosenProvider: provider,
+        lastChosenModelByProvider: {
+          ...existing.lastChosenModelByProvider,
+          [provider]: normalizedModel,
+        },
+      };
+    });
+  }, []);
+
   return {
     state,
     projectViews,
@@ -1057,11 +1193,10 @@ export function useConsoleProjectLayouts(input: {
     activeThreadId,
     activePaneId,
     lastChosenProvider: state.lastChosenProvider,
-    sidebarWidth: state.sidebarWidth,
+    lastChosenModelByProvider: state.lastChosenModelByProvider,
     activateProject,
     toggleProjectCollapsed,
     reorderProjects,
-    setSidebarWidth,
     activateTab,
     activatePane,
     createDraftTab,
@@ -1072,5 +1207,6 @@ export function useConsoleProjectLayouts(input: {
     completeDraftPane,
     openThread,
     mountThreadInPane,
+    rememberProviderModel,
   };
 }

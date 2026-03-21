@@ -1,16 +1,39 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type CSSProperties } from "react";
 
 import type { CommandPaletteCommand } from "./commandPaletteCommands";
+
+export interface CommandPaletteScopeBounds {
+  readonly top: number;
+  readonly left: number;
+  readonly width: number;
+  readonly height: number;
+}
 
 interface CommandPaletteProps {
   readonly open: boolean;
   readonly query: string;
   readonly commands: ReadonlyArray<CommandPaletteCommand>;
   readonly selectedIndex: number;
+  readonly scopeBounds: CommandPaletteScopeBounds | null;
   onClose(): void;
   onQueryChange(value: string): void;
   onSelectedIndexChange(index: number): void;
   onRun(command: CommandPaletteCommand): void;
+}
+
+export function resolveCommandPaletteFrameStyle(
+  scopeBounds: CommandPaletteScopeBounds | null,
+): CSSProperties | undefined {
+  if (!scopeBounds) {
+    return undefined;
+  }
+
+  return {
+    top: `${Math.max(0, Math.round(scopeBounds.top))}px`,
+    left: `${Math.max(0, Math.round(scopeBounds.left))}px`,
+    width: `${Math.max(0, Math.round(scopeBounds.width))}px`,
+    height: `${Math.max(0, Math.round(scopeBounds.height))}px`,
+  };
 }
 
 export function CommandPalette({
@@ -18,6 +41,7 @@ export function CommandPalette({
   query,
   commands,
   selectedIndex,
+  scopeBounds,
   onClose,
   onQueryChange,
   onSelectedIndexChange,
@@ -59,6 +83,9 @@ export function CommandPalette({
     return null;
   }
 
+  const isScopedToThread = scopeBounds !== null;
+  const frameStyle = resolveCommandPaletteFrameStyle(scopeBounds);
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Tab") {
       event.preventDefault();
@@ -97,58 +124,60 @@ export function CommandPalette({
   };
 
   return (
-    <div className="palette-overlay" role="presentation" onMouseDown={onClose}>
-      <section
-        className="palette-window"
-        aria-label="Command palette"
-        role="dialog"
-        aria-modal="true"
-        onMouseDown={(event) => {
-          event.stopPropagation();
-        }}
-      >
-        <input
-          ref={inputRef}
-          className="palette-search"
-          type="text"
-          placeholder="Search commands"
-          spellCheck={false}
-          value={query}
-          onChange={(event) => {
-            onQueryChange(event.target.value);
+    <div className={`palette-overlay${isScopedToThread ? " palette-overlay--scoped" : ""}`} role="presentation" onMouseDown={onClose}>
+      <div className={`palette-frame${isScopedToThread ? " palette-frame--scoped" : ""}`} style={frameStyle}>
+        <section
+          className={`palette-window${isScopedToThread ? " palette-window--scoped" : ""}`}
+          aria-label="Command palette"
+          role="dialog"
+          aria-modal="true"
+          onMouseDown={(event) => {
+            event.stopPropagation();
           }}
-          onKeyDown={handleKeyDown}
-        />
-        <div className="palette-results" role="listbox">
-          {commands.length === 0 ? (
-            <div className="palette-empty">No results.</div>
-          ) : (
-            commands.map((cmd, index) => (
-              <button
-                key={cmd.id}
-                ref={(element) => {
-                  rowRefs.current[index] = element;
-                }}
-                type="button"
-                className={`palette-row${index === selectedIndex ? " palette-row--active" : ""}${cmd.contextText ? " palette-row--withContext" : " palette-row--withoutContext"}`}
-                tabIndex={-1}
-                role="option"
-                aria-selected={index === selectedIndex}
-                onMouseEnter={() => {
-                  onSelectedIndexChange(index);
-                }}
-                onClick={() => {
-                  onRun(cmd);
-                }}
-              >
-                <span className="palette-marker" aria-hidden="true">{index === selectedIndex ? "›" : ""}</span>
-                <span className="palette-cmd">{cmd.label}</span>
-                {cmd.contextText ? <span className="palette-context">{cmd.contextText}</span> : null}
-              </button>
-            ))
-          )}
-        </div>
-      </section>
+        >
+          <input
+            ref={inputRef}
+            className="palette-search"
+            type="text"
+            placeholder="Search commands"
+            spellCheck={false}
+            value={query}
+            onChange={(event) => {
+              onQueryChange(event.target.value);
+            }}
+            onKeyDown={handleKeyDown}
+          />
+          <div className="palette-results" role="listbox">
+            {commands.length === 0 ? (
+              <div className="palette-empty">No results.</div>
+            ) : (
+              commands.map((cmd, index) => (
+                <button
+                  key={cmd.id}
+                  ref={(element) => {
+                    rowRefs.current[index] = element;
+                  }}
+                  type="button"
+                  className={`palette-row${index === selectedIndex ? " palette-row--active" : ""}${cmd.contextText ? " palette-row--withContext" : " palette-row--withoutContext"}`}
+                  tabIndex={-1}
+                  role="option"
+                  aria-selected={index === selectedIndex}
+                  onMouseEnter={() => {
+                    onSelectedIndexChange(index);
+                  }}
+                  onClick={() => {
+                    onRun(cmd);
+                  }}
+                >
+                  <span className="palette-marker" aria-hidden="true">{index === selectedIndex ? "›" : ""}</span>
+                  <span className="palette-cmd">{cmd.label}</span>
+                  {cmd.contextText ? <span className="palette-context">{cmd.contextText}</span> : null}
+                </button>
+              ))
+            )}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }

@@ -8,12 +8,15 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import {
+  type CSSProperties,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 
 import { CommandPalette } from "./CommandPalette";
@@ -21,6 +24,7 @@ import {
   filterCommandPaletteCommands,
   type CommandPaletteCommand,
 } from "./commandPaletteCommands";
+import type { CommandPaletteScopeBounds } from "./CommandPalette";
 import {
   IMAGE_ATTACHMENT_SIZE_LIMIT_LABEL,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -40,6 +44,7 @@ import {
 } from "./transcript";
 import { useConsoleData, type PendingConsoleThread } from "./consoleData/useConsoleData";
 import {
+  type ConsoleProjectLayout,
   resolveThreadCwd,
   useConsoleProjectLayouts,
   type ConsolePaneSetup,
@@ -48,8 +53,12 @@ import {
 import { resolveWsHttpOrigin } from "./wsTransport";
 
 const DRAFT_STORAGE_KEY = "t3code:console-pane-drafts:v1";
+const ARCHIVED_PROJECT_IDS_STORAGE_KEY = "t3code:archived-project-ids:v1";
 const EMPTY_PROJECTS: ReadonlyArray<OrchestrationProject> = [];
-
+const SIDEBAR_THREAD_LIMIT = 7;
+const SIDEBAR_IDLE_HIDE_MS = 10 * 60 * 60 * 1000;
+const PROJECT_CONTEXT_MENU_WIDTH = 360;
+const PROJECT_CONTEXT_MENU_HEIGHT = 220;
 interface AppPaletteCommand extends CommandPaletteCommand {
   run(): Promise<void> | void;
 }
@@ -73,11 +82,47 @@ interface PaneView {
   readonly cwd: string | null;
   readonly interactionMode: "default" | "plan";
   readonly provider: ProviderKind;
+  readonly model: string;
 }
 
 interface ThreadStatusDescriptor {
   readonly tone: "working" | "waiting" | "idle" | "error";
   readonly label: string;
+}
+
+interface ProjectContextMenuState {
+  readonly projectId: OrchestrationProject["id"];
+  readonly x: number;
+  readonly y: number;
+}
+
+interface ThreadContextMenuState {
+  readonly threadId: OrchestrationThread["id"];
+  readonly x: number;
+  readonly y: number;
+}
+
+interface ThreadSelectionSummary {
+  readonly totalCount: number;
+  readonly selectedCount: number;
+  readonly allSelected: boolean;
+  readonly partiallySelected: boolean;
+}
+
+interface ManagedThreadRowSelectionResult<ThreadId extends string> {
+  readonly selectedRowIds: ReadonlySet<ThreadId>;
+  readonly activeRowId: ThreadId;
+  readonly nextAnchorThreadId: ThreadId;
+}
+
+function arePaletteScopeBoundsEqual(
+  left: CommandPaletteScopeBounds | null,
+  right: CommandPaletteScopeBounds | null,
+) {
+  return left?.top === right?.top
+    && left?.left === right?.left
+    && left?.width === right?.width
+    && left?.height === right?.height;
 }
 
 function isDesktopBridgeAvailable() {
@@ -112,6 +157,173 @@ function truncateTitle(text: string, maxLength = 50) {
   return `${trimmed.slice(0, maxLength)}...`;
 }
 
+function normalizeProjectPathInput(value: string) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length > 1) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function deriveProjectTitleFromPath(workspaceRoot: string) {
+  const normalized = workspaceRoot.replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/).filter((part) => part.length > 0);
+  return parts[parts.length - 1] ?? normalized;
+}
+
+export function shouldSuppressTabFocusNavigation(
+  event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey">,
+) {
+  return event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey;
+}
+
+export function isPaletteToggleShortcut(
+  event: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "metaKey" | "altKey">,
+) {
+  return event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "a";
+}
+
+export function summarizeThreadSelection(
+  threadIds: ReadonlyArray<string>,
+  selectedThreadIds: ReadonlySet<string>,
+): ThreadSelectionSummary {
+  const totalCount = threadIds.length;
+  const selectedCount = threadIds.filter((threadId) => selectedThreadIds.has(threadId)).length;
+  return {
+    totalCount,
+    selectedCount,
+    allSelected: totalCount > 0 && selectedCount === totalCount,
+    partiallySelected: selectedCount > 0 && selectedCount < totalCount,
+  };
+}
+
+function getManagedThreadIdRange<ThreadId extends string>(
+  orderedThreadIds: ReadonlyArray<ThreadId>,
+  fromThreadId: ThreadId,
+  toThreadId: ThreadId,
+) {
+  const fromIndex = orderedThreadIds.indexOf(fromThreadId);
+  const toIndex = orderedThreadIds.indexOf(toThreadId);
+  if (fromIndex < 0 || toIndex < 0) {
+    return [toThreadId];
+  }
+  const [startIndex, endIndex] = fromIndex < toIndex ? [fromIndex, toIndex] : [toIndex, fromIndex];
+  return orderedThreadIds.slice(startIndex, endIndex + 1);
+}
+
+export function resolveManagedThreadRowSelection<ThreadId extends string>(input: {
+  readonly orderedThreadIds: ReadonlyArray<ThreadId>;
+  readonly currentSelectedRowIds: ReadonlySet<ThreadId>;
+  readonly clickedThreadId: ThreadId;
+  readonly anchorThreadId: ThreadId | null;
+  readonly additive: boolean;
+  readonly range: boolean;
+}): ManagedThreadRowSelectionResult<ThreadId> {
+  const {
+    orderedThreadIds,
+    currentSelectedRowIds,
+    clickedThreadId,
+    anchorThreadId,
+    additive,
+    range,
+  } = input;
+
+  if (range && anchorThreadId) {
+    return {
+      selectedRowIds: new Set(getManagedThreadIdRange(orderedThreadIds, anchorThreadId, clickedThreadId)),
+      activeRowId: clickedThreadId,
+      nextAnchorThreadId: clickedThreadId,
+    };
+  }
+
+  if (additive) {
+    const nextSelectedRowIds = new Set(currentSelectedRowIds);
+    if (nextSelectedRowIds.has(clickedThreadId)) {
+      nextSelectedRowIds.delete(clickedThreadId);
+    } else {
+      nextSelectedRowIds.add(clickedThreadId);
+    }
+    return {
+      selectedRowIds: nextSelectedRowIds,
+      activeRowId: clickedThreadId,
+      nextAnchorThreadId: clickedThreadId,
+    };
+  }
+
+  return {
+    selectedRowIds: new Set([clickedThreadId]),
+    activeRowId: clickedThreadId,
+    nextAnchorThreadId: clickedThreadId,
+  };
+}
+
+export function toggleManagedThreadChecksForRows<ThreadId extends string>(
+  checkedThreadIds: ReadonlySet<ThreadId>,
+  rowSelectionIds: ReadonlySet<ThreadId>,
+  fallbackThreadId: ThreadId | null,
+) {
+  const targetThreadIds = rowSelectionIds.size > 0
+    ? [...rowSelectionIds]
+    : fallbackThreadId
+      ? [fallbackThreadId]
+      : [];
+  if (targetThreadIds.length === 0) {
+    return checkedThreadIds;
+  }
+
+  const shouldCheck = targetThreadIds.some((threadId) => !checkedThreadIds.has(threadId));
+  const nextCheckedThreadIds = new Set(checkedThreadIds);
+  for (const threadId of targetThreadIds) {
+    if (shouldCheck) {
+      nextCheckedThreadIds.add(threadId);
+    } else {
+      nextCheckedThreadIds.delete(threadId);
+    }
+  }
+  return nextCheckedThreadIds;
+}
+
+export function findReusableDraftPaneForThreadOpen(input: {
+  readonly layout: Pick<ConsoleProjectLayout, "tabs" | "panesById"> | null;
+  readonly draftsByPaneId: Record<string, string>;
+  readonly attachmentsByPaneId: Record<string, ReadonlyArray<ComposerImageAttachment>>;
+  readonly pendingDraftPaneIds: ReadonlySet<string>;
+}) {
+  if (!input.layout) {
+    return null;
+  }
+  for (const tab of input.layout.tabs) {
+    if (tab.paneIds.length !== 1) {
+      continue;
+    }
+    const paneId = tab.paneIds[0]!;
+    const pane = input.layout.panesById[paneId];
+    if (!pane || pane.kind !== "draft") {
+      continue;
+    }
+    if (input.pendingDraftPaneIds.has(paneId)) {
+      continue;
+    }
+    if ((input.draftsByPaneId[paneId] ?? "").trim().length > 0) {
+      continue;
+    }
+    if ((input.attachmentsByPaneId[paneId] ?? []).length > 0) {
+      continue;
+    }
+    return { tabId: tab.id, paneId };
+  }
+  return null;
+}
+
+function resolveProjectContextMenuPosition(clientX: number, clientY: number) {
+  const viewportWidth = typeof window === "undefined" ? PROJECT_CONTEXT_MENU_WIDTH : window.innerWidth;
+  const viewportHeight = typeof window === "undefined" ? PROJECT_CONTEXT_MENU_HEIGHT : window.innerHeight;
+  return {
+    x: Math.max(12, Math.min(clientX, viewportWidth - PROJECT_CONTEXT_MENU_WIDTH - 12)),
+    y: Math.max(12, Math.min(clientY, viewportHeight - PROJECT_CONTEXT_MENU_HEIGHT - 12)),
+  };
+}
+
 function parseTimestampMs(value: string | null | undefined) {
   if (!value) {
     return Number.NaN;
@@ -120,6 +332,10 @@ function parseTimestampMs(value: string | null | undefined) {
 }
 
 function formatElapsedCompact(durationMs: number) {
+  return formatSidebarAge(durationMs);
+}
+
+function formatSidebarAge(durationMs: number) {
   if (!Number.isFinite(durationMs) || durationMs <= 0) {
     return "0s";
   }
@@ -127,14 +343,24 @@ function formatElapsedCompact(durationMs: number) {
   if (totalSeconds < 60) {
     return `${totalSeconds}s`;
   }
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes < 60) {
-    return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m`;
   }
-  const hours = Math.floor(minutes / 60);
-  const remainingMinutes = minutes % 60;
-  return remainingMinutes === 0 ? `${hours}h` : `${hours}h ${remainingMinutes}m`;
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    return `${totalHours}h`;
+  }
+  const totalDays = Math.floor(totalHours / 24);
+  return `${totalDays} day${totalDays === 1 ? "" : "s"}`;
+}
+
+export function formatManageThreadTimestamp(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toISOString().slice(0, 10);
 }
 
 function getThreadFirstPrompt(thread: OrchestrationThread) {
@@ -185,11 +411,39 @@ function getThreadStatus(
   if (Number.isFinite(waitingFrom)) {
     return {
       tone: "waiting",
-      label: `waiting ${formatElapsedCompact(nowMs - waitingFrom)}`,
+      label: `idling ${formatElapsedCompact(nowMs - waitingFrom)}`,
     };
   }
 
   return { tone: "idle", label: "idle" };
+}
+
+function getThreadAgeLabel(thread: OrchestrationThread, nowIso: string) {
+  const nowMs = parseTimestampMs(nowIso);
+  const threadMs = getThreadSortValue(thread);
+  return formatSidebarAge(nowMs - threadMs);
+}
+
+function getThreadAgeMs(thread: OrchestrationThread, nowIso: string) {
+  const nowMs = parseTimestampMs(nowIso);
+  const threadMs = getThreadSortValue(thread);
+  return Math.max(0, nowMs - threadMs);
+}
+
+function getThreadStatusOpacity(ageMs: number) {
+  if (ageMs >= 24 * 60 * 60 * 1000) {
+    return 0.28;
+  }
+  if (ageMs >= 3 * 60 * 60 * 1000) {
+    return 0.38;
+  }
+  if (ageMs >= 60 * 60 * 1000) {
+    return 0.56;
+  }
+  if (ageMs >= 10 * 60 * 1000) {
+    return 0.74;
+  }
+  return 0.9;
 }
 
 function isEditableTarget(target: EventTarget | null) {
@@ -222,6 +476,37 @@ function persistPaneDrafts(draftsByPaneId: Record<string, string>) {
     return;
   }
   window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draftsByPaneId));
+}
+
+export function parsePersistedArchivedProjectIds<ProjectId extends string = string>(raw: string | null) {
+  try {
+    if (!raw) {
+      return new Set<ProjectId>();
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return new Set<ProjectId>();
+    }
+    return new Set(parsed.filter((value): value is ProjectId => typeof value === "string" && value.length > 0));
+  } catch {
+    return new Set<ProjectId>();
+  }
+}
+
+export function readPersistedArchivedProjectIds<ProjectId extends string = string>() {
+  if (typeof window === "undefined") {
+    return new Set<ProjectId>();
+  }
+  return parsePersistedArchivedProjectIds<ProjectId>(
+    window.localStorage.getItem(ARCHIVED_PROJECT_IDS_STORAGE_KEY),
+  );
+}
+
+function persistArchivedProjectIds(projectIds: ReadonlySet<string>) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(ARCHIVED_PROJECT_IDS_STORAGE_KEY, JSON.stringify([...projectIds]));
 }
 
 function EmptyWorkspaceSurface(props: {
@@ -295,11 +580,13 @@ export function App() {
   const isThreadTurnRunning = consoleData.isThreadTurnRunning;
   const canSubmitPromptForThread = consoleData.canSubmitPromptForThread;
   const createThread = consoleData.createThread;
+  const createProject = consoleData.createProject;
   const submitPrompt = consoleData.submitPrompt;
   const respondToUserInput = consoleData.respondToUserInput;
   const setThreadModel = consoleData.setThreadModel;
   const setThreadReasoningEffort = consoleData.setThreadReasoningEffort;
   const setInteractionMode = consoleData.setInteractionMode;
+  const deleteThread = consoleData.deleteThread;
   const interruptTurn = consoleData.interruptTurn;
   const stopSession = consoleData.stopSession;
 
@@ -308,6 +595,7 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [paletteScopeBounds, setPaletteScopeBounds] = useState<CommandPaletteScopeBounds | null>(null);
   const [pendingPromptSendStartedAtByThreadId, setPendingPromptSendStartedAtByThreadId] = useState<Record<string, string>>({});
   const [composerAttachmentsByPaneId, setComposerAttachmentsByPaneId] = useState<Record<string, ReadonlyArray<ComposerImageAttachment>>>({});
   const [composerDraftByPaneId, setComposerDraftByPaneId] = useState<Record<string, string>>(() => readPersistedPaneDrafts());
@@ -321,10 +609,37 @@ export function App() {
   const [draggedThreadId, setDraggedThreadId] = useState<string | null>(null);
   const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null);
   const [highlightedPaneId, setHighlightedPaneId] = useState<string | null>(null);
+  const [expandedSidebarProjectIds, setExpandedSidebarProjectIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenuState | null>(null);
+  const [threadContextMenu, setThreadContextMenu] = useState<ThreadContextMenuState | null>(null);
+  const [projectModalOpen, setProjectModalOpen] = useState(false);
+  const [projectPathDraft, setProjectPathDraft] = useState("");
+  const [projectModalError, setProjectModalError] = useState<string | null>(null);
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [pendingProjectActivationId, setPendingProjectActivationId] = useState<OrchestrationProject["id"] | null>(null);
+  const [archivedProjectIds, setArchivedProjectIds] = useState<ReadonlySet<OrchestrationProject["id"]>>(
+    () => readPersistedArchivedProjectIds<OrchestrationProject["id"]>(),
+  );
+  const [managedProjectId, setManagedProjectId] = useState<OrchestrationProject["id"] | null>(null);
+  const [selectedManagedThreadIds, setSelectedManagedThreadIds] = useState<ReadonlySet<OrchestrationThread["id"]>>(() => new Set());
+  const [activeManagedTableRowId, setActiveManagedTableRowId] = useState<OrchestrationThread["id"] | null>(null);
+  const [manageProjectError, setManageProjectError] = useState<string | null>(null);
+  const [isDeletingManagedThreads, setIsDeletingManagedThreads] = useState(false);
+  const [projectArchiveConfirmId, setProjectArchiveConfirmId] = useState<OrchestrationProject["id"] | null>(null);
+  const [threadDeleteConfirmId, setThreadDeleteConfirmId] = useState<OrchestrationThread["id"] | null>(null);
+  const [threadDeleteError, setThreadDeleteError] = useState<string | null>(null);
+  const [isDeletingThread, setIsDeletingThread] = useState(false);
   const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
+  const paneElementRefs = useRef<Record<string, HTMLElement | null>>({});
   const initializedPaneIdsRef = useRef<Record<string, true>>({});
   const hasInitiallyFocusedPromptRef = useRef(false);
   const composerAttachmentsRef = useRef(composerAttachmentsByPaneId);
+  const projectPathInputRef = useRef<HTMLInputElement | null>(null);
+  const manageProjectSelectAllRef = useRef<HTMLInputElement | null>(null);
+  const manageProjectTableShellRef = useRef<HTMLDivElement | null>(null);
+  const manageProjectCloseButtonRef = useRef<HTMLButtonElement | null>(null);
+  const lastManagedThreadRowSelectionIdRef = useRef<OrchestrationThread["id"] | null>(null);
+  const pointerManagedThreadSelectionAnchorIdRef = useRef<OrchestrationThread["id"] | null>(null);
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
 
   useEffect(() => {
@@ -337,6 +652,22 @@ export function App() {
   useEffect(() => {
     persistPaneDrafts(composerDraftByPaneId);
   }, [composerDraftByPaneId]);
+
+  useEffect(() => {
+    persistArchivedProjectIds(archivedProjectIds);
+  }, [archivedProjectIds]);
+
+  useEffect(() => {
+    if (!projectModalOpen) {
+      return;
+    }
+    const focusInput = () => {
+      projectPathInputRef.current?.focus();
+      projectPathInputRef.current?.select();
+    };
+    focusInput();
+    requestAnimationFrame(focusInput);
+  }, [projectModalOpen]);
 
   const orderedThreadsByProjectId = useMemo(() => {
     const map = new Map<string, OrchestrationThread[]>();
@@ -354,6 +685,23 @@ export function App() {
     }
     return map;
   }, [consoleData.threads, projects]);
+
+  const managedProject = useMemo(
+    () => (managedProjectId ? projects.find((project) => project.id === managedProjectId) ?? null : null),
+    [managedProjectId, projects],
+  );
+  const managedProjectThreads = useMemo(
+    () => (managedProject ? orderedThreadsByProjectId.get(managedProject.id) ?? [] : []),
+    [managedProject, orderedThreadsByProjectId],
+  );
+  const visibleSidebarProjectViews = useMemo(
+    () => workspace.projectViews.filter((projectView) => !archivedProjectIds.has(projectView.project.id)),
+    [archivedProjectIds, workspace.projectViews],
+  );
+  const managedThreadSelection = useMemo(
+    () => summarizeThreadSelection(managedProjectThreads.map((thread) => thread.id), selectedManagedThreadIds),
+    [managedProjectThreads, selectedManagedThreadIds],
+  );
 
   const livePaneIds = useMemo(() => {
     const ids: string[] = [];
@@ -404,6 +752,50 @@ export function App() {
   }, [liveDraftPaneIds, livePaneIds]);
 
   useEffect(() => {
+    if (!projectContextMenu) {
+      return;
+    }
+    const handleDismiss = () => {
+      setProjectContextMenu(null);
+    };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      setProjectContextMenu(null);
+    };
+    window.addEventListener("resize", handleDismiss);
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.removeEventListener("resize", handleDismiss);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [projectContextMenu]);
+
+  useEffect(() => {
+    if (!threadContextMenu) {
+      return;
+    }
+    const handleDismiss = () => {
+      setThreadContextMenu(null);
+    };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      setThreadContextMenu(null);
+    };
+    window.addEventListener("resize", handleDismiss);
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.removeEventListener("resize", handleDismiss);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [threadContextMenu]);
+
+  useEffect(() => {
     if (!workspace.activeThreadId || consoleData.activeThreadId === workspace.activeThreadId) {
       return;
     }
@@ -432,6 +824,84 @@ export function App() {
       return changed ? next : existing;
     });
   }, [consoleData.threads, workspace.projectViews]);
+
+  useEffect(() => {
+    const liveProjectIdSet = new Set(projects.filter((project) => project.deletedAt === null).map((project) => project.id));
+    setArchivedProjectIds((existing) => {
+      const next = new Set([...existing].filter((projectId) => liveProjectIdSet.has(projectId)));
+      const unchanged = next.size === existing.size && [...next].every((projectId) => existing.has(projectId));
+      return unchanged ? existing : next;
+    });
+  }, [projects]);
+
+  useEffect(() => {
+    if (!managedProjectId) {
+      setSelectedManagedThreadIds((current) => current.size === 0 ? current : new Set());
+      setActiveManagedTableRowId(null);
+      setManageProjectError(null);
+      lastManagedThreadRowSelectionIdRef.current = null;
+      pointerManagedThreadSelectionAnchorIdRef.current = null;
+      return;
+    }
+    const liveThreadIdSet = new Set(managedProjectThreads.map((thread) => thread.id));
+    setSelectedManagedThreadIds((existing) => {
+      const next = new Set([...existing].filter((threadId) => liveThreadIdSet.has(threadId)));
+      const unchanged = next.size === existing.size && [...next].every((threadId) => existing.has(threadId));
+      return unchanged ? existing : next;
+    });
+    setActiveManagedTableRowId((current) => (
+      current && liveThreadIdSet.has(current)
+        ? current
+        : managedProjectThreads[0]?.id ?? null
+    ));
+    if (lastManagedThreadRowSelectionIdRef.current && !liveThreadIdSet.has(lastManagedThreadRowSelectionIdRef.current)) {
+      lastManagedThreadRowSelectionIdRef.current = managedProjectThreads[0]?.id ?? null;
+    }
+    if (
+      pointerManagedThreadSelectionAnchorIdRef.current
+      && !liveThreadIdSet.has(pointerManagedThreadSelectionAnchorIdRef.current)
+    ) {
+      pointerManagedThreadSelectionAnchorIdRef.current = null;
+    }
+    if (!projects.some((project) => project.id === managedProjectId && project.deletedAt === null)) {
+      setManagedProjectId(null);
+      setManageProjectError(null);
+    }
+  }, [managedProjectId, managedProjectThreads, projects]);
+
+  useEffect(() => {
+    const handleMouseUp = () => {
+      pointerManagedThreadSelectionAnchorIdRef.current = null;
+    };
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => window.removeEventListener("mouseup", handleMouseUp);
+  }, []);
+
+  const hasBlockingModal = projectModalOpen
+    || managedProjectId !== null
+    || projectArchiveConfirmId !== null
+    || threadDeleteConfirmId !== null;
+
+  useEffect(() => {
+    if (!hasBlockingModal) {
+      return;
+    }
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement && activeElement.closest(".transcript-prompt__inputShell")) {
+      activeElement.blur();
+    }
+  }, [hasBlockingModal]);
+
+  useEffect(() => {
+    if (!managedProjectId) {
+      return;
+    }
+    const checkbox = manageProjectSelectAllRef.current;
+    if (!checkbox) {
+      return;
+    }
+    checkbox.indeterminate = managedThreadSelection.partiallySelected;
+  }, [managedProjectId, managedThreadSelection]);
 
   useEffect(() => {
     setPendingPromptSendStartedAtByThreadId((existing) => {
@@ -463,6 +933,19 @@ export function App() {
       paneRefs.current[paneId]?.focusPrompt({ reveal: true });
     });
   }, [paletteOpen]);
+
+  useEffect(() => {
+    if (!pendingProjectActivationId) {
+      return;
+    }
+    const projectView = workspace.projectViews.find((candidate) => candidate.project.id === pendingProjectActivationId);
+    if (!projectView) {
+      return;
+    }
+    workspace.activateProject(projectView.project.id);
+    focusPanePrompt(projectView.layout.tabs.find((tab) => tab.id === projectView.layout.activeTabId)?.activePaneId ?? null);
+    setPendingProjectActivationId(null);
+  }, [focusPanePrompt, pendingProjectActivationId, workspace]);
 
   useEffect(() => {
     if (!workspace.activePaneId || paletteOpen) {
@@ -569,6 +1052,9 @@ export function App() {
         const provider: ProviderKind = thread?.provider
           ?? pendingThread?.provider
           ?? (pane.kind === "draft" ? pane.setup.selectedProvider : "codex");
+        const model = thread?.model
+          ?? pendingThread?.model
+          ?? (pane.kind === "draft" ? pane.setup.selectedModel : DEFAULT_MODEL_BY_PROVIDER[provider]);
         const effectiveNow = thread && (isThreadTurnRunning(thread.id) || pendingPromptSendStartedAtByThreadId[thread.id])
           ? nowIso
           : undefined;
@@ -614,6 +1100,7 @@ export function App() {
             : (pendingThread?.worktreePath ?? (pane.kind === "draft" ? pane.setup.worktreePath : null) ?? activeProject.workspaceRoot),
           interactionMode: thread?.interactionMode ?? pendingThread?.interactionMode ?? (pane.kind === "draft" ? pane.setup.interactionMode : "default"),
           provider,
+          model,
         } satisfies PaneView];
       });
   }, [
@@ -694,6 +1181,28 @@ export function App() {
   }, [workspace]);
 
   const handleOpenThread = useCallback((threadId: ThreadId) => {
+    const thread = consoleData.threads.find((candidate) => candidate.id === threadId) ?? null;
+    if (!thread) {
+      return;
+    }
+    const projectView = workspace.projectViews.find((candidate) => candidate.project.id === thread.projectId) ?? null;
+    const reusableDraftPane = findReusableDraftPaneForThreadOpen({
+      layout: projectView?.layout ?? null,
+      draftsByPaneId: composerDraftByPaneId,
+      attachmentsByPaneId: composerAttachmentsByPaneId,
+      pendingDraftPaneIds,
+    });
+    if (reusableDraftPane) {
+      const didMount = workspace.mountThreadInPane({
+        projectId: thread.projectId,
+        paneId: reusableDraftPane.paneId,
+        threadId,
+      });
+      if (didMount) {
+        focusPanePrompt(reusableDraftPane.paneId);
+        return;
+      }
+    }
     const result = workspace.openThread(threadId);
     if (!result) {
       return;
@@ -702,7 +1211,386 @@ export function App() {
     if (result.highlightPane) {
       highlightPane(result.paneId);
     }
-  }, [focusPanePrompt, highlightPane, workspace]);
+  }, [
+    composerAttachmentsByPaneId,
+    composerDraftByPaneId,
+    consoleData.threads,
+    focusPanePrompt,
+    highlightPane,
+    pendingDraftPaneIds,
+    workspace,
+  ]);
+
+  const resetExpandedSidebarProject = useCallback((projectId: OrchestrationProject["id"]) => {
+    setExpandedSidebarProjectIds((existing) => {
+      if (!existing.has(projectId)) {
+        return existing;
+      }
+      const next = new Set(existing);
+      next.delete(projectId);
+      return next;
+    });
+  }, []);
+
+  const handleToggleSidebarProject = useCallback((
+    projectId: OrchestrationProject["id"],
+    collapsed: boolean,
+  ) => {
+    if (!collapsed) {
+      resetExpandedSidebarProject(projectId);
+    }
+    workspace.toggleProjectCollapsed(projectId);
+  }, [resetExpandedSidebarProject, workspace]);
+
+  const handleSelectSidebarProject = useCallback((
+    projectId: OrchestrationProject["id"],
+    collapsed: boolean,
+    paneId: string | null,
+  ) => {
+    workspace.activateProject(projectId);
+    if (collapsed) {
+      workspace.toggleProjectCollapsed(projectId);
+    }
+    focusPanePrompt(paneId);
+  }, [focusPanePrompt, workspace]);
+
+  const handleOpenProjectContextMenu = useCallback((
+    event: ReactMouseEvent<HTMLElement>,
+    projectId: OrchestrationProject["id"],
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const position = resolveProjectContextMenuPosition(event.clientX, event.clientY);
+    setProjectContextMenu({
+      projectId,
+      x: position.x,
+      y: position.y,
+    });
+    setThreadContextMenu(null);
+  }, []);
+
+  const handleCloseProjectContextMenu = useCallback(() => {
+    setProjectContextMenu(null);
+  }, []);
+
+  const handleOpenThreadContextMenu = useCallback((
+    event: ReactMouseEvent<HTMLElement>,
+    threadId: OrchestrationThread["id"],
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const position = resolveProjectContextMenuPosition(event.clientX, event.clientY);
+    setThreadContextMenu({
+      threadId,
+      x: position.x,
+      y: position.y,
+    });
+    setProjectContextMenu(null);
+  }, []);
+
+  const handleCloseThreadContextMenu = useCallback(() => {
+    setThreadContextMenu(null);
+  }, []);
+
+  const handleOpenManageProjectModal = useCallback((projectId: OrchestrationProject["id"]) => {
+    setManagedProjectId(projectId);
+    setSelectedManagedThreadIds(new Set());
+    setActiveManagedTableRowId(null);
+    setManageProjectError(null);
+    setProjectContextMenu(null);
+    lastManagedThreadRowSelectionIdRef.current = null;
+    pointerManagedThreadSelectionAnchorIdRef.current = null;
+  }, []);
+
+  const handleRequestProjectArchive = useCallback((projectId: OrchestrationProject["id"]) => {
+    setProjectContextMenu(null);
+    setProjectArchiveConfirmId(projectId);
+  }, []);
+
+  const handleCloseProjectArchiveConfirm = useCallback(() => {
+    setProjectArchiveConfirmId(null);
+  }, []);
+
+  const handleConfirmProjectArchive = useCallback(() => {
+    if (!projectArchiveConfirmId) {
+      return;
+    }
+    setArchivedProjectIds((existing) => new Set(existing).add(projectArchiveConfirmId));
+    setProjectArchiveConfirmId(null);
+  }, [projectArchiveConfirmId]);
+
+  const handleCloseManageProjectModal = useCallback(() => {
+    if (isDeletingManagedThreads) {
+      return;
+    }
+    setManagedProjectId(null);
+    setSelectedManagedThreadIds(new Set());
+    setActiveManagedTableRowId(null);
+    setManageProjectError(null);
+    lastManagedThreadRowSelectionIdRef.current = null;
+    pointerManagedThreadSelectionAnchorIdRef.current = null;
+  }, [isDeletingManagedThreads]);
+
+  const handleSelectManagedThreadRow = useCallback((
+    threadId: OrchestrationThread["id"],
+    input: {
+      readonly shiftKey: boolean;
+      readonly toggleKey: boolean;
+    },
+  ) => {
+    const selection = resolveManagedThreadRowSelection({
+      orderedThreadIds: managedProjectThreads.map((thread) => thread.id),
+      currentSelectedRowIds: selectedManagedThreadIds,
+      clickedThreadId: threadId,
+      anchorThreadId: lastManagedThreadRowSelectionIdRef.current,
+      additive: input.toggleKey,
+      range: input.shiftKey,
+    });
+    setSelectedManagedThreadIds(selection.selectedRowIds);
+    setActiveManagedTableRowId(selection.activeRowId);
+    lastManagedThreadRowSelectionIdRef.current = selection.nextAnchorThreadId;
+    manageProjectTableShellRef.current?.focus({ preventScroll: true });
+  }, [managedProjectThreads, selectedManagedThreadIds]);
+
+  const handleToggleAllManagedThreads = useCallback(() => {
+    setSelectedManagedThreadIds(() => {
+      if (managedThreadSelection.allSelected) {
+        return new Set();
+      }
+      return new Set(managedProjectThreads.map((thread) => thread.id));
+    });
+  }, [managedProjectThreads, managedThreadSelection.allSelected]);
+
+  const handleManagedTableKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (managedProjectThreads.length === 0) {
+      return;
+    }
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const currentIndex = activeManagedTableRowId
+        ? managedProjectThreads.findIndex((thread) => thread.id === activeManagedTableRowId)
+        : -1;
+      const fallbackIndex = currentIndex >= 0 ? currentIndex : 0;
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      const nextIndex = Math.max(0, Math.min(managedProjectThreads.length - 1, fallbackIndex + delta));
+      const nextThreadId = managedProjectThreads[nextIndex]?.id;
+      if (!nextThreadId) {
+        return;
+      }
+      setActiveManagedTableRowId(nextThreadId);
+      setSelectedManagedThreadIds(new Set([nextThreadId]));
+      lastManagedThreadRowSelectionIdRef.current = nextThreadId;
+      return;
+    }
+
+    if (event.key === " ") {
+      event.preventDefault();
+      setSelectedManagedThreadIds((existing) =>
+        toggleManagedThreadChecksForRows(existing, existing, activeManagedTableRowId),
+      );
+    }
+  }, [activeManagedTableRowId, managedProjectThreads]);
+
+  const handleManagedThreadRowMouseDown = useCallback((
+    event: ReactMouseEvent<HTMLTableRowElement>,
+    threadId: OrchestrationThread["id"],
+  ) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    const toggleKey = event.ctrlKey || event.metaKey;
+    handleSelectManagedThreadRow(threadId, {
+      shiftKey: event.shiftKey,
+      toggleKey,
+    });
+    pointerManagedThreadSelectionAnchorIdRef.current = toggleKey || event.shiftKey ? null : threadId;
+  }, [handleSelectManagedThreadRow]);
+
+  const handleManagedThreadRowMouseEnter = useCallback((threadId: OrchestrationThread["id"]) => {
+    const anchorThreadId = pointerManagedThreadSelectionAnchorIdRef.current;
+    if (!anchorThreadId) {
+      return;
+    }
+    const selection = resolveManagedThreadRowSelection({
+      orderedThreadIds: managedProjectThreads.map((thread) => thread.id),
+      currentSelectedRowIds: selectedManagedThreadIds,
+      clickedThreadId: threadId,
+      anchorThreadId,
+      additive: false,
+      range: true,
+    });
+    setSelectedManagedThreadIds(selection.selectedRowIds);
+    setActiveManagedTableRowId(selection.activeRowId);
+    lastManagedThreadRowSelectionIdRef.current = selection.nextAnchorThreadId;
+  }, [managedProjectThreads, selectedManagedThreadIds]);
+
+  const handleDeleteManagedThreads = useCallback(async () => {
+    const selectedThreadIds = managedProjectThreads
+      .map((thread) => thread.id)
+      .filter((threadId) => selectedManagedThreadIds.has(threadId));
+    if (selectedThreadIds.length === 0) {
+      return;
+    }
+
+    setIsDeletingManagedThreads(true);
+    setManageProjectError(null);
+    try {
+      await Promise.all(selectedThreadIds.map((threadId) => deleteThread(threadId)));
+      setSelectedManagedThreadIds(new Set());
+    } catch (error) {
+      setManageProjectError(error instanceof Error ? error.message : "Failed to delete selected threads.");
+    } finally {
+      setIsDeletingManagedThreads(false);
+    }
+  }, [deleteThread, managedProjectThreads, selectedManagedThreadIds]);
+
+  const handleRequestThreadDelete = useCallback((threadId: OrchestrationThread["id"]) => {
+    setThreadContextMenu(null);
+    setThreadDeleteConfirmId(threadId);
+    setThreadDeleteError(null);
+  }, []);
+
+  const handleCloseThreadDeleteConfirm = useCallback(() => {
+    if (isDeletingThread) {
+      return;
+    }
+    setThreadDeleteConfirmId(null);
+    setThreadDeleteError(null);
+  }, [isDeletingThread]);
+
+  const handleConfirmThreadDelete = useCallback(async () => {
+    if (!threadDeleteConfirmId) {
+      return;
+    }
+    setIsDeletingThread(true);
+    setThreadDeleteError(null);
+    try {
+      await deleteThread(threadDeleteConfirmId);
+      setThreadDeleteConfirmId(null);
+    } catch (error) {
+      setThreadDeleteError(error instanceof Error ? error.message : "Failed to delete thread.");
+    } finally {
+      setIsDeletingThread(false);
+    }
+  }, [deleteThread, threadDeleteConfirmId]);
+
+  useEffect(() => {
+    if (!managedProjectId) {
+      return;
+    }
+    const focusTarget = () => {
+      if (managedProjectThreads.length > 0) {
+        manageProjectTableShellRef.current?.focus({ preventScroll: true });
+        return;
+      }
+      manageProjectCloseButtonRef.current?.focus({ preventScroll: true });
+    };
+    focusTarget();
+    requestAnimationFrame(focusTarget);
+  }, [managedProjectId, managedProjectThreads.length]);
+
+  useEffect(() => {
+    if (!managedProjectId) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      handleCloseManageProjectModal();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [handleCloseManageProjectModal, managedProjectId]);
+
+  useEffect(() => {
+    if (!threadDeleteConfirmId) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      handleCloseThreadDeleteConfirm();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [handleCloseThreadDeleteConfirm, threadDeleteConfirmId]);
+
+  useEffect(() => {
+    if (!projectArchiveConfirmId) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      handleCloseProjectArchiveConfirm();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [handleCloseProjectArchiveConfirm, projectArchiveConfirmId]);
+
+  const handleOpenProjectModal = useCallback(() => {
+    setProjectModalError(null);
+    setProjectPathDraft("");
+    setProjectModalOpen(true);
+  }, []);
+
+  const handleCloseProjectModal = useCallback(() => {
+    if (isCreatingProject) {
+      return;
+    }
+    setProjectModalOpen(false);
+    setProjectModalError(null);
+  }, [isCreatingProject]);
+
+  const handleBrowseProjectFolder = useCallback(async () => {
+    const pickedPath = await window.desktopBridge?.pickFolder?.();
+    if (!pickedPath) {
+      return;
+    }
+    setProjectPathDraft(pickedPath);
+    setProjectModalError(null);
+  }, []);
+
+  const handleCreateProject = useCallback(async () => {
+    const workspaceRoot = normalizeProjectPathInput(projectPathDraft);
+    if (workspaceRoot.length === 0) {
+      setProjectModalError("Enter a project path.");
+      return;
+    }
+    const duplicateProject = projects.find(
+      (project) => project.workspaceRoot.trim().toLowerCase() === workspaceRoot.toLowerCase(),
+    );
+    if (duplicateProject) {
+      setProjectModalError("That project is already in the sidebar.");
+      return;
+    }
+    const title = deriveProjectTitleFromPath(workspaceRoot);
+    if (title.length === 0) {
+      setProjectModalError("Enter a valid project path.");
+      return;
+    }
+
+    setIsCreatingProject(true);
+    try {
+      const created = await createProject({ workspaceRoot, title });
+      setPendingProjectActivationId(created.projectId);
+      setProjectModalOpen(false);
+      setProjectModalError(null);
+      setProjectPathDraft("");
+    } catch (error) {
+      setProjectModalError(error instanceof Error ? error.message : "Failed to add project.");
+    } finally {
+      setIsCreatingProject(false);
+    }
+  }, [createProject, projectPathDraft, projects]);
 
   const handleSubmit = useCallback(async (paneView: PaneView, value: string) => {
     const attachmentSnapshot = [...(composerAttachmentsRef.current[paneView.pane.id] ?? [])];
@@ -758,6 +1646,7 @@ export function App() {
         const created = await createThread({
           projectId: paneView.project.id,
           provider: paneView.pane.setup.selectedProvider,
+          model: paneView.pane.setup.selectedModel,
           title: truncateTitle(prompt || "New thread"),
           interactionMode: paneView.pane.setup.interactionMode,
           branch: paneView.pane.setup.branch,
@@ -935,7 +1824,28 @@ export function App() {
           run: () => {
             workspace.updateDraftPane({
               paneId: activePaneView.pane.id,
-              updater: (setup) => ({ ...setup, selectedProvider: provider }),
+              updater: (setup) => ({
+                ...setup,
+                selectedProvider: provider,
+                selectedModel: workspace.lastChosenModelByProvider[provider],
+              }),
+            });
+          },
+        });
+      }
+      for (const modelOption of MODEL_OPTIONS_BY_PROVIDER[activePaneView.setup.selectedProvider]) {
+        commands.push({
+          id: `draft-model:${activePaneView.pane.id}:${modelOption.slug}`,
+          label:
+            activePaneView.setup.selectedModel === modelOption.slug
+              ? `[Model] Current · ${modelOption.name}`
+              : `[Model] Set · ${modelOption.name}`,
+          contextText: modelOption.slug,
+          keywords: ["model", "draft", activePaneView.setup.selectedProvider, modelOption.name, modelOption.slug],
+          run: () => {
+            workspace.updateDraftPane({
+              paneId: activePaneView.pane.id,
+              updater: (setup) => ({ ...setup, selectedModel: modelOption.slug }),
             });
           },
         });
@@ -957,9 +1867,12 @@ export function App() {
               : `[Model] Set · ${modelOption.name}`,
           contextText: modelOption.slug,
           keywords: ["model", activeProvider, modelOption.name, modelOption.slug],
-          run: () => setThreadModel(activeThread.id, activeProvider, modelOption.slug),
-        });
-      }
+            run: async () => {
+              await setThreadModel(activeThread.id, activeProvider, modelOption.slug);
+              workspace.rememberProviderModel(activeProvider, modelOption.slug);
+            },
+          });
+        }
 
       if (activeReasoningOptions.length > 0) {
         commands.push({
@@ -1045,14 +1958,67 @@ export function App() {
     setSelectedCommandIndex((current) => Math.min(current, Math.max(filteredCommands.length - 1, 0)));
   }, [filteredCommands.length]);
 
+  useEffect(() => {
+    if (!paletteOpen || !activePaneView?.thread) {
+      setPaletteScopeBounds((current) => current === null ? current : null);
+      return;
+    }
+
+    const paneId = activePaneView.pane.id;
+    const updateBounds = () => {
+      const element = paneElementRefs.current[paneId];
+      if (!element) {
+        setPaletteScopeBounds((current) => current === null ? current : null);
+        return;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const nextBounds: CommandPaletteScopeBounds = {
+        top: Math.max(0, Math.round(rect.top)),
+        left: Math.max(0, Math.round(rect.left)),
+        width: Math.max(0, Math.round(rect.width)),
+        height: Math.max(0, Math.round(rect.height)),
+      };
+      setPaletteScopeBounds((current) => arePaletteScopeBoundsEqual(current, nextBounds) ? current : nextBounds);
+    };
+
+    const animationFrame = requestAnimationFrame(updateBounds);
+    const element = paneElementRefs.current[paneId];
+    const resizeObserver = typeof ResizeObserver !== "undefined" && element
+      ? new ResizeObserver(updateBounds)
+      : null;
+    if (resizeObserver && element) {
+      resizeObserver.observe(element);
+    }
+    window.addEventListener("resize", updateBounds);
+
+    return () => {
+      cancelAnimationFrame(animationFrame);
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updateBounds);
+    };
+  }, [activePaneView?.pane.id, activePaneView?.thread, paletteOpen]);
+
   const runPaletteCommand = useCallback(async (command: AppPaletteCommand) => {
     closePalette();
     await command.run();
   }, [closePalette]);
 
   useEffect(() => {
+    const handleTabFocusKeyDown = (event: KeyboardEvent) => {
+      if (!shouldSuppressTabFocusNavigation(event)) {
+        return;
+      }
+      event.preventDefault();
+    };
+
+    window.addEventListener("keydown", handleTabFocusKeyDown, true);
+    return () => window.removeEventListener("keydown", handleTabFocusKeyDown, true);
+  }, []);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      if (isPaletteToggleShortcut(event)) {
         event.preventDefault();
         if (paletteOpen) {
           closePalette();
@@ -1098,33 +2064,80 @@ export function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [closePalette, openPalette, paletteOpen, workspace.activePaneId]);
 
-  const footerText = useMemo(() => {
-    if (!workspace.activeProject) {
-      return submitError ?? "No project loaded.";
-    }
-
-    const paneView = activePaneView;
-    if (!paneView) {
-      return submitError ?? `${workspace.activeProject.title} · ${workspace.activeProject.workspaceRoot}`;
+  const getPaneFooterText = useCallback((paneView: PaneView) => {
+    if (paneView.isActive && submitError) {
+      return submitError;
     }
 
     if (paneView.setup) {
-      return submitError
-        ?? `Draft · ${paneView.setup.selectedProvider} · ${paneView.cwd ?? workspace.activeProject.workspaceRoot}`;
+      return `Draft · ${paneView.setup.selectedProvider} · ${paneView.setup.selectedModel} · ${paneView.cwd ?? paneView.project.workspaceRoot}`;
     }
 
     if (paneView.thread) {
-      return submitError
-        ?? `${paneView.thread.title} · ${paneView.thread.provider} · ${paneView.thread.model ?? DEFAULT_MODEL_BY_PROVIDER[paneView.thread.provider]} · ${paneView.cwd ?? workspace.activeProject.workspaceRoot}`;
+      return `${paneView.thread.title} · ${paneView.thread.provider} · ${paneView.model} · ${paneView.cwd ?? paneView.project.workspaceRoot}`;
     }
 
-    return submitError ?? `${workspace.activeProject.title} · ${workspace.activeProject.workspaceRoot}`;
-  }, [activePaneView, submitError, workspace.activeProject]);
+    return `${paneView.project.title} · ${paneView.project.workspaceRoot}`;
+  }, [submitError]);
 
   const shellClassName = `console-shell${isDesktop ? " console-shell--desktop" : ""}`;
   const activePaneGridClassName = activeTab
     ? `project-pane-grid project-pane-grid--${Math.min(Math.max(activeTab.paneIds.length, 1), 6)}`
     : "project-pane-grid project-pane-grid--1";
+  const projectContextMenuProject = projectContextMenu
+    ? projects.find((project) => project.id === projectContextMenu.projectId) ?? null
+    : null;
+  const projectContextMenuThreadCount = projectContextMenuProject
+    ? (orderedThreadsByProjectId.get(projectContextMenuProject.id) ?? []).length
+    : 0;
+  const threadContextMenuThread = threadContextMenu
+    ? consoleData.threads.find((thread) => thread.id === threadContextMenu.threadId && thread.deletedAt === null) ?? null
+    : null;
+  const projectArchiveConfirmProject = projectArchiveConfirmId
+    ? projects.find((project) => project.id === projectArchiveConfirmId && project.deletedAt === null) ?? null
+    : null;
+  const threadDeleteConfirmThread = threadDeleteConfirmId
+    ? consoleData.threads.find((thread) => thread.id === threadDeleteConfirmId && thread.deletedAt === null) ?? null
+    : null;
+  const topbar = (
+    <div className="project-topbar">
+      <div className="project-topbar__sidebarSpacer" />
+      {workspace.activeProject && activeLayout ? (
+        <div className="project-tabs">
+          <div className="project-tabs__list" role="tablist" aria-label="Project tabs">
+            {activeLayout.tabs.map((tab, index) => (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={tab.id === activeLayout.activeTabId}
+                className={`project-tab${tab.id === activeLayout.activeTabId ? " project-tab--active" : ""}`}
+                onClick={() => {
+                  workspace.activateTab(workspace.activeProject!.id, tab.id);
+                  focusPanePrompt(tab.activePaneId);
+                }}
+                onMouseDown={(event) => {
+                  if (event.button !== 1) {
+                    return;
+                  }
+                  event.preventDefault();
+                  event.stopPropagation();
+                  workspace.closeTab(workspace.activeProject!.id, tab.id);
+                }}
+              >
+                <span className="project-tab__title">Tab {index + 1}</span>
+              </button>
+            ))}
+            <button type="button" className="project-tab project-tab--create" onClick={handleCreateDraftTab} aria-label="New tab">
+              +
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="project-tabs project-tabs--empty" />
+      )}
+    </div>
+  );
 
   if (!consoleData.snapshot && !consoleData.error) {
     return (
@@ -1132,6 +2145,7 @@ export function App() {
         <div className="bg-image" aria-hidden="true" />
         <div className="bg-gradient" aria-hidden="true" />
         <div className={shellClassName}>
+          {topbar}
           <div className="loading-screen loading-screen--shell">
             <span className="loading-screen__text">{renderLoadingText("connecting to orchestration")}</span>
           </div>
@@ -1145,47 +2159,36 @@ export function App() {
       <div className="bg-image" aria-hidden="true" />
       <div className="bg-gradient" aria-hidden="true" />
       <div className={shellClassName}>
-        <div className="project-topbar">
-          <div
-            className="project-topbar__sidebarSpacer"
-            style={{
-              width: workspace.sidebarWidth,
-              minWidth: workspace.sidebarWidth,
-              maxWidth: workspace.sidebarWidth,
-              flexBasis: workspace.sidebarWidth,
-            }}
-          />
-          <div className="project-topbar__resizeSpacer" aria-hidden="true" />
-          {workspace.activeProject && activeLayout ? (
-            <div className="project-tabs">
-              {activeLayout.tabs.map((tab, index) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  className={`project-tab${tab.id === activeLayout.activeTabId ? " project-tab--active" : ""}`}
-                  onClick={() => {
-                    workspace.activateTab(workspace.activeProject!.id, tab.id);
-                    focusPanePrompt(tab.activePaneId);
-                  }}
-                >
-                  <span className="project-tab__title">Tab {index + 1}</span>
-                  <span className="project-tab__meta">{tab.paneIds.length}</span>
-                </button>
-              ))}
-              <button type="button" className="project-tab project-tab--create" onClick={handleCreateDraftTab}>
-                +
+        {topbar}
+        <div className="project-workspace">
+          <aside className="project-sidebar">
+            <div className="project-sidebar__topAction">
+              <button type="button" className="project-sidebar__addProject" onClick={handleOpenProjectModal}>
+                Add project...
               </button>
             </div>
-          ) : (
-            <div className="project-tabs project-tabs--empty" />
-          )}
-        </div>
-        <div className="project-workspace">
-          <aside className="project-sidebar" style={{ width: workspace.sidebarWidth }}>
             <div className="project-tree" role="tree" aria-label="Projects">
-              {workspace.projectViews.map((projectView) => {
+              {visibleSidebarProjectViews.map((projectView) => {
                 const threads = orderedThreadsByProjectId.get(projectView.project.id) ?? [];
                 const isActiveProject = projectView.project.id === workspace.activeProject?.id;
+                const expandedSidebarThreads = expandedSidebarProjectIds.has(projectView.project.id);
+                const threadEntries = threads.map((thread) => {
+                  const status = getThreadStatus(thread, nowIso, isThreadTurnRunning(thread.id));
+                  const ageMs = getThreadAgeMs(thread, nowIso);
+                  return {
+                    thread,
+                    status,
+                    tooltip: getThreadFirstPrompt(thread),
+                    ageLabel: getThreadAgeLabel(thread, nowIso),
+                    ageMs,
+                  };
+                });
+                const visibleThreadEntries = expandedSidebarThreads
+                  ? threadEntries
+                  : threadEntries
+                      .filter((entry) => !(entry.status.tone === "idle" && entry.ageMs > SIDEBAR_IDLE_HIDE_MS))
+                      .slice(0, SIDEBAR_THREAD_LIMIT);
+                const hiddenThreadCount = threadEntries.length - visibleThreadEntries.length;
 
                 return (
                   <section
@@ -1212,59 +2215,71 @@ export function App() {
                     }}
                     onDragEnd={() => setDraggedProjectId(null)}
                   >
-                    <div className="project-tree__header">
-                      <button
-                        type="button"
-                        className="project-tree__toggle"
-                        onClick={() => workspace.toggleProjectCollapsed(projectView.project.id)}
-                        aria-label={projectView.collapsed ? "Expand project" : "Collapse project"}
-                      >
-                        {projectView.collapsed ? "+" : "−"}
+                    <div
+                      className="project-tree__header"
+                      onContextMenu={(event) => handleOpenProjectContextMenu(event, projectView.project.id)}
+                    >
+                        <button
+                          type="button"
+                          className="project-tree__toggle"
+                          onClick={() => handleToggleSidebarProject(projectView.project.id, projectView.collapsed)}
+                          aria-label={projectView.collapsed ? "Expand project" : "Collapse project"}
+                        >
+                          {projectView.collapsed ? "+" : "−"}
                       </button>
-                      <button
-                        type="button"
-                        className="project-tree__projectButton"
-                        onClick={() => {
-                          workspace.activateProject(projectView.project.id);
-                          focusPanePrompt(
-                            projectView.layout.tabs.find((tab) => tab.id === projectView.layout.activeTabId)?.activePaneId ?? null,
-                          );
-                        }}
-                      >
-                        <span className="project-tree__projectTitle">{projectView.project.title}</span>
-                        <span className="project-tree__projectMeta">{threads.length}</span>
+                        <button
+                          type="button"
+                          className="project-tree__projectButton"
+                          onClick={() => {
+                            handleSelectSidebarProject(
+                              projectView.project.id,
+                              projectView.collapsed,
+                              projectView.layout.tabs.find((tab) => tab.id === projectView.layout.activeTabId)?.activePaneId ?? null,
+                            );
+                          }}
+                        >
+                          <span className="project-tree__projectTitle">{projectView.project.title}</span>
                       </button>
                     </div>
                     {!projectView.collapsed ? (
                       <div className="project-tree__threads">
                         {threads.length === 0 ? (
                           <div className="project-tree__empty">No threads yet.</div>
-                        ) : threads.map((thread) => {
-                          const status = getThreadStatus(thread, nowIso, isThreadTurnRunning(thread.id));
-                          const tooltip = getThreadFirstPrompt(thread);
-                          const mounted = projectView.layout.tabs.some((tab) =>
-                            tab.paneIds.some((paneId) => {
-                              const pane = projectView.layout.panesById[paneId];
-                              return pane?.kind === "thread" && pane.threadId === thread.id;
-                            })
-                          );
-
-                          return (
+                         ) : visibleThreadEntries.map(({ thread, status, tooltip, ageLabel, ageMs }) => (
                             <button
                               key={thread.id}
                               type="button"
-                              className={`project-thread${thread.id === workspace.activeThreadId ? " project-thread--active" : ""}${mounted ? " project-thread--mounted" : ""}`}
+                              className={`project-thread${thread.id === workspace.activeThreadId ? " project-thread--active" : ""}${ageMs >= 10 * 60 * 60 * 1000 ? " project-thread--stale" : ageMs >= 2 * 60 * 60 * 1000 ? " project-thread--aged" : ""}${status.tone === "idle" && ageMs >= 3 * 60 * 60 * 1000 ? " project-thread--statusOnHover" : ""}`}
                               title={tooltip}
                               draggable
+                              onContextMenu={(event) => handleOpenThreadContextMenu(event, thread.id)}
                               onDragStart={() => setDraggedThreadId(thread.id)}
                               onDragEnd={() => setDraggedThreadId(null)}
                               onClick={() => handleOpenThread(thread.id)}
                             >
                               <span className="project-thread__title">{thread.title}</span>
-                              <span className={`project-thread__status project-thread__status--${status.tone}`}>{status.label}</span>
+                              <span
+                                className={`project-thread__status project-thread__status--${status.tone}`}
+                                style={status.tone === "idle"
+                                  ? ({ "--project-thread-status-opacity": getThreadStatusOpacity(ageMs) } as CSSProperties)
+                                  : undefined}
+                              >
+                                {ageLabel}
+                              </span>
                             </button>
-                          );
-                        })}
+                          ))
+                        }
+                        {!expandedSidebarThreads && hiddenThreadCount > 0 ? (
+                          <button
+                            type="button"
+                            className="project-tree__showMore"
+                            onClick={() => {
+                              setExpandedSidebarProjectIds((existing) => new Set(existing).add(projectView.project.id));
+                            }}
+                          >
+                            Show more...
+                          </button>
+                        ) : null}
                       </div>
                     ) : null}
                   </section>
@@ -1272,23 +2287,6 @@ export function App() {
               })}
             </div>
           </aside>
-          <div
-            className="project-sidebar__resizeHandle"
-            onMouseDown={(event) => {
-              event.preventDefault();
-              const startX = event.clientX;
-              const startWidth = workspace.sidebarWidth;
-              const handleMouseMove = (moveEvent: MouseEvent) => {
-                workspace.setSidebarWidth(startWidth + (moveEvent.clientX - startX));
-              };
-              const handleMouseUp = () => {
-                window.removeEventListener("mousemove", handleMouseMove);
-                window.removeEventListener("mouseup", handleMouseUp);
-              };
-              window.addEventListener("mousemove", handleMouseMove);
-              window.addEventListener("mouseup", handleMouseUp);
-            }}
-          />
           <main className="project-main">
             {workspace.activeProject && activeLayout && activeTab ? (
               <div className={activePaneGridClassName}>
@@ -1300,6 +2298,13 @@ export function App() {
                   return (
                     <section
                       key={paneView.pane.id}
+                      ref={(element) => {
+                        if (!element) {
+                          delete paneElementRefs.current[paneView.pane.id];
+                          return;
+                        }
+                        paneElementRefs.current[paneView.pane.id] = element;
+                      }}
                       className={`conversation-pane${paneView.isActive ? " conversation-pane--active" : ""}${dragOverPaneId === paneView.pane.id ? " conversation-pane--drag-over" : ""}${highlightedPaneId === paneView.pane.id ? " conversation-pane--highlight" : ""}`}
                       onClick={() => workspace.activatePane(paneView.project.id, paneView.tabId, paneView.pane.id)}
                       onDragOver={(event: ReactDragEvent<HTMLElement>) => {
@@ -1331,7 +2336,7 @@ export function App() {
                         setDraggedThreadId(null);
                       }}
                     >
-                        <div className="conversation-pane__body">
+                        <div className="transcript-shell">
                           <TranscriptRenderer
                             ref={(handle) => {
                               if (!handle) {
@@ -1351,7 +2356,8 @@ export function App() {
                             composerAttachments={paneView.attachments}
                             cwd={paneView.cwd}
                             interactionMode={paneView.interactionMode}
-                            promptFocusDisabled={paletteOpen}
+                            promptFocusDisabled={paletteOpen || hasBlockingModal}
+                            promptInputDisabled={hasBlockingModal}
                             {...(paneView.pendingUserInput && paneView.pendingQuestion
                                 ? {
                                     pendingUserInputHighlight: {
@@ -1379,6 +2385,7 @@ export function App() {
                             }
                           />
                         </div>
+                        <footer className="status-line">{getPaneFooterText(paneView)}</footer>
                     </section>
                   );
                 })}
@@ -1395,18 +2402,412 @@ export function App() {
             )}
           </main>
         </div>
-        <footer className="status-line">{footerText}</footer>
       </div>
       <CommandPalette
         open={paletteOpen}
         query={paletteQuery}
         commands={filteredCommands}
         selectedIndex={selectedCommandIndex}
+        scopeBounds={paletteScopeBounds}
         onClose={closePalette}
         onQueryChange={setPaletteQuery}
         onSelectedIndexChange={setSelectedCommandIndex}
         onRun={(command) => void runPaletteCommand(command as AppPaletteCommand)}
       />
+      {projectContextMenu && projectContextMenuProject ? (
+        <div
+          className="project-context-menu-layer"
+          role="presentation"
+          onMouseDown={handleCloseProjectContextMenu}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            handleCloseProjectContextMenu();
+          }}
+        >
+          <section
+            className="project-context-menu"
+            role="menu"
+            style={{ left: projectContextMenu.x, top: projectContextMenu.y }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <div className="project-context-menu__info">
+              <div className="project-context-menu__eyebrow">Project</div>
+              <div className="project-context-menu__title">{projectContextMenuProject.title}</div>
+              <div className="project-context-menu__path" title={projectContextMenuProject.workspaceRoot}>
+                {projectContextMenuProject.workspaceRoot}
+              </div>
+              <div className="project-context-menu__meta">
+                <span>{projectContextMenuThreadCount} thread{projectContextMenuThreadCount === 1 ? "" : "s"}</span>
+              </div>
+            </div>
+            <div className="project-context-menu__actions">
+              <button
+                type="button"
+                className="project-context-menu__action"
+                onClick={() => handleOpenManageProjectModal(projectContextMenuProject.id)}
+              >
+                Manage threads
+              </button>
+              <button
+                type="button"
+                className="project-context-menu__action"
+                onClick={() => handleRequestProjectArchive(projectContextMenuProject.id)}
+              >
+                Archive project
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {threadContextMenu && threadContextMenuThread ? (
+        <div
+          className="project-context-menu-layer"
+          role="presentation"
+          onMouseDown={handleCloseThreadContextMenu}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            handleCloseThreadContextMenu();
+          }}
+        >
+          <section
+            className="project-context-menu"
+            role="menu"
+            style={{ left: threadContextMenu.x, top: threadContextMenu.y }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <div className="project-context-menu__info">
+              <div className="project-context-menu__eyebrow">Thread</div>
+              <div className="project-context-menu__title">{threadContextMenuThread.title}</div>
+              <div className="project-context-menu__path">
+                {projects.find((project) => project.id === threadContextMenuThread.projectId)?.title ?? "Unknown project"}
+              </div>
+              <div className="project-context-menu__meta">
+                <span>{getThreadStatus(threadContextMenuThread, nowIso, isThreadTurnRunning(threadContextMenuThread.id)).label}</span>
+                <span>{threadContextMenuThread.provider}</span>
+              </div>
+            </div>
+            <div className="project-context-menu__actions">
+              <button
+                type="button"
+                className="project-context-menu__action"
+                disabled
+                title="Thread archive is not wired through orchestration yet."
+              >
+                Archive thread
+              </button>
+              <button
+                type="button"
+                className="project-context-menu__action project-context-menu__action--danger"
+                onClick={() => handleRequestThreadDelete(threadContextMenuThread.id)}
+              >
+                Delete thread
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {managedProject ? (
+        <div
+          className="project-modal-overlay project-modal-overlay--strong"
+          role="presentation"
+          onMouseDown={handleCloseManageProjectModal}
+        >
+          <section
+            className="project-modal project-manage-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Manage threads for ${managedProject.title}`}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-manage-modal__header">
+              <div className="project-manage-modal__heading">
+                <div className="project-modal__title">{managedProject.title}</div>
+                <div className="project-manage-modal__path" title={managedProject.workspaceRoot}>
+                  {managedProject.workspaceRoot}
+                </div>
+              </div>
+              <button
+                ref={manageProjectCloseButtonRef}
+                type="button"
+                className="project-manage-modal__close"
+                onClick={handleCloseManageProjectModal}
+                disabled={isDeletingManagedThreads}
+                aria-label="Close manage threads"
+              >
+                ×
+              </button>
+            </div>
+            <div
+              ref={manageProjectTableShellRef}
+              className="project-manage-modal__tableShell"
+              tabIndex={0}
+              role="grid"
+              aria-label={`${managedProject.title} threads`}
+              onKeyDown={handleManagedTableKeyDown}
+            >
+              <table className="project-manage-table">
+                <thead>
+                  <tr>
+                    <th className="project-manage-table__checkboxColumn">
+                      <input
+                        ref={manageProjectSelectAllRef}
+                        className="project-manage-table__checkbox"
+                        type="checkbox"
+                        checked={managedThreadSelection.allSelected}
+                        disabled={managedThreadSelection.totalCount === 0}
+                        onChange={handleToggleAllManagedThreads}
+                        aria-label={managedThreadSelection.allSelected ? "Deselect all threads" : "Select all threads"}
+                      />
+                    </th>
+                    <th>Thread</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Updated</th>
+                    <th>Provider</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {managedProjectThreads.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="project-manage-table__empty">
+                        No threads in this project yet.
+                      </td>
+                    </tr>
+                  ) : managedProjectThreads.map((thread) => {
+                    const status = getThreadStatus(thread, nowIso, isThreadTurnRunning(thread.id));
+                    const ageMs = getThreadAgeMs(thread, nowIso);
+                    const createdAtMs = Math.max(0, parseTimestampMs(nowIso) - parseTimestampMs(thread.createdAt));
+                    const isSelected = selectedManagedThreadIds.has(thread.id);
+                    return (
+                      <tr
+                        key={thread.id}
+                        className={`project-manage-table__row${isSelected ? " project-manage-table__row--selected" : ""}`}
+                        aria-selected={isSelected}
+                        onMouseDown={(event) => handleManagedThreadRowMouseDown(event, thread.id)}
+                        onMouseEnter={() => handleManagedThreadRowMouseEnter(thread.id)}
+                      >
+                        <td className="project-manage-table__checkboxCell">
+                          <input
+                            className="project-manage-table__checkbox project-manage-table__checkbox--marker"
+                            type="checkbox"
+                            checked={isSelected}
+                            readOnly
+                            tabIndex={-1}
+                            aria-hidden="true"
+                            aria-label={`Select ${thread.title}`}
+                          />
+                        </td>
+                        <td>
+                          <div className="project-manage-table__title">{thread.title}</div>
+                          <div className="project-manage-table__detail" title={getThreadFirstPrompt(thread)}>
+                            {truncateTitle(getThreadFirstPrompt(thread), 88)}
+                          </div>
+                        </td>
+                        <td>
+                          <span className={`project-manage-table__status project-manage-table__status--${status.tone}`}>
+                            {status.label}
+                          </span>
+                        </td>
+                        <td>
+                          <div className="project-manage-table__updatedPrimary">{formatSidebarAge(createdAtMs)}</div>
+                          <div className="project-manage-table__updatedSecondary" title={thread.createdAt}>
+                            {formatManageThreadTimestamp(thread.createdAt)}
+                          </div>
+                        </td>
+                        <td>
+                          <div className="project-manage-table__updatedPrimary">{formatSidebarAge(ageMs)}</div>
+                          <div className="project-manage-table__updatedSecondary" title={thread.updatedAt}>
+                            {formatManageThreadTimestamp(thread.updatedAt)}
+                          </div>
+                        </td>
+                        <td>
+                          <span className="project-manage-table__provider">{thread.provider}</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {manageProjectError ? <div className="project-modal__error">{manageProjectError}</div> : null}
+            <div className="project-manage-modal__footer">
+              <div className="project-manage-modal__footerInfo">
+                {managedThreadSelection.selectedCount > 0
+                  ? `${managedThreadSelection.selectedCount} of ${managedThreadSelection.totalCount} selected`
+                  : `${managedThreadSelection.totalCount} threads`}
+              </div>
+              <div className="project-manage-modal__footerActions">
+                <button
+                  type="button"
+                  className="project-modal__action project-modal__action--secondary"
+                  onClick={handleCloseManageProjectModal}
+                  disabled={isDeletingManagedThreads}
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  className="project-modal__action project-modal__action--secondary"
+                  disabled
+                  title="Thread archive is not wired through orchestration yet."
+                >
+                  Archive selected
+                </button>
+                <button
+                  type="button"
+                  className="project-modal__action project-modal__action--danger"
+                  onClick={() => void handleDeleteManagedThreads()}
+                  disabled={managedThreadSelection.selectedCount === 0 || isDeletingManagedThreads}
+                >
+                  {isDeletingManagedThreads
+                    ? "Deleting..."
+                    : managedThreadSelection.selectedCount > 0
+                      ? `Delete ${managedThreadSelection.selectedCount} selected`
+                      : "Delete selected"}
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {projectArchiveConfirmProject ? (
+        <div
+          className="project-modal-overlay project-modal-overlay--strong"
+          role="presentation"
+          onMouseDown={handleCloseProjectArchiveConfirm}
+        >
+          <section
+            className="project-modal project-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Archive ${projectArchiveConfirmProject.title}`}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-manage-modal__eyebrow">Archive project</div>
+            <div className="project-modal__title">{projectArchiveConfirmProject.title}</div>
+            <div className="project-confirm-modal__body">
+              This hides the project from the left sidebar in this console UI. Its threads and history stay intact.
+            </div>
+            <div className="project-modal__actions">
+              <button
+                type="button"
+                className="project-modal__action project-modal__action--secondary"
+                onClick={handleCloseProjectArchiveConfirm}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="project-modal__action project-modal__action--danger"
+                onClick={handleConfirmProjectArchive}
+              >
+                Archive project
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {threadDeleteConfirmThread ? (
+        <div
+          className="project-modal-overlay project-modal-overlay--strong"
+          role="presentation"
+          onMouseDown={handleCloseThreadDeleteConfirm}
+        >
+          <section
+            className="project-modal project-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Delete ${threadDeleteConfirmThread.title}`}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-manage-modal__eyebrow">Delete thread</div>
+            <div className="project-modal__title">{threadDeleteConfirmThread.title}</div>
+            <div className="project-confirm-modal__body">
+              This will remove the thread from the project history view.
+            </div>
+            {threadDeleteError ? <div className="project-modal__error">{threadDeleteError}</div> : null}
+            <div className="project-modal__actions">
+              <button
+                type="button"
+                className="project-modal__action project-modal__action--secondary"
+                onClick={handleCloseThreadDeleteConfirm}
+                disabled={isDeletingThread}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="project-modal__action project-modal__action--danger"
+                onClick={() => void handleConfirmThreadDelete()}
+                disabled={isDeletingThread}
+              >
+                {isDeletingThread ? "Deleting..." : "Delete thread"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {projectModalOpen ? (
+        <div className="project-modal-overlay" role="presentation" onMouseDown={handleCloseProjectModal}>
+          <section
+            className="project-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Add project"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-modal__title">Add project</div>
+            <div className="project-modal__body">
+              <label className="project-modal__label" htmlFor="project-path-input">Project path</label>
+              <div className="project-modal__pathRow">
+                <input
+                  ref={projectPathInputRef}
+                  id="project-path-input"
+                  className="project-modal__input"
+                  type="text"
+                  spellCheck={false}
+                  value={projectPathDraft}
+                  onChange={(event) => {
+                    setProjectPathDraft(event.target.value);
+                    if (projectModalError) {
+                      setProjectModalError(null);
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void handleCreateProject();
+                    }
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      handleCloseProjectModal();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="project-modal__browseButton"
+                  onClick={() => void handleBrowseProjectFolder()}
+                  disabled={!window.desktopBridge?.pickFolder || isCreatingProject}
+                >
+                  Browse...
+                </button>
+              </div>
+              {projectModalError ? <div className="project-modal__error">{projectModalError}</div> : null}
+            </div>
+            <div className="project-modal__actions">
+              <button type="button" className="project-modal__action project-modal__action--secondary" onClick={handleCloseProjectModal} disabled={isCreatingProject}>
+                Cancel
+              </button>
+              <button type="button" className="project-modal__action project-modal__action--primary" onClick={() => void handleCreateProject()} disabled={isCreatingProject}>
+                {isCreatingProject ? "Adding..." : "OK"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </>
   );
 }
