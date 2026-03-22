@@ -47,13 +47,14 @@ body {
   user-select: none;
 }
 
-.loading-screen__char {
+.loading-text__char {
   display: inline-block;
-  animation: loading-screen-text-pulse 1.24s ease-in-out infinite;
+  color: #8f99a3;
+  animation: loading-text-pulse 1.24s ease-in-out infinite;
   will-change: color;
 }
 
-@keyframes loading-screen-text-pulse {
+@keyframes loading-text-pulse {
   0%,
   38%,
   100% {

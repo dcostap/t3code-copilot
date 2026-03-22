@@ -344,7 +344,7 @@ describe("blockToLines", () => {
     expect(widgetLine.text.split(command)).toHaveLength(2);
   });
 
-  it("marks running commands with pulse highlight classes", () => {
+  it("marks running commands with running classes", () => {
     const lines = blockToLines({
       type: "work-group",
       title: "Command run",
@@ -369,54 +369,6 @@ describe("blockToLines", () => {
     expect(widgetLine.extraClasses).toEqual(
       expect.arrayContaining(["cm-line-workItemRunning", "cm-line-commandWidget"]),
     );
-    expectHighlightClasses(
-      widgetLine,
-      "tok-workingPulseCore",
-      "tok-workingPulseMid",
-      "tok-workingPulseEdge",
-    );
-  });
-
-  it("widens the pulse core for longer running commands", () => {
-    const shortLine = blockToLines({
-      type: "work-group",
-      title: "Command run",
-      status: "running",
-      startedAt: "1970-01-01T00:00:00.000Z",
-      endedAt: "1970-01-01T00:00:00.180Z",
-      now: "1970-01-01T00:00:00.180Z",
-      items: [
-        {
-          kind: "command",
-          label: "Command run",
-          status: "running",
-          command: "Get-Location",
-        },
-      ],
-    })[0]!;
-    const longLine = blockToLines({
-      type: "work-group",
-      title: "Command run",
-      status: "running",
-      startedAt: "1970-01-01T00:00:00.000Z",
-      endedAt: "1970-01-01T00:00:00.180Z",
-      now: "1970-01-01T00:00:00.180Z",
-      items: [
-        {
-          kind: "command",
-          label: "Command run",
-          status: "running",
-          command: "abcdefghijklmnopqrstuvwxyzAB",
-        },
-      ],
-    })[0]!;
-
-    const shortCoreWidth =
-      (shortLine.highlightSpans ?? []).filter((span) => span.className === "tok-workingPulseCore").length;
-    const longCoreWidth =
-      (longLine.highlightSpans ?? []).filter((span) => span.className === "tok-workingPulseCore").length;
-
-    expect(longCoreWidth).toBeGreaterThan(shortCoreWidth);
   });
 
   it("adds elapsed timing only to the last command in a completed command batch", () => {
@@ -802,7 +754,7 @@ describe("blockToLines", () => {
     expect(lines[4]?.text).toContain("apps/console-ui/src/index.css");
   });
 
-  it("renders a working-state block with pulse highlights", () => {
+  it("renders a working-state block with animated loading text", () => {
     const lines = blockToLines({
       type: "working-state",
       startedAt: "1970-01-01T00:00:00.000Z",
@@ -812,10 +764,10 @@ describe("blockToLines", () => {
     expect(lines[0]).toEqual({ text: "", kind: "meta" });
     expect(lines[1]?.kind).toBe("workingLine");
     expect(lines[1]?.text).toContain("Working for");
-    expectHighlightClasses(lines[1]!, "tok-workingPulseCore", "tok-workingPulseMid", "tok-workingPulseEdge");
+    expect(lines[1]?.animatedText).toEqual({ kind: "loading", from: 0, to: "Working for ".length });
   });
 
-  it("renders a waiting-state block with pulse highlights", () => {
+  it("renders a waiting-state block with animated loading text", () => {
     const lines = blockToLines({
       type: "waiting-state",
       startedAt: "1970-01-01T00:00:00.000Z",
@@ -825,7 +777,7 @@ describe("blockToLines", () => {
     expect(lines[0]).toEqual({ text: "", kind: "meta" });
     expect(lines[1]?.kind).toBe("workingLine");
     expect(lines[1]?.text).toContain("Waiting for agent for");
-    expectHighlightClasses(lines[1]!, "tok-workingPulseCore", "tok-workingPulseMid", "tok-workingPulseEdge");
+    expect(lines[1]?.animatedText).toEqual({ kind: "loading", from: 0, to: "Waiting for agent for ".length });
   });
 
   it("renders a finished-state block with the same spacing as the working widget", () => {
@@ -838,10 +790,11 @@ describe("blockToLines", () => {
     expect(lines[0]).toEqual({ text: "", kind: "meta" });
     expect(lines[1]?.kind).toBe("workingLine");
     expect(lines[1]?.text).toBe("Finished in 1.3s");
+    expect(lines[1]?.animatedText).toBeUndefined();
     expect(lines[1]?.highlightSpans).toBeUndefined();
   });
 
-  it("renders a sending-state block with pulse highlights", () => {
+  it("renders a sending-state block with animated loading text", () => {
     const lines = blockToLines({
       type: "sending-state",
       startedAt: "1970-01-01T00:00:00.000Z",
@@ -851,7 +804,7 @@ describe("blockToLines", () => {
     expect(lines[0]).toEqual({ text: "", kind: "meta" });
     expect(lines[1]?.kind).toBe("workingLine");
     expect(lines[1]?.text).toContain("Sending prompt for");
-    expectHighlightClasses(lines[1]!, "tok-workingPulseCore", "tok-workingPulseMid", "tok-workingPulseEdge");
+    expect(lines[1]?.animatedText).toEqual({ kind: "loading", from: 0, to: "Sending prompt for ".length });
   });
 
   it("renders an interrupted-state block with the frozen elapsed time", () => {

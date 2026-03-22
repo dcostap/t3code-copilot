@@ -79,6 +79,11 @@ export interface AnnotatedLine {
     readonly questionIndex: number;
     readonly optionIndex?: number;
   };
+  readonly animatedText?: {
+    readonly kind: "loading";
+    readonly from: number;
+    readonly to: number;
+  };
 }
 
 // ── Block types ─────────────────────────────────────────────────────
@@ -1111,7 +1116,6 @@ function executionWorkGroupLine(
     signature: string;
     timingLabel?: string;
     now?: string;
-    startedAt?: string;
   },
 ): AnnotatedLine {
   if (item.kind === "file-change") {
@@ -1127,9 +1131,7 @@ function executionWorkGroupLine(
   const text = `${glyph} ${prefix}${summarySuffix}${timingSuffix}`;
   const outputLines = executionWidgetOutputLines(item);
   const prefixStart = glyph.length + 1;
-  const subjectStart = prefixStart + prefix.length + 2;
-  const subjectEnd = subjectStart + subject.length;
-  const exitStart = subjectEnd;
+  const exitStart = prefixStart + prefix.length + 2 + subject.length;
   const exitEnd = exitStart + exitLabel.length;
   const timingStart = options.timingLabel ? text.length - options.timingLabel.length : -1;
   const highlightSpans = [
@@ -1140,9 +1142,6 @@ function executionWorkGroupLine(
       : []),
     ...(options.timingLabel
       ? [{ from: timingStart, to: text.length, className: "tok-commandWidgetMeta" }]
-      : []),
-    ...(item.status === "running" && options.now && subject.length > 0
-      ? workingPulseSpans(text, options.now, options.startedAt, subjectStart, subjectEnd)
       : []),
   ];
 
@@ -1177,7 +1176,6 @@ function fileActivityWorkGroupLine(
     signature: string;
     timingLabel?: string;
     now?: string;
-    startedAt?: string;
   },
 ): AnnotatedLine {
   const glyph = commandWidgetGlyph(item, options.now);
@@ -1189,9 +1187,6 @@ function fileActivityWorkGroupLine(
   const text = `${glyph} ${prefix}${countsSegment}  ${subject}${timingSuffix}`;
   const prefixStart = glyph.length + 1;
   const countsStart = counts.length > 0 ? prefixStart + prefix.length + 1 : -1;
-  const subjectStart =
-    counts.length > 0 ? countsStart + counts.length + 2 : prefixStart + prefix.length + 2;
-  const subjectEnd = subjectStart + subject.length;
   const timingStart = options.timingLabel ? text.length - options.timingLabel.length : -1;
   const commaIndex = counts.indexOf(",");
   const plusStart = countsStart >= 0 ? countsStart + 1 : -1;
@@ -1209,9 +1204,6 @@ function fileActivityWorkGroupLine(
       : []),
     ...(options.timingLabel
       ? [{ from: timingStart, to: text.length, className: "tok-commandWidgetMeta" }]
-      : []),
-    ...(item.status === "running" && options.now
-      ? workingPulseSpans(text, options.now, options.startedAt, subjectStart, subjectEnd)
       : []),
   ];
 
@@ -1248,7 +1240,6 @@ function executionWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
             ? { timingLabel }
             : {}),
           ...(block.now ? { now: block.now } : {}),
-          startedAt: block.pulseOriginAt ?? block.startedAt,
         }),
       ];
     }),
@@ -1270,7 +1261,6 @@ function fileActivityWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
             ? { timingLabel }
             : {}),
           ...(block.now ? { now: block.now } : {}),
-          startedAt: block.pulseOriginAt ?? block.startedAt,
         }),
       ];
 
@@ -1321,80 +1311,6 @@ function planStepPrefix(status: "pending" | "inProgress" | "completed") {
 
 function formatSignedCount(value: number) {
   return `${value >= 0 ? "+" : ""}${value}`;
-}
-
-function workingPulseIndex(text: string, now: string, startedAt?: string, radius = 0) {
-  const textLength = text.length;
-  if (textLength === 0) {
-    return null;
-  }
-
-  const pauseMs = 180;
-  const activeMs = 1_900;
-  const cycleMs = activeMs + pauseMs;
-  const nowMs = Date.parse(now);
-  const startMs = startedAt ? Date.parse(startedAt) : nowMs;
-  if (!Number.isFinite(nowMs) || !Number.isFinite(startMs)) {
-    return null;
-  }
-
-  const elapsedMs = Math.max(0, nowMs - startMs);
-  const offsetMs = elapsedMs % cycleMs;
-  if (offsetMs >= activeMs) {
-    return null;
-  }
-
-  const activePositions = Math.max(1, textLength + radius);
-  return Math.floor((offsetMs / activeMs) * activePositions);
-}
-
-function workingPulseSpans(
-  text: string,
-  now: string,
-  startedAt?: string,
-  rangeStart = 0,
-  rangeEnd = text.length,
-): ReadonlyArray<{
-  readonly from: number;
-  readonly to: number;
-  readonly className: string;
-}> {
-  const safeStart = Math.max(0, Math.min(rangeStart, text.length));
-  const safeEnd = Math.max(safeStart, Math.min(rangeEnd, text.length));
-  const slice = text.slice(safeStart, safeEnd);
-  const baselineChars = 22;
-  const baseLeftRadius = 3;
-  const baseRightRadius = 4;
-  const edgeRadius = 2;
-  const midRadius = 1;
-  const extraSpread =
-    slice.length <= baselineChars ? 0 : Math.max(0, Math.floor((slice.length - baselineChars) / 6));
-  const leftRadius = baseLeftRadius + Math.floor(extraSpread / 2);
-  const rightRadius = baseRightRadius + Math.ceil(extraSpread / 2);
-  const maxRadius = Math.max(leftRadius, rightRadius);
-  const coreRadius = Math.max(0, maxRadius - edgeRadius - midRadius);
-  const center = workingPulseIndex(slice, now, startedAt, maxRadius);
-  if (center === null) {
-    return [];
-  }
-
-  return Array.from(
-    { length: leftRadius + rightRadius + 1 },
-    (_, arrayIndex) => arrayIndex - leftRadius,
-  ).flatMap((offset) => {
-    const index = center + offset;
-    if (index < 0 || index >= slice.length) {
-      return [];
-    }
-    const absOffset = Math.abs(offset);
-    const className =
-      absOffset <= coreRadius
-        ? "tok-workingPulseCore"
-        : absOffset <= coreRadius + midRadius
-          ? "tok-workingPulseMid"
-          : "tok-workingPulseEdge";
-    return [{ from: safeStart + index, to: safeStart + index + 1, className }];
-  });
 }
 
 function summarizeCheckpointFiles(
@@ -1600,22 +1516,18 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
     case "waiting-state":
     case "working-state": {
       const elapsedLabel = formatElapsedDuration(Date.parse(block.now) - Date.parse(block.startedAt));
-      const text = block.type === "sending-state"
-        ? `Sending prompt for ${elapsedLabel}`
+      const prefix = block.type === "sending-state"
+        ? "Sending prompt for "
         : block.type === "waiting-state"
-          ? `Waiting for agent for ${elapsedLabel}`
-        : `Working for ${elapsedLabel}`;
-      const highlightSpans = workingPulseSpans(text, block.now, block.startedAt);
+          ? "Waiting for agent for "
+        : "Working for ";
+      const text = `${prefix}${elapsedLabel}`;
       return [
         { text: "", kind: "meta" },
         {
           text,
           kind: "workingLine",
-          ...(highlightSpans.length > 0
-            ? {
-                highlightSpans,
-              }
-            : {}),
+          animatedText: { kind: "loading", from: 0, to: prefix.length },
         },
       ];
     }

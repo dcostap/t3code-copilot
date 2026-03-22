@@ -154,6 +154,9 @@ function activityKindToBlockStatus(kind: string): "running" | "done" | "error" |
   if (kind.endsWith(".started")) {
     return "running";
   }
+  if (kind.endsWith(".updated")) {
+    return "running";
+  }
   if (kind.endsWith(".failed")) {
     return "error";
   }
@@ -163,10 +166,33 @@ function activityKindToBlockStatus(kind: string): "running" | "done" | "error" |
   return "done";
 }
 
+const SHELL_TOOL_NAMES = new Set(["bash", "cmd", "powershell", "pwsh", "shell", "sh", "zsh"]);
+
+function isShellToolName(value: string | null): boolean {
+  return value !== null && SHELL_TOOL_NAMES.has(value);
+}
+
 function resolveActivityStatus(
   explicitStatus: unknown,
   activityKind: string,
+  itemType?: string | null,
+  payload: Record<string, unknown> | null = null,
 ): "running" | "done" | "error" | "declined" {
+  if (
+    (itemType === "command_execution" || isCommandLikePayload(payload))
+    && (activityKind.endsWith(".started") || activityKind.endsWith(".updated"))
+  ) {
+    return "running";
+  }
+
+  if (activityKind.endsWith(".failed")) {
+    return "error";
+  }
+
+  if (activityKind.endsWith(".declined")) {
+    return "declined";
+  }
+
   if (
     explicitStatus === "running"
     || explicitStatus === "done"
@@ -190,17 +216,62 @@ function normalizeCommand(value: unknown): string | null {
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
+function normalizeShellCommandDetail(value: string | null): string | null {
+  const sanitized = sanitizeCommandDetail(value);
+  if (!sanitized) {
+    return null;
+  }
+
+  const normalized = sanitized.replace(/^Completed\s+/u, "").trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function sanitizeCommandDetail(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const stripped = value
+    .replace(/\s*<exited with exit code -?\d+>\s*$/iu, "")
+    .replace(/\s+exit code -?\d+\.?\s*$/iu, "")
+    .trim();
+
+  return stripped.length > 0 ? stripped : null;
+}
+
 function extractCommand(payload: Record<string, unknown> | null): string | null {
   const data = asRecord(payload?.data);
   const item = asRecord(data?.item);
   const input = asRecord(item?.input);
+  const argumentsRecord = asRecord(data?.arguments);
+  const inputArguments = asRecord(input?.arguments);
   const result = asRecord(item?.result);
+  const detail = normalizeShellCommandDetail(
+    asString(payload?.detail)
+    ?? asString(item?.detail)
+    ?? asString(result?.content),
+  );
   return (
     normalizeCommand(item?.command) ??
+    normalizeCommand(item?.arguments) ??
     normalizeCommand(input?.command) ??
+    normalizeCommand(argumentsRecord?.fullCommandText) ??
+    normalizeCommand(argumentsRecord?.command) ??
+    normalizeCommand(inputArguments?.fullCommandText) ??
+    normalizeCommand(inputArguments?.command) ??
     normalizeCommand(result?.command) ??
-    normalizeCommand(data?.command)
+    normalizeCommand(data?.command) ??
+    (isShellToolName(normalizeToolName(extractToolName(payload))) ? detail : null)
   );
+}
+
+function isCommandLikePayload(payload: Record<string, unknown> | null): boolean {
+  if (!payload) {
+    return false;
+  }
+
+  return extractCommand(payload) !== null
+    || isShellToolName(normalizeToolName(extractToolName(payload)));
 }
 
 function extractExitCode(payload: Record<string, unknown> | null): number | undefined {
@@ -872,12 +943,13 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
   const itemType = asString(payload?.itemType);
   const command = extractCommand(payload);
   const exitCode = extractExitCode(payload);
-  const detail = asString(payload?.detail);
+  const rawDetail = asString(payload?.detail);
+  const detail = sanitizeCommandDetail(rawDetail);
   const toolInvocationDetail = extractToolInvocationDetail(payload);
   const rawOutput = extractOutput(payload);
-  const output = rawOutput === detail ? null : rawOutput;
+  const output = rawOutput === rawDetail || rawOutput === detail ? null : rawOutput;
   const changedFiles = extractChangedFiles(payload);
-  const status = resolveActivityStatus(payload?.status, activity.kind);
+  const status = resolveActivityStatus(payload?.status, activity.kind, itemType, payload);
   const label = asString(payload?.title) ?? activity.summary;
   const fileChangeStats = itemType === "file_change" ? extractFileChangeStats(payload) : null;
   const fileChangeUnifiedDiff = itemType === "file_change" ? extractFileChangeUnifiedDiff(payload) : null;
@@ -1165,7 +1237,7 @@ function activityToBlocks(
       {
         type: "tool-call",
         label: asString(payload?.title) ?? activity.summary,
-        status: resolveActivityStatus(payload?.status, activity.kind),
+        status: resolveActivityStatus(payload?.status, activity.kind, null, payload),
         ...(asString(payload?.detail) ? { detail: asString(payload?.detail)! } : {}),
       },
     ];
@@ -1235,6 +1307,20 @@ function isAssistantBoundaryActivity(activity: OrchestrationThreadActivity) {
   return activity.kind === "user-input.requested" || activity.kind === "approval.requested";
 }
 
+function closesAssistantBoundaryActivity(activity: OrchestrationThreadActivity) {
+  const payload = asRecord(activity.payload);
+  return activity.kind === "user-input.resolved"
+    || activity.kind === "approval.resolved"
+    || (
+      activity.kind === "provider.user-input.respond.failed"
+      && isStaleCopilotUserInputResponseDetail(asString(payload?.detail))
+    )
+    || (
+      activity.kind === "provider.approval.respond.failed"
+      && asString(payload?.detail)?.includes("Unknown pending permission request")
+    );
+}
+
 function buildAssistantBoundaryMap(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ) {
@@ -1258,6 +1344,7 @@ function buildAssistantMessageEntriesFromEvents(
   message: OrchestrationThread["messages"][number],
   events: ReadonlyArray<OrchestrationEvent>,
   boundariesByTurnId: ReadonlyMap<string, ReadonlyArray<string>>,
+  askUserHiddenWorkItemIds: ReadonlySet<string>,
 ): TimelineEntry[] | null {
   if (message.role !== "assistant") {
     return null;
@@ -1278,28 +1365,52 @@ function buildAssistantMessageEntriesFromEvents(
     return null;
   }
 
-  const boundaries = message.turnId
-    ? (boundariesByTurnId.get(message.turnId) ?? [])
-    : [];
+  const boundaries = uniqueStrings([
+    ...(message.turnId
+      ? (boundariesByTurnId.get(message.turnId) ?? [])
+      : []),
+    ...thread.activities
+      .filter((activity) =>
+        !activity.turnId
+        && isAssistantBoundaryActivity(activity)
+        && activity.createdAt.localeCompare(message.createdAt) >= 0
+        && activity.createdAt.localeCompare(message.updatedAt) <= 0
+        && thread.latestTurn?.assistantMessageId === message.id
+      )
+      .map((activity) => activity.createdAt),
+  ]).toSorted((left, right) => left.localeCompare(right));
   const entries: TimelineEntry[] = [];
   let boundaryIndex = 0;
   let segmentText = "";
   let segmentCreatedAt: string | null = null;
+  const finalFinishedAt = shouldAppendFinishedState(thread, message)
+    ? resolveFinishedAt(thread, message, askUserHiddenWorkItemIds)
+    : null;
 
-  const flushSegment = (streaming: boolean) => {
+  const flushSegment = (streaming: boolean, finishedAt?: string) => {
     if (!segmentCreatedAt || segmentText.length === 0) {
       segmentText = "";
       segmentCreatedAt = null;
       return;
     }
 
+    const startedAt = segmentCreatedAt;
     entries.push({
       id: `message:${message.id}:segment:${entries.length}`,
-      createdAt: segmentCreatedAt,
+      createdAt: startedAt,
       source: "message",
       turnId: message.turnId,
       blocks: [{ type: "assistant-text", text: segmentText, streaming }],
     });
+    if (finishedAt && finishedAt.localeCompare(startedAt) >= 0) {
+      entries.push({
+        id: `message:${message.id}:segment:${entries.length}:finished`,
+        createdAt: finishedAt,
+        source: "message",
+        turnId: message.turnId,
+        blocks: [createFinishedStateBlock(startedAt, finishedAt)],
+      });
+    }
     segmentText = "";
     segmentCreatedAt = null;
   };
@@ -1307,15 +1418,15 @@ function buildAssistantMessageEntriesFromEvents(
   for (const event of assistantEvents) {
     while (
       boundaryIndex < boundaries.length
-      && (boundaries[boundaryIndex]?.localeCompare(event.payload.createdAt) ?? 1) < 0
+      && (boundaries[boundaryIndex]?.localeCompare(event.occurredAt) ?? 1) < 0
     ) {
-      flushSegment(false);
+      flushSegment(false, boundaries[boundaryIndex]);
       boundaryIndex += 1;
     }
 
     if (event.payload.text.length > 0) {
       if (!segmentCreatedAt) {
-        segmentCreatedAt = event.payload.createdAt;
+        segmentCreatedAt = event.occurredAt;
       }
       segmentText += event.payload.text;
     }
@@ -1323,6 +1434,11 @@ function buildAssistantMessageEntriesFromEvents(
 
   if (segmentText.length === 0 && message.text.length > 0) {
     return null;
+  }
+
+  while (boundaryIndex < boundaries.length) {
+    flushSegment(false, boundaries[boundaryIndex]);
+    boundaryIndex += 1;
   }
 
   const reconstructedText = entries
@@ -1342,7 +1458,7 @@ function buildAssistantMessageEntriesFromEvents(
     segmentText += remainingText;
   }
 
-  flushSegment(message.streaming);
+  flushSegment(message.streaming, finalFinishedAt ?? undefined);
   return entries.length > 0 ? entries : null;
 }
 
@@ -1412,7 +1528,10 @@ function resolveFinishedAt(
     : baseFinishedAt;
 }
 
-function createFinishedStateBlock(startedAt: string, finishedAt: string): FinishedStateBlock {
+function createFinishedStateBlock(
+  startedAt: string,
+  finishedAt: string,
+): FinishedStateBlock {
   return {
     type: "finished-state",
     startedAt,
@@ -1474,6 +1593,33 @@ function isAssistantMessageEntry(entry: TimelineEntry) {
   return entry.source === "message" && entry.blocks?.some((block) => block.type === "assistant-text");
 }
 
+function hasVisibleNonFinishedBlocks(entry: TimelineEntry) {
+  if (entry.blocks?.some((block) => block.type !== "finished-state")) {
+    return true;
+  }
+
+  if (entry.source === "activity" && entry.activity) {
+    return activityToWorkItem(entry.activity) !== null || activityToBlocks(entry.activity, {}).length > 0;
+  }
+
+  return false;
+}
+
+function isVisibleOutputEntry(entry: TimelineEntry) {
+  if (isAssistantMessageEntry(entry)) {
+    return true;
+  }
+
+  if (entry.source === "activity" && entry.activity) {
+    if (isAssistantBoundaryActivity(entry.activity)) {
+      return false;
+    }
+    return activityToWorkItem(entry.activity) !== null || activityToBlocks(entry.activity, {}).length > 0;
+  }
+
+  return false;
+}
+
 function appendFinishedStateToLatestTurnEntries(
   thread: OrchestrationThread,
   entries: TimelineEntry[],
@@ -1483,6 +1629,12 @@ function appendFinishedStateToLatestTurnEntries(
     return entries;
   }
 
+  const latestTurnStartedAt =
+    latestTurn.startedAt
+    ?? latestTurn.requestedAt
+    ?? thread.session?.updatedAt
+    ?? thread.updatedAt;
+
   let targetIndex = -1;
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     if (entries[index]?.turnId === latestTurn.turnId && isAssistantMessageEntry(entries[index]!)) {
@@ -1490,49 +1642,214 @@ function appendFinishedStateToLatestTurnEntries(
       break;
     }
   }
+  if (targetIndex < 0) {
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      if (entries[index]?.turnId === latestTurn.turnId && hasVisibleNonFinishedBlocks(entries[index]!)) {
+        targetIndex = index;
+        break;
+      }
+    }
+  }
+  if (targetIndex < 0) {
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index];
+      const requestId =
+        entry?.source === "activity" && entry.activity
+          ? asString(asRecord(entry.activity.payload)?.requestId)
+          : null;
+      const isLaterResolvedBoundary = requestId
+        ? thread.activities.some((activity) =>
+            activity.createdAt.localeCompare(entry?.createdAt ?? "") > 0
+            && closesAssistantBoundaryActivity(activity)
+            && asString(asRecord(activity.payload)?.requestId) === requestId
+          )
+        : false;
+      if (
+        entry?.source === "activity"
+        && entry.activity
+        && isAssistantBoundaryActivity(entry.activity)
+        && entry.createdAt.localeCompare(latestTurnStartedAt) >= 0
+        && !isLaterResolvedBoundary
+      ) {
+        targetIndex = index;
+        break;
+      }
+    }
+  }
   const targetEntry = targetIndex >= 0 ? entries[targetIndex] : null;
+  const hasAssistantMessageFinishedStateEntry = latestTurn.assistantMessageId
+    ? entries.some((entry) =>
+        entry.id.startsWith(`message:${latestTurn.assistantMessageId}:`)
+        && (entry.blocks?.some((block) => block.type === "finished-state") ?? false)
+      )
+    : false;
   const hasFinishedStateEntry = entries.some((entry) =>
-    entry.turnId === latestTurn.turnId && (entry.blocks?.some((block) => block.type === "finished-state") ?? false)
+    (
+      entry.turnId === latestTurn.turnId
+      || (
+        targetEntry?.source === "activity"
+        && targetEntry.activity
+        && isAssistantBoundaryActivity(targetEntry.activity)
+        && entry.createdAt === targetEntry.createdAt
+      )
+    )
+    && (entry.blocks?.some((block) => block.type === "finished-state") ?? false)
   );
-  if (!targetEntry || hasFinishedStateEntry) {
+  if (!targetEntry || hasFinishedStateEntry || hasAssistantMessageFinishedStateEntry) {
     return entries;
   }
+
+  const finishedAt =
+    targetEntry.source === "activity" && targetEntry.activity && isAssistantBoundaryActivity(targetEntry.activity)
+      ? targetEntry.createdAt
+      : latestTurn.completedAt ?? targetEntry.createdAt;
 
   const nextEntries = entries.slice();
   nextEntries.push({
     id: `turn:${latestTurn.turnId}:finished`,
-    createdAt: latestTurn.completedAt ?? targetEntry.createdAt,
+    createdAt: finishedAt,
     source: "message",
     turnId: latestTurn.turnId,
     blocks: [
       createFinishedStateBlock(
         latestTurn.startedAt ?? targetEntry.createdAt,
-        latestTurn.completedAt ?? targetEntry.createdAt,
+        finishedAt,
       ),
     ],
   });
   return nextEntries;
 }
 
-function findRunningAssistantMessage(thread: OrchestrationThread) {
-  const latestTurnId = thread.latestTurn?.turnId ?? thread.session?.activeTurnId ?? null;
+function appendPendingBoundaryFinishedStateToLatestTurnEntries(
+  thread: OrchestrationThread,
+  entries: TimelineEntry[],
+) {
+  const latestTurn = thread.latestTurn;
+  if (latestTurn?.state !== "running" || !hasOpenPendingUserInputRequest(thread.activities)) {
+    return entries;
+  }
+
+  const runningStartedAt =
+    latestTurn.startedAt
+    ?? latestTurn.requestedAt
+    ?? thread.session?.updatedAt
+    ?? thread.updatedAt;
+  let phaseStartedAt = runningStartedAt;
+  const openBoundariesByRequestId = new Map<string, { phaseStartedAt: string; requestedAt: string }>();
+
+  for (const activity of [...thread.activities].toSorted(compareActivitiesByOrder)) {
+    const isInRunningTurn = activity.createdAt.localeCompare(runningStartedAt) >= 0;
+    if (!isInRunningTurn) {
+      continue;
+    }
+
+    const payload = asRecord(activity.payload);
+    const requestId = asString(payload?.requestId);
+
+    if (isAssistantBoundaryActivity(activity) && requestId) {
+      openBoundariesByRequestId.set(requestId, {
+        phaseStartedAt,
+        requestedAt: activity.createdAt,
+      });
+      phaseStartedAt = activity.createdAt;
+      continue;
+    }
+
+    if (closesAssistantBoundaryActivity(activity) && requestId) {
+      openBoundariesByRequestId.delete(requestId);
+      phaseStartedAt = activity.createdAt;
+    }
+  }
+
+  const latestOpenBoundary = [...openBoundariesByRequestId.values()]
+    .toSorted((left, right) => left.requestedAt.localeCompare(right.requestedAt))
+    .at(-1);
+  if (
+    !latestOpenBoundary
+    || latestOpenBoundary.requestedAt.localeCompare(latestOpenBoundary.phaseStartedAt) <= 0
+  ) {
+    return entries;
+  }
+
+  const hasFinishedStateAtBoundary = entries.some((entry) =>
+    entry.turnId === latestTurn.turnId
+    && (entry.blocks?.some((block) =>
+      block.type === "finished-state" && block.finishedAt === latestOpenBoundary.requestedAt
+    ) ?? false)
+  );
+  if (hasFinishedStateAtBoundary) {
+    return entries;
+  }
+
+  const nextEntries = entries.slice();
+  nextEntries.push({
+    id: `turn:${latestTurn.turnId}:pending-boundary-finished:${latestOpenBoundary.requestedAt}`,
+    createdAt: latestOpenBoundary.requestedAt,
+    source: "message",
+    turnId: latestTurn.turnId,
+    blocks: [
+      createFinishedStateBlock(
+        latestOpenBoundary.phaseStartedAt,
+        latestOpenBoundary.requestedAt,
+      ),
+    ],
+  });
+  return nextEntries;
+}
+
+function findRunningTurnVisibleOutputStartedAt(
+  thread: OrchestrationThread,
+  entries: ReadonlyArray<TimelineEntry>,
+) {
   const runningStartedAt =
     thread.latestTurn?.startedAt
     ?? thread.latestTurn?.requestedAt
     ?? thread.session?.updatedAt
     ?? thread.updatedAt;
 
-  return thread.messages
-    .filter((message) =>
-      message.role === "assistant"
-      && (
-        latestTurnId
-          ? message.turnId === latestTurnId
-          : message.createdAt.localeCompare(runningStartedAt) >= 0
-      ))
-    .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
-    .at(-1)
-    ?? null;
+  let currentPhaseStartedAt: string | null = null;
+
+  for (const entry of entries) {
+    const isInRunningTurn = entry.createdAt.localeCompare(runningStartedAt) >= 0;
+    if (!isInRunningTurn) {
+      continue;
+    }
+
+    if (entry.source === "activity" && entry.activity) {
+      if (isAssistantBoundaryActivity(entry.activity) || closesAssistantBoundaryActivity(entry.activity)) {
+        currentPhaseStartedAt = null;
+        continue;
+      }
+    }
+
+    if (isVisibleOutputEntry(entry) && !currentPhaseStartedAt) {
+      currentPhaseStartedAt = entry.createdAt;
+    }
+  }
+
+  return currentPhaseStartedAt;
+}
+
+function findRunningTurnPhaseStartedAt(thread: OrchestrationThread) {
+  const runningStartedAt =
+    thread.latestTurn?.startedAt
+    ?? thread.latestTurn?.requestedAt
+    ?? thread.session?.updatedAt
+    ?? thread.updatedAt;
+  let phaseStartedAt = runningStartedAt;
+
+  for (const activity of [...thread.activities].toSorted(compareActivitiesByOrder)) {
+    const isInRunningTurn = activity.createdAt.localeCompare(runningStartedAt) >= 0;
+    if (!isInRunningTurn) {
+      continue;
+    }
+
+    if (isAssistantBoundaryActivity(activity) || closesAssistantBoundaryActivity(activity)) {
+      phaseStartedAt = activity.createdAt;
+    }
+  }
+
+  return phaseStartedAt;
 }
 
 export function threadToTranscriptBlocks(
@@ -1590,6 +1907,7 @@ export function threadToTranscriptBlocks(
             message,
             options.orchestrationEvents,
             assistantBoundariesByTurnId,
+            askUserHiddenWorkItemIds,
           )
         : null;
 
@@ -1611,9 +1929,6 @@ export function threadToTranscriptBlocks(
       const finishedStateEntry = buildFinishedStateEntryForAssistantMessage(thread, message, askUserHiddenWorkItemIds);
       if (assistantEntries) {
         entries.push(...assistantEntries);
-        if (finishedStateEntry) {
-          entries.push(finishedStateEntry);
-        }
       } else if (checkpoint) {
         entries.push({
           id: `message:${message.id}`,
@@ -1730,7 +2045,15 @@ export function threadToTranscriptBlocks(
     }
   };
 
-  for (const entry of appendFinishedStateToLatestTurnEntries(thread, entries.toSorted(compareByCreatedAt))) {
+  const sortedEntries = appendFinishedStateToLatestTurnEntries(
+    thread,
+    appendPendingBoundaryFinishedStateToLatestTurnEntries(
+      thread,
+      entries.toSorted(compareByCreatedAt),
+    ).toSorted(compareByCreatedAt),
+  ).toSorted(compareByCreatedAt);
+
+  for (const entry of sortedEntries) {
     if (entry.source === "activity" && entry.activity) {
       const workItem = activityToWorkItem(entry.activity);
       if (workItem) {
@@ -1813,16 +2136,12 @@ export function threadToTranscriptBlocks(
   }
 
   if (!pendingUserInputOpen && (thread.latestTurn?.state === "running" || thread.session?.status === "running")) {
-    const waitingStartedAt =
-      thread.latestTurn?.startedAt
-      ?? thread.latestTurn?.requestedAt
-      ?? thread.session?.updatedAt
-      ?? thread.updatedAt;
-    const runningAssistantMessage = findRunningAssistantMessage(thread);
+    const waitingStartedAt = findRunningTurnPhaseStartedAt(thread);
+    const outputStartedAt = findRunningTurnVisibleOutputStartedAt(thread, sortedEntries);
     const now = options.now ?? new Date().toISOString();
     blocks.push({
-      type: runningAssistantMessage ? "working-state" : "waiting-state",
-      startedAt: runningAssistantMessage?.createdAt ?? waitingStartedAt,
+      type: outputStartedAt ? "working-state" : "waiting-state",
+      startedAt: outputStartedAt ?? waitingStartedAt,
       now,
     });
   } else if (thread.latestTurn?.state === "interrupted") {

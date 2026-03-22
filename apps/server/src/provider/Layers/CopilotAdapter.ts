@@ -109,6 +109,7 @@ interface ActiveCopilotSession extends CopilotTurnTrackingState {
   updatedAt: string;
   lastError: string | undefined;
   toolTitlesByCallId: Map<string, string>;
+  toolItemTypesByCallId: Map<string, "command_execution" | "dynamic_tool_call" | "mcp_tool_call">;
   pendingApprovalResolvers: Map<string, PendingApprovalRequest>;
   pendingUserInputResolvers: Map<string, PendingUserInputRequest>;
   unsubscribe: () => void;
@@ -333,8 +334,37 @@ function requestDetailFromPermissionRequest(request: PermissionRequest): string 
   }
 }
 
-function itemTypeFromToolEvent(event: Extract<SessionEvent, { type: "tool.execution_start" }>) {
-  return event.data.mcpToolName ? "mcp_tool_call" : "dynamic_tool_call";
+type CopilotToolExecutionStartEvent = Extract<SessionEvent, { type: "tool.execution_start" }>;
+type CopilotToolExecutionCompleteEvent = Extract<SessionEvent, { type: "tool.execution_complete" }>;
+type CopilotToolItemType = "command_execution" | "dynamic_tool_call" | "mcp_tool_call";
+type CopilotTerminalResultContent = Extract<
+  NonNullable<NonNullable<CopilotToolExecutionCompleteEvent["data"]["result"]>["contents"]>[number],
+  { type: "terminal" }
+>;
+
+const COPILOT_COMMAND_TOOL_NAMES = new Set(["bash", "cmd", "powershell", "pwsh", "shell", "sh", "zsh"]);
+
+function hasCommandExecutionArguments(event: CopilotToolExecutionStartEvent) {
+  const argumentsRecord = asRecord(event.data.arguments);
+  const command = argumentsRecord?.command;
+  const fullCommandText = normalizeString(argumentsRecord?.fullCommandText);
+  return fullCommandText !== undefined
+    || typeof command === "string"
+    || (Array.isArray(command) && command.every((entry) => typeof entry === "string"));
+}
+
+function itemTypeFromToolEvent(event: CopilotToolExecutionStartEvent): CopilotToolItemType {
+  if (event.data.mcpToolName) {
+    return "mcp_tool_call";
+  }
+
+  const normalizedToolName = normalizeString(event.data.toolName)?.toLowerCase();
+  if ((normalizedToolName && COPILOT_COMMAND_TOOL_NAMES.has(normalizedToolName))
+    || hasCommandExecutionArguments(event)) {
+    return "command_execution";
+  }
+
+  return "dynamic_tool_call";
 }
 
 function toolDetailFromEvent(data: {
@@ -345,6 +375,23 @@ function toolDetailFromEvent(data: {
   return trimToUndefined(
     [data.mcpServerName, data.mcpToolName ?? data.toolName].filter(Boolean).join(" / "),
   );
+}
+
+function terminalResultFromToolCompleteEvent(
+  event: CopilotToolExecutionCompleteEvent,
+): CopilotTerminalResultContent | undefined {
+  return event.data.result?.contents?.find(
+    (content): content is CopilotTerminalResultContent => content.type === "terminal",
+  );
+}
+
+function toolResultDetailFromEvent(event: CopilotToolExecutionCompleteEvent) {
+  return trimToUndefined(event.data.result?.detailedContent ?? event.data.result?.content);
+}
+
+function shouldKeepToolExecutionRunning(event: CopilotToolExecutionCompleteEvent) {
+  const terminalResult = terminalResultFromToolCompleteEvent(event);
+  return event.data.success && terminalResult !== undefined && typeof terminalResult.exitCode !== "number";
 }
 
 function withRefs(input: {
@@ -496,6 +543,7 @@ function createSessionRecord(input: {
     pendingTurnIds: [],
     pendingTurnUsage: undefined,
     toolTitlesByCallId: new Map(),
+    toolItemTypesByCallId: new Map(),
     pendingApprovalResolvers: input.pendingApprovalResolvers,
     pendingUserInputResolvers: input.pendingUserInputResolvers,
     unsubscribe: () => undefined,
@@ -890,13 +938,14 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
             },
           ];
         }
-        case "tool.execution_start":
+        case "tool.execution_start": {
+          const itemType = itemTypeFromToolEvent(event);
           return [
             {
               ...base({ itemId: event.data.toolCallId }),
               type: "item.started",
               payload: {
-                itemType: itemTypeFromToolEvent(event),
+                itemType,
                 status: "inProgress",
                 title: event.data.toolName ?? "Tool call",
                 ...(toolDetailFromEvent(event.data)
@@ -906,6 +955,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
               },
             },
           ];
+        }
         case "tool.execution_progress":
           return [
             {
@@ -928,26 +978,26 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
               },
             },
           ];
-        case "tool.execution_complete":
+        case "tool.execution_complete": {
+          const keepRunning = shouldKeepToolExecutionRunning(event);
+          const detail = toolResultDetailFromEvent(event);
+          const itemType =
+            terminalResultFromToolCompleteEvent(event) !== undefined
+              ? "command_execution"
+              : (record.toolItemTypesByCallId.get(event.data.toolCallId) ?? "dynamic_tool_call");
           return [
             {
               ...base({ itemId: event.data.toolCallId }),
-              type: "item.completed",
+              type: keepRunning ? "item.updated" : "item.completed",
               payload: {
-                itemType: event.data.result?.contents?.some(
-                  (content) => content.type === "terminal",
-                )
-                  ? "command_execution"
-                  : "dynamic_tool_call",
-                status: event.data.success ? "completed" : "failed",
+                itemType,
+                status: keepRunning ? "inProgress" : event.data.success ? "completed" : "failed",
                 title: record.toolTitlesByCallId.get(event.data.toolCallId) ?? "Tool call",
-                ...(trimToUndefined(event.data.result?.content)
-                  ? { detail: event.data.result?.content }
-                  : {}),
+                ...(detail ? { detail } : {}),
                 data: event.data,
               },
             },
-            ...(trimToUndefined(event.data.result?.content)
+            ...(!keepRunning && trimToUndefined(event.data.result?.content)
               ? [
                   {
                     ...base({ itemId: event.data.toolCallId }),
@@ -960,6 +1010,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
                 ]
               : []),
           ];
+        }
         case "skill.invoked":
           return [
             {
@@ -1254,6 +1305,9 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
       if (event.type === "tool.execution_start" && trimToUndefined(event.data.toolName)) {
         record.toolTitlesByCallId.set(event.data.toolCallId, trimToUndefined(event.data.toolName)!);
       }
+      if (event.type === "tool.execution_start") {
+        record.toolItemTypesByCallId.set(event.data.toolCallId, itemTypeFromToolEvent(event));
+      }
 
       void writeNativeEvent(record.threadId, event);
       const runtimeEvents = mapSessionEvent(record, event);
@@ -1275,8 +1329,9 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
           ]);
         });
       }
-      if (event.type === "tool.execution_complete") {
+      if (event.type === "tool.execution_complete" && !shouldKeepToolExecutionRunning(event)) {
         record.toolTitlesByCallId.delete(event.data.toolCallId);
+        record.toolItemTypesByCallId.delete(event.data.toolCallId);
       }
       if (event.type === "assistant.turn_end") {
         markTurnAwaitingCompletion(record);

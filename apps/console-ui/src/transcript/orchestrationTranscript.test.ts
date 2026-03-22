@@ -233,6 +233,73 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("keeps tool updates without explicit status in the running state", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      latestTurn: null,
+      session: {
+        ...thread!.session!,
+        status: "running",
+        activeTurnId: null,
+        updatedAt: "2026-03-11T09:00:01.000Z",
+      },
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-tool-start"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "Sleep started",
+          payload: {
+            itemType: "mcp_tool_call",
+            itemId: "tool:sleep",
+            title: "Sleep",
+            status: "inProgress",
+            detail: "10 seconds",
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:00.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-tool-update"),
+          tone: "tool",
+          kind: "tool.updated",
+          summary: "Sleep updated",
+          payload: {
+            itemType: "mcp_tool_call",
+            itemId: "tool:sleep",
+            title: "Sleep",
+            detail: "10 seconds",
+          },
+          turnId: null,
+          sequence: 2,
+          createdAt: "2026-03-11T09:00:01.000Z",
+        },
+      ],
+    });
+
+    expect(derived[0]).toEqual(expect.objectContaining({
+      type: "work-group",
+      title: "Sleep",
+      status: "running",
+      items: [
+        expect.objectContaining({
+          kind: "tool",
+          label: "Sleep",
+          status: "running",
+          detail: "10 seconds",
+        }),
+      ],
+    }));
+  });
+
   it("keeps matching web search work grouped across turn boundaries", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
@@ -629,6 +696,223 @@ describe("threadToTranscriptBlocks", () => {
             label: "Command run",
             status: "done",
             command: "git status --short",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("keeps command executions visibly running and recovers the command from tool arguments", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const turnId = TurnId.makeUnsafe("turn-powershell-running");
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        messages: [],
+        proposedPlans: [],
+        checkpoints: [],
+        activities: [
+          {
+            id: EventId.makeUnsafe("activity-powershell-start"),
+            tone: "tool",
+            kind: "tool.started",
+            summary: "Powershell started",
+            payload: {
+              itemType: "command_execution",
+              title: "Powershell",
+              status: "completed",
+              data: {
+                arguments: {
+                  command: "Start-Sleep -Seconds 10",
+                },
+              },
+            },
+            turnId,
+            sequence: 1,
+            createdAt: "2026-03-22T10:00:01.000Z",
+          },
+        ],
+        latestTurn: {
+          ...thread!.latestTurn!,
+          turnId,
+          state: "running",
+          requestedAt: "2026-03-22T10:00:00.000Z",
+          startedAt: "2026-03-22T10:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: "2026-03-22T10:00:02.000Z",
+        },
+      },
+      { now: "2026-03-22T10:00:04.000Z" },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "work-group",
+        title: "Powershell",
+        status: "running",
+        startedAt: "2026-03-22T10:00:01.000Z",
+        endedAt: "2026-03-22T10:00:01.000Z",
+        now: "2026-03-22T10:00:04.000Z",
+        pulseOriginAt: "2026-03-22T10:00:01.000Z",
+        items: [
+          {
+            kind: "command",
+            label: "Powershell",
+            status: "running",
+            command: "Start-Sleep -Seconds 10",
+          },
+        ],
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-22T10:00:01.000Z",
+        now: "2026-03-22T10:00:04.000Z",
+      },
+    ]);
+  });
+
+  it("treats shell-named tool calls with command-like detail as running commands", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const turnId = TurnId.makeUnsafe("turn-shell-tool-running");
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        messages: [],
+        proposedPlans: [],
+        checkpoints: [],
+        activities: [
+          {
+            id: EventId.makeUnsafe("activity-shell-tool-start"),
+            tone: "tool",
+            kind: "tool.started",
+            summary: "Powershell started",
+            payload: {
+              itemType: "dynamic_tool_call",
+              title: "Powershell",
+              status: "completed",
+              detail: "Start-Sleep -Seconds 10; Write-Output 'Slept 10 seconds'",
+              data: {
+                toolName: "powershell",
+              },
+            },
+            turnId,
+            sequence: 1,
+            createdAt: "2026-03-22T10:00:01.000Z",
+          },
+        ],
+        latestTurn: {
+          ...thread!.latestTurn!,
+          turnId,
+          state: "running",
+          requestedAt: "2026-03-22T10:00:00.000Z",
+          startedAt: "2026-03-22T10:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: "2026-03-22T10:00:02.000Z",
+        },
+      },
+      { now: "2026-03-22T10:00:04.000Z" },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "work-group",
+        title: "Powershell",
+        status: "running",
+        startedAt: "2026-03-22T10:00:01.000Z",
+        endedAt: "2026-03-22T10:00:01.000Z",
+        now: "2026-03-22T10:00:04.000Z",
+        pulseOriginAt: "2026-03-22T10:00:01.000Z",
+        items: [
+          {
+            kind: "command",
+            label: "Powershell",
+            status: "running",
+            command: "Start-Sleep -Seconds 10; Write-Output 'Slept 10 seconds'",
+            detail: "Start-Sleep -Seconds 10; Write-Output 'Slept 10 seconds'",
+          },
+        ],
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-22T10:00:01.000Z",
+        now: "2026-03-22T10:00:04.000Z",
+      },
+    ]);
+  });
+
+  it("keeps the recovered command and strips exit-code boilerplate from completed command details", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-powershell-complete"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "Powershell",
+          payload: {
+            itemType: "command_execution",
+            title: "Powershell",
+            status: "completed",
+            detail: "Start-Sleep -Seconds 10 <exited with exit code 0>",
+            data: {
+              arguments: {
+                command: "Start-Sleep -Seconds 10",
+              },
+              item: {
+                result: {
+                  content: "Start-Sleep -Seconds 10 <exited with exit code 0>",
+                  exitCode: 0,
+                },
+              },
+            },
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-22T10:00:10.200Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "work-group",
+        title: "Powershell",
+        status: "done",
+        startedAt: "2026-03-22T10:00:10.200Z",
+        endedAt: "2026-03-22T10:00:10.200Z",
+        items: [
+          {
+            kind: "command",
+            label: "Powershell",
+            status: "done",
+            command: "Start-Sleep -Seconds 10",
+            detail: "Start-Sleep -Seconds 10",
+            exitCode: 0,
           },
         ],
       },
@@ -1143,13 +1427,18 @@ describe("threadToTranscriptBlocks", () => {
         ],
       },
       {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        finishedAt: "2026-03-11T09:00:05.000Z",
+      },
+      {
         type: "assistant-text",
         text: "After the answer.",
         streaming: false,
       },
       {
         type: "finished-state",
-        startedAt: "2026-03-11T09:00:01.000Z",
+        startedAt: "2026-03-11T09:00:06.000Z",
         finishedAt: "2026-03-11T09:00:06.000Z",
       },
     ]);
@@ -1651,6 +1940,128 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("does not append a second finished-state when the assistant message footer already exists under a null turn id", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    expect(thread!.latestTurn).toBeDefined();
+
+    const turnId = TurnId.makeUnsafe("turn-null-message-finished-dedupe");
+    const messageId = MessageId.makeUnsafe("assistant-null-message-finished-dedupe");
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        checkpoints: [],
+        proposedPlans: [],
+        messages: [
+          {
+            id: messageId,
+            role: "assistant",
+            text: "Done sleeping.",
+            attachments: [],
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-22T10:00:20.000Z",
+            updatedAt: "2026-03-22T10:00:21.000Z",
+          },
+        ],
+        activities: [
+          {
+            id: EventId.makeUnsafe("activity-tool-after-null-message"),
+            tone: "tool",
+            kind: "tool.completed",
+            summary: "Powershell",
+            payload: {
+              itemType: "command_execution",
+              title: "Powershell",
+              status: "completed",
+              detail: "Start-Sleep -Seconds 10 <exited with exit code 0>",
+              data: {
+                arguments: {
+                  command: "Start-Sleep -Seconds 10",
+                },
+                item: {
+                  result: {
+                    content: "Start-Sleep -Seconds 10 <exited with exit code 0>",
+                    exitCode: 0,
+                  },
+                },
+              },
+            },
+            turnId,
+            sequence: 1,
+            createdAt: "2026-03-22T10:00:22.000Z",
+          },
+        ],
+        latestTurn: {
+          ...thread!.latestTurn!,
+          turnId,
+          state: "completed",
+          requestedAt: "2026-03-22T10:00:00.000Z",
+          startedAt: "2026-03-22T10:00:01.000Z",
+          completedAt: "2026-03-22T10:00:22.000Z",
+          assistantMessageId: messageId,
+        },
+      },
+      {
+        orchestrationEvents: [
+          {
+            sequence: 1,
+            eventId: EventId.makeUnsafe("event-null-message-finished-dedupe"),
+            aggregateKind: "thread",
+            aggregateId: thread!.id,
+            occurredAt: "2026-03-22T10:00:20.000Z",
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "thread.message-sent",
+            payload: {
+              threadId: thread!.id,
+              messageId,
+              role: "assistant",
+              text: "Done sleeping.",
+              turnId,
+              streaming: false,
+              createdAt: "2026-03-22T10:00:20.000Z",
+              updatedAt: "2026-03-22T10:00:21.000Z",
+            },
+          },
+        ],
+      },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Done sleeping.",
+        streaming: false,
+      },
+      {
+        type: "work-group",
+        title: "Powershell",
+        status: "done",
+        startedAt: "2026-03-22T10:00:22.000Z",
+        endedAt: "2026-03-22T10:00:22.000Z",
+        items: [
+          {
+            kind: "command",
+            label: "Powershell",
+            status: "done",
+            command: "Start-Sleep -Seconds 10",
+            detail: "Start-Sleep -Seconds 10",
+            exitCode: 0,
+          },
+        ],
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-22T10:00:20.000Z",
+        finishedAt: "2026-03-22T10:00:22.000Z",
+      },
+    ]);
+  });
+
   it("attaches lazy diff lookup metadata to completed file edits when only checkpoint diffs are available", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
@@ -1827,7 +2238,7 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
-  it("suppresses the working-state block while a user-input request is still pending", () => {
+  it("suppresses the running timer while a user-input request is pending and keeps the completed phase footer", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
@@ -1890,6 +2301,460 @@ describe("threadToTranscriptBlocks", () => {
             { label: "Live", description: "Connect to the orchestration websocket." },
           ],
         }],
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-12T09:00:01.000Z",
+        finishedAt: "2026-03-12T09:00:03.000Z",
+      },
+    ]);
+  });
+
+  it("restarts the waiting-state timer from the user-input resolution time before output resumes", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-running-after-user-input-resolution");
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        messages: [],
+        proposedPlans: [],
+        checkpoints: [],
+        activities: [
+          {
+            id: EventId.makeUnsafe("activity-user-input-requested-waiting-reset"),
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "User input requested",
+            payload: {
+              requestId: "req-waiting-reset",
+              questions: [
+                {
+                  id: "choice",
+                  header: "Source",
+                  question: "Which mode should this console stay in?",
+                  options: [
+                    { label: "Demo", description: "Keep using local orchestration fixtures." },
+                    { label: "Live", description: "Connect to the orchestration websocket." },
+                  ],
+                },
+              ],
+            },
+            turnId,
+            sequence: 1,
+            createdAt: "2026-03-12T09:00:03.000Z",
+          },
+          {
+            id: EventId.makeUnsafe("activity-user-input-resolved-waiting-reset"),
+            tone: "info",
+            kind: "user-input.resolved",
+            summary: "User input resolved",
+            payload: {
+              requestId: "req-waiting-reset",
+              answers: {
+                choice: "Live",
+              },
+            },
+            turnId,
+            sequence: 2,
+            createdAt: "2026-03-12T09:00:06.000Z",
+          },
+        ],
+        latestTurn: {
+          turnId,
+          state: "running",
+          requestedAt: "2026-03-12T09:00:00.000Z",
+          startedAt: "2026-03-12T09:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: "2026-03-12T09:00:06.000Z",
+        },
+      },
+      { now: "2026-03-12T09:00:08.000Z" },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "user-input-request",
+        requestId: "req-waiting-reset",
+        resolved: true,
+        answers: {
+          choice: "Live",
+        },
+        questions: [
+          {
+            id: "choice",
+            header: "Source",
+            question: "Which mode should this console stay in?",
+            options: [
+              { label: "Demo", description: "Keep using local orchestration fixtures." },
+              { label: "Live", description: "Connect to the orchestration websocket." },
+            ],
+          },
+        ],
+      },
+      {
+        type: "user-message",
+        text: "Live",
+      },
+      {
+        type: "waiting-state",
+        startedAt: "2026-03-12T09:00:06.000Z",
+        now: "2026-03-12T09:00:08.000Z",
+      },
+    ]);
+  });
+
+  it("resets the working-state timer even when ask_user activities do not carry the latest turn id", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-running-null-ask-user-ids");
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        proposedPlans: [],
+        checkpoints: [],
+        messages: [
+          {
+            id: MessageId.makeUnsafe("assistant-running-after-null-turn-ask-user"),
+            role: "assistant",
+            text: "After the answer.",
+            attachments: [],
+            turnId,
+            streaming: true,
+            createdAt: "2026-03-12T09:00:08.000Z",
+            updatedAt: "2026-03-12T09:00:08.000Z",
+          },
+        ],
+        activities: [
+          {
+            id: EventId.makeUnsafe("activity-reasoning-before-null-turn-ask-user"),
+            tone: "info",
+            kind: "reasoning.summary",
+            summary: "Planning tool usage",
+            payload: {
+              text: "Need to list files before asking the question.",
+            },
+            turnId,
+            sequence: 1,
+            createdAt: "2026-03-12T09:00:02.000Z",
+          },
+          {
+            id: EventId.makeUnsafe("activity-user-input-requested-null-turn"),
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "User input requested",
+            payload: {
+              requestId: "req-null-turn",
+              questions: [
+                {
+                  id: "choice",
+                  header: "Question",
+                  question: "Pick one",
+                  options: [
+                    { label: "Red", description: "Red" },
+                    { label: "Blue", description: "Blue" },
+                  ],
+                },
+              ],
+            },
+            turnId: null,
+            sequence: 2,
+            createdAt: "2026-03-12T09:00:03.000Z",
+          },
+          {
+            id: EventId.makeUnsafe("activity-user-input-resolved-null-turn"),
+            tone: "info",
+            kind: "user-input.resolved",
+            summary: "User input resolved",
+            payload: {
+              requestId: "req-null-turn",
+              answers: {
+                choice: "Red",
+              },
+            },
+            turnId: null,
+            sequence: 3,
+            createdAt: "2026-03-12T09:00:06.000Z",
+          },
+        ],
+        latestTurn: {
+          turnId,
+          state: "running",
+          requestedAt: "2026-03-12T09:00:00.000Z",
+          startedAt: "2026-03-12T09:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: MessageId.makeUnsafe("assistant-running-after-null-turn-ask-user"),
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: "2026-03-12T09:00:08.000Z",
+        },
+      },
+      { now: "2026-03-12T09:00:10.000Z" },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "reasoning-summary",
+        text: "Need to list files before asking the question.",
+      },
+      {
+        type: "user-input-request",
+        requestId: "req-null-turn",
+        resolved: true,
+        answers: {
+          choice: "Red",
+        },
+        questions: [
+          {
+            id: "choice",
+            header: "Question",
+            question: "Pick one",
+            options: [
+              { label: "Red", description: "Red" },
+              { label: "Blue", description: "Blue" },
+            ],
+          },
+        ],
+      },
+      {
+        type: "user-message",
+        text: "Red",
+      },
+      {
+        type: "assistant-text",
+        text: "After the answer.",
+        streaming: true,
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-12T09:00:08.000Z",
+        now: "2026-03-12T09:00:10.000Z",
+      },
+    ]);
+  });
+
+  it("ignores visible pre-answer output that lands between ask_user request and resolution", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-running-after-mid-gap-output");
+    const messageId = MessageId.makeUnsafe("assistant-running-after-mid-gap-output");
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        proposedPlans: [],
+        checkpoints: [],
+        messages: [
+          {
+            id: messageId,
+            role: "assistant",
+            text: "Before the question. After the answer.",
+            attachments: [],
+            turnId,
+            streaming: true,
+            createdAt: "2026-03-12T09:00:01.000Z",
+            updatedAt: "2026-03-12T09:00:08.000Z",
+          },
+        ],
+        activities: [
+          {
+            id: EventId.makeUnsafe("activity-user-input-requested-mid-gap-output"),
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "User input requested",
+            payload: {
+              requestId: "req-mid-gap-output",
+              questions: [
+                {
+                  id: "choice",
+                  header: "Question",
+                  question: "Pick one",
+                  options: [
+                    { label: "Red", description: "Red" },
+                    { label: "Blue", description: "Blue" },
+                  ],
+                },
+              ],
+            },
+            turnId: null,
+            sequence: 1,
+            createdAt: "2026-03-12T09:00:03.000Z",
+          },
+          {
+            id: EventId.makeUnsafe("activity-report-intent-between-request-and-resolution"),
+            tone: "tool",
+            kind: "tool.started",
+            summary: "report_intent started",
+            payload: {
+              itemType: "tool",
+              itemId: "report-intent-between-request-and-resolution",
+              title: "report_intent",
+              status: "completed",
+              data: {
+                arguments: {
+                  intent: "Asking follow-up question",
+                },
+              },
+            },
+            turnId: null,
+            sequence: 2,
+            createdAt: "2026-03-12T09:00:04.000Z",
+          },
+          {
+            id: EventId.makeUnsafe("activity-user-input-resolved-mid-gap-output"),
+            tone: "info",
+            kind: "user-input.resolved",
+            summary: "User input resolved",
+            payload: {
+              requestId: "req-mid-gap-output",
+              answers: {
+                choice: "Red",
+              },
+            },
+            turnId: null,
+            sequence: 3,
+            createdAt: "2026-03-12T09:00:06.000Z",
+          },
+        ],
+        latestTurn: {
+          turnId,
+          state: "running",
+          requestedAt: "2026-03-12T09:00:00.000Z",
+          startedAt: "2026-03-12T09:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: messageId,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: "2026-03-12T09:00:08.000Z",
+        },
+      },
+      {
+        now: "2026-03-12T09:00:10.000Z",
+        orchestrationEvents: [
+          {
+            sequence: 1,
+            eventId: EventId.makeUnsafe("event-assistant-before-mid-gap-output"),
+            aggregateKind: "thread",
+            aggregateId: thread!.id,
+            occurredAt: "2026-03-12T09:00:01.000Z",
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "thread.message-sent",
+            payload: {
+              threadId: thread!.id,
+              messageId,
+              role: "assistant",
+              text: "Before the question. ",
+              turnId,
+              streaming: true,
+              createdAt: "2026-03-12T09:00:01.000Z",
+              updatedAt: "2026-03-12T09:00:01.000Z",
+            },
+          },
+          {
+            sequence: 2,
+            eventId: EventId.makeUnsafe("event-assistant-after-mid-gap-output"),
+            aggregateKind: "thread",
+            aggregateId: thread!.id,
+            occurredAt: "2026-03-12T09:00:08.000Z",
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "thread.message-sent",
+            payload: {
+              threadId: thread!.id,
+              messageId,
+              role: "assistant",
+              text: "After the answer.",
+              turnId,
+              streaming: true,
+              createdAt: "2026-03-12T09:00:01.000Z",
+              updatedAt: "2026-03-12T09:00:08.000Z",
+            },
+          },
+        ],
+      },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Before the question. ",
+        streaming: false,
+      },
+      {
+        type: "user-input-request",
+        requestId: "req-mid-gap-output",
+        resolved: true,
+        answers: {
+          choice: "Red",
+        },
+        questions: [
+          {
+            id: "choice",
+            header: "Question",
+            question: "Pick one",
+            options: [
+              { label: "Red", description: "Red" },
+              { label: "Blue", description: "Blue" },
+            ],
+          },
+        ],
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-12T09:00:01.000Z",
+        finishedAt: "2026-03-12T09:00:03.000Z",
+      },
+      {
+        type: "work-group",
+        title: "report_intent",
+        status: "done",
+        startedAt: "2026-03-12T09:00:04.000Z",
+        endedAt: "2026-03-12T09:00:04.000Z",
+        now: "2026-03-12T09:00:10.000Z",
+        items: [
+          {
+            kind: "tool",
+            label: "report_intent",
+            status: "done",
+            detail: "intent=Asking follow-up question",
+          },
+        ],
+      },
+      {
+        type: "user-message",
+        text: "Red",
+      },
+      {
+        type: "assistant-text",
+        text: "After the answer.",
+        streaming: true,
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-12T09:00:08.000Z",
+        now: "2026-03-12T09:00:10.000Z",
       },
     ]);
   });
@@ -2005,7 +2870,7 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
-  it("keeps reasoning blocks separate while the waiting-state line stays generic before assistant output starts", () => {
+  it("switches the timing line to working once visible reasoning output starts", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
@@ -2072,9 +2937,120 @@ describe("threadToTranscriptBlocks", () => {
         text: "Need to inspect the workspace tree first.",
       },
       {
-        type: "waiting-state",
-        startedAt: "2026-03-12T09:00:01.000Z",
+        type: "working-state",
+        startedAt: "2026-03-12T09:00:04.000Z",
         now: "2026-03-12T09:00:04.500Z",
+      },
+    ]);
+  });
+
+  it("appends a finished-state after an ask_user prompt even when the turn has no assistant text block", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-ask-user-only");
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      checkpoints: [],
+      proposedPlans: [],
+      messages: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-report-intent-before-ask-user-only"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "report_intent started",
+          payload: {
+            itemType: "tool",
+            itemId: "report-intent-before-ask-user-only",
+            title: "report_intent",
+            status: "completed",
+            data: {
+              arguments: {
+                intent: "Asking user input",
+              },
+            },
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-12T09:00:02.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-user-input-requested-ask-user-only"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "req-ask-user-only",
+            questions: [
+              {
+                id: "answer",
+                header: "Question",
+                question: "What should I do next?",
+                options: [
+                  { label: "Continue", description: "Continue" },
+                  { label: "Stop", description: "Stop" },
+                ],
+              },
+            ],
+          },
+          turnId: null,
+          sequence: 2,
+          createdAt: "2026-03-12T09:00:03.000Z",
+        },
+      ],
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-03-12T09:00:00.000Z",
+        startedAt: "2026-03-12T09:00:01.000Z",
+        completedAt: "2026-03-12T09:00:05.800Z",
+        assistantMessageId: null,
+      },
+      session: {
+        ...thread!.session!,
+        status: "ready",
+        activeTurnId: null,
+        updatedAt: "2026-03-12T09:00:05.800Z",
+      },
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "work-group",
+        title: "report_intent",
+        status: "done",
+        startedAt: "2026-03-12T09:00:02.000Z",
+        endedAt: "2026-03-12T09:00:02.000Z",
+        items: [
+          {
+            kind: "tool",
+            label: "report_intent",
+            status: "done",
+            detail: "intent=Asking user input",
+          },
+        ],
+      },
+      {
+        type: "user-input-request",
+        requestId: "req-ask-user-only",
+        questions: [
+          {
+            id: "answer",
+            header: "Question",
+            question: "What should I do next?",
+            options: [
+              { label: "Continue", description: "Continue" },
+              { label: "Stop", description: "Stop" },
+            ],
+          },
+        ],
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-12T09:00:01.000Z",
+        finishedAt: "2026-03-12T09:00:03.000Z",
       },
     ]);
   });
@@ -2554,9 +3530,332 @@ describe("threadToTranscriptBlocks", () => {
         ],
       },
       {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        finishedAt: "2026-03-11T09:00:05.000Z",
+      },
+      {
         type: "assistant-text",
         text: "After the answer.",
         streaming: true,
+      },
+    ]);
+  });
+
+  it("adds separate finished-state blocks around inline ask_user boundaries for a completed assistant reply", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-inline-user-input-complete");
+    const messageId = MessageId.makeUnsafe("assistant-stream-after-input-complete");
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-user-input-requested-inline-complete"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "req-user-input-inline-complete",
+            questions: [
+              {
+                id: "demo_source",
+                header: "Source",
+                question: "Which mode should this console stay in?",
+                options: [
+                  { label: "Demo", description: "Keep using local orchestration fixtures." },
+                  { label: "Live", description: "Connect to the orchestration websocket." },
+                ],
+              },
+            ],
+          },
+          turnId,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:05.000Z",
+        },
+      ],
+      messages: [
+        {
+          id: messageId,
+          role: "assistant",
+          text: "Before the question. After the answer.",
+          attachments: [],
+          turnId,
+          streaming: false,
+          createdAt: "2026-03-11T09:00:01.000Z",
+          updatedAt: "2026-03-11T09:00:06.000Z",
+        },
+      ],
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-03-11T09:00:00.000Z",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        completedAt: "2026-03-11T09:00:06.000Z",
+        assistantMessageId: messageId,
+      },
+    }, {
+      orchestrationEvents: [
+        {
+          sequence: 1,
+          eventId: EventId.makeUnsafe("event-assistant-before-complete"),
+          aggregateKind: "thread",
+          aggregateId: thread!.id,
+          occurredAt: "2026-03-11T09:00:01.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.message-sent",
+          payload: {
+            threadId: thread!.id,
+            messageId,
+            role: "assistant",
+            text: "Before the question. ",
+            turnId,
+            streaming: true,
+            createdAt: "2026-03-11T09:00:01.000Z",
+            updatedAt: "2026-03-11T09:00:01.000Z",
+          },
+        },
+        {
+          sequence: 2,
+          eventId: EventId.makeUnsafe("event-assistant-after-complete"),
+          aggregateKind: "thread",
+          aggregateId: thread!.id,
+          occurredAt: "2026-03-11T09:00:06.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.message-sent",
+          payload: {
+            threadId: thread!.id,
+            messageId,
+            role: "assistant",
+            text: "After the answer.",
+            turnId,
+            streaming: false,
+            createdAt: "2026-03-11T09:00:06.000Z",
+            updatedAt: "2026-03-11T09:00:06.000Z",
+          },
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Before the question. ",
+        streaming: false,
+      },
+      {
+        type: "user-input-request",
+        requestId: "req-user-input-inline-complete",
+        questions: [
+          {
+            id: "demo_source",
+            header: "Source",
+            question: "Which mode should this console stay in?",
+            options: [
+              { label: "Demo", description: "Keep using local orchestration fixtures." },
+              { label: "Live", description: "Connect to the orchestration websocket." },
+            ],
+          },
+        ],
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        finishedAt: "2026-03-11T09:00:05.000Z",
+      },
+      {
+        type: "assistant-text",
+        text: "After the answer.",
+        streaming: false,
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:06.000Z",
+        finishedAt: "2026-03-11T09:00:06.000Z",
+      },
+    ]);
+  });
+
+  it("resets the running timer to the resumed assistant output after a resolved ask_user boundary", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-inline-user-input-running-reset");
+    const messageId = MessageId.makeUnsafe("assistant-stream-after-input-running-reset");
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-user-input-requested-inline-running-reset"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "req-user-input-inline-running-reset",
+            questions: [
+              {
+                id: "demo_source",
+                header: "Source",
+                question: "Which mode should this console stay in?",
+                options: [
+                  { label: "Demo", description: "Keep using local orchestration fixtures." },
+                  { label: "Live", description: "Connect to the orchestration websocket." },
+                ],
+              },
+            ],
+          },
+          turnId,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:05.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-user-input-resolved-inline-running-reset"),
+          tone: "info",
+          kind: "user-input.resolved",
+          summary: "User input resolved",
+          payload: {
+            requestId: "req-user-input-inline-running-reset",
+            answers: {
+              demo_source: "Live",
+            },
+          },
+          turnId,
+          sequence: 2,
+          createdAt: "2026-03-11T09:00:05.500Z",
+        },
+      ],
+      messages: [
+        {
+          id: messageId,
+          role: "assistant",
+          text: "Before the question. After the answer.",
+          attachments: [],
+          turnId,
+          streaming: true,
+          createdAt: "2026-03-11T09:00:01.000Z",
+          updatedAt: "2026-03-11T09:00:06.000Z",
+        },
+      ],
+      latestTurn: {
+        turnId,
+        state: "running",
+        requestedAt: "2026-03-11T09:00:00.000Z",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        completedAt: null,
+        assistantMessageId: messageId,
+      },
+      session: {
+        ...thread!.session!,
+        status: "running",
+        activeTurnId: turnId,
+        updatedAt: "2026-03-11T09:00:06.000Z",
+      },
+    }, {
+      now: "2026-03-11T09:00:07.000Z",
+      orchestrationEvents: [
+        {
+          sequence: 1,
+          eventId: EventId.makeUnsafe("event-assistant-before-running-reset"),
+          aggregateKind: "thread",
+          aggregateId: thread!.id,
+          occurredAt: "2026-03-11T09:00:01.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.message-sent",
+          payload: {
+            threadId: thread!.id,
+            messageId,
+            role: "assistant",
+            text: "Before the question. ",
+            turnId,
+            streaming: true,
+            createdAt: "2026-03-11T09:00:01.000Z",
+            updatedAt: "2026-03-11T09:00:01.000Z",
+          },
+        },
+        {
+          sequence: 2,
+          eventId: EventId.makeUnsafe("event-assistant-after-running-reset"),
+          aggregateKind: "thread",
+          aggregateId: thread!.id,
+          occurredAt: "2026-03-11T09:00:06.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.message-sent",
+          payload: {
+            threadId: thread!.id,
+            messageId,
+            role: "assistant",
+            text: "After the answer.",
+            turnId,
+            streaming: true,
+            createdAt: "2026-03-11T09:00:01.000Z",
+            updatedAt: "2026-03-11T09:00:06.000Z",
+          },
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Before the question. ",
+        streaming: false,
+      },
+      {
+        type: "user-input-request",
+        requestId: "req-user-input-inline-running-reset",
+        resolved: true,
+        answers: {
+          demo_source: "Live",
+        },
+        questions: [
+          {
+            id: "demo_source",
+            header: "Source",
+            question: "Which mode should this console stay in?",
+            options: [
+              { label: "Demo", description: "Keep using local orchestration fixtures." },
+              { label: "Live", description: "Connect to the orchestration websocket." },
+            ],
+          },
+        ],
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        finishedAt: "2026-03-11T09:00:05.000Z",
+      },
+      {
+        type: "user-message",
+        text: "Live",
+      },
+      {
+        type: "assistant-text",
+        text: "After the answer.",
+        streaming: true,
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-11T09:00:06.000Z",
+        now: "2026-03-11T09:00:07.000Z",
       },
     ]);
   });

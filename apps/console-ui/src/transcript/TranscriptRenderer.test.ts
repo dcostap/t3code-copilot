@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   flattenBlocks,
   readConversationScrollOffsetFromBottom,
+  resolveInitialConversationScrollTop,
   resolveConversationScrollTopForOffsetFromBottom,
   shouldRedirectHistoryTypingToPrompt,
   shouldRedirectPlainTextPasteToPrompt,
@@ -103,6 +104,20 @@ describe("conversation scroll state helpers", () => {
       scrollHeight: 1200,
       clientHeight: 400,
     }, 150)).toBe(650);
+  });
+
+  it("resolves the initial scrollTop before paint using the stored bottom offset when present", () => {
+    expect(resolveInitialConversationScrollTop({
+      scrollHeight: 1200,
+      clientHeight: 400,
+    }, 150)).toBe(650);
+  });
+
+  it("resolves the initial scrollTop to the bottom when no stored offset exists", () => {
+    expect(resolveInitialConversationScrollTop({
+      scrollHeight: 1200,
+      clientHeight: 400,
+    }, null)).toBe(800);
   });
 });
 

@@ -303,6 +303,152 @@ mcpLayer("CopilotAdapterLive MCP config loading", (it) => {
   );
 });
 
+const toolLifecycleSession = new FakeCopilotSession("copilot-session-tool-lifecycle");
+const toolLifecycleClient = new FakeCopilotClient(toolLifecycleSession);
+const toolLifecycleLayer = it.layer(
+  makeCopilotAdapterLive({
+    clientFactory: () => toolLifecycleClient,
+  }).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+toolLifecycleLayer("CopilotAdapterLive tool lifecycle mapping", (it) => {
+  it.effect("keeps terminal tool executions running until a terminal exit code is present", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CopilotAdapter;
+      yield* adapter.startSession({
+        provider: "copilot",
+        threadId: asThreadId("thread-tool-lifecycle"),
+        runtimeMode: "full-access",
+      });
+
+      yield* Stream.take(adapter.streamEvents, 4).pipe(Stream.runDrain);
+
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 6).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      toolLifecycleSession.emit({
+        id: "evt-turn-start",
+        timestamp: "2026-03-22T10:00:00.000Z",
+        parentId: null,
+        type: "assistant.turn_start",
+        data: {
+          turnId: "turn-1",
+        },
+      } satisfies SessionEvent);
+
+      toolLifecycleSession.emit({
+        id: "evt-tool-start",
+        timestamp: "2026-03-22T10:00:01.000Z",
+        parentId: "evt-turn-start",
+        type: "tool.execution_start",
+        data: {
+          toolCallId: "tool-call-1",
+          toolName: "Powershell",
+          arguments: {
+            command: "Start-Sleep -Seconds 10",
+          },
+        },
+      } satisfies SessionEvent);
+
+      toolLifecycleSession.emit({
+        id: "evt-tool-complete-running",
+        timestamp: "2026-03-22T10:00:04.100Z",
+        parentId: "evt-tool-start",
+        type: "tool.execution_complete",
+        data: {
+          toolCallId: "tool-call-1",
+          success: true,
+          result: {
+            content: "Now executing.",
+            contents: [
+              {
+                type: "terminal",
+                text: "Start-Sleep -Seconds 10",
+              },
+            ],
+          },
+        },
+      } satisfies SessionEvent);
+
+      toolLifecycleSession.emit({
+        id: "evt-tool-complete-finished",
+        timestamp: "2026-03-22T10:00:10.200Z",
+        parentId: "evt-tool-complete-running",
+        type: "tool.execution_complete",
+        data: {
+          toolCallId: "tool-call-1",
+          success: true,
+          result: {
+            content: "Completed Start-Sleep -Seconds 10.",
+            detailedContent: "Completed Start-Sleep -Seconds 10. Exit code 0.",
+            contents: [
+              {
+                type: "terminal",
+                text: "Completed Start-Sleep -Seconds 10.",
+                exitCode: 0,
+                cwd: "C:\\Projects\\webdev\\t3code-copilot",
+              },
+            ],
+          },
+        },
+      } satisfies SessionEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepStrictEqual(
+        events.map((event) => event.type),
+        [
+          "turn.started",
+          "session.state.changed",
+          "item.started",
+          "item.updated",
+          "item.completed",
+          "tool.summary",
+        ],
+      );
+
+      const startedEvent = events[2];
+      assert.equal(startedEvent?.type, "item.started");
+      if (startedEvent?.type === "item.started") {
+        assert.equal(startedEvent.payload.itemType, "command_execution");
+        assert.equal(startedEvent.payload.status, "inProgress");
+        assert.equal(startedEvent.payload.title, "Powershell");
+      }
+
+      const runningUpdateEvent = events[3];
+      assert.equal(runningUpdateEvent?.type, "item.updated");
+      if (runningUpdateEvent?.type === "item.updated") {
+        assert.equal(runningUpdateEvent.payload.itemType, "command_execution");
+        assert.equal(runningUpdateEvent.payload.status, "inProgress");
+        assert.equal(runningUpdateEvent.payload.title, "Powershell");
+        assert.equal(runningUpdateEvent.payload.detail, "Now executing.");
+      }
+
+      const completedEvent = events[4];
+      assert.equal(completedEvent?.type, "item.completed");
+      if (completedEvent?.type === "item.completed") {
+        assert.equal(completedEvent.payload.itemType, "command_execution");
+        assert.equal(completedEvent.payload.status, "completed");
+        assert.equal(completedEvent.payload.title, "Powershell");
+        assert.equal(
+          completedEvent.payload.detail,
+          "Completed Start-Sleep -Seconds 10. Exit code 0.",
+        );
+      }
+
+      const summaryEvent = events[5];
+      assert.equal(summaryEvent?.type, "tool.summary");
+      if (summaryEvent?.type === "tool.summary") {
+        assert.equal(summaryEvent.payload.summary, "Completed Start-Sleep -Seconds 10.");
+      }
+    }),
+  );
+});
+
 afterAll(() => {
   void modeSession.destroy();
   void modeClient.stop();
@@ -310,4 +456,6 @@ afterAll(() => {
   void planClient.stop();
   void mcpSession.destroy();
   void mcpClient.stop();
+  void toolLifecycleSession.destroy();
+  void toolLifecycleClient.stop();
 });

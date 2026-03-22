@@ -20,6 +20,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 
+import { AnimatedLoadingText } from "./AnimatedLoadingText";
 import { CommandPalette } from "./CommandPalette";
 import {
   filterCommandPaletteCommands,
@@ -161,23 +162,6 @@ function isDesktopBridgeAvailable() {
     return false;
   }
   return typeof window.desktopBridge !== "undefined";
-}
-
-function renderLoadingText(text: string) {
-  const seen = new Map<string, number>();
-  return Array.from(text).map((char, index) => {
-    const nextCount = (seen.get(char) ?? 0) + 1;
-    seen.set(char, nextCount);
-    return (
-      <span
-        key={`${char === " " ? "space" : char}:${nextCount}`}
-        className="loading-screen__char"
-        style={{ animationDelay: `${index * 0.028}s` }}
-      >
-        {char === " " ? "\u00A0" : char}
-      </span>
-    );
-  });
 }
 
 function truncateTitle(text: string, maxLength = 50) {
@@ -2401,7 +2385,7 @@ export function App() {
         <div className={shellClassName}>
           {topbar}
           <div className="loading-screen loading-screen--shell">
-            <span className="loading-screen__text">{renderLoadingText("connecting to orchestration")}</span>
+            <AnimatedLoadingText text="connecting to orchestration" className="loading-screen__text" />
           </div>
         </div>
       </>

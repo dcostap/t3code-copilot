@@ -26,6 +26,7 @@ import {
 } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, keymap } from "@codemirror/view";
 
+import { createAnimatedLoadingTextElement } from "../AnimatedLoadingText";
 import type { ComposerImageAttachment } from "../composerAttachments";
 import {
   blockToLines,
@@ -635,24 +636,56 @@ async function openTranscriptLink(
 }
 
 function renderAnimatedCommandText(text: string) {
-  const root = document.createElement("span");
-  root.className = "cm-commandWidgetAnimatedText";
-  const perCharacterDelaySeconds =
-    text.length <= 48
-      ? 0.028
-      : text.length >= 120
-        ? 0.04
-        : 0.028 + ((text.length - 48) / (120 - 48)) * 0.012;
+  return createAnimatedLoadingTextElement(text, { className: "cm-commandWidgetAnimatedText" });
+}
 
-  Array.from(text).forEach((char, index) => {
-    const charElement = document.createElement("span");
-    charElement.className = "cm-commandWidgetCommandChar";
-    charElement.textContent = char === " " ? "\u00A0" : char;
-    charElement.style.animationDelay = `${index * perCharacterDelaySeconds}s`;
-    root.append(charElement);
-  });
+class AnimatedLoadingTextLine extends WidgetType {
+  constructor(
+    private readonly animatedText: string,
+    private readonly suffixText: string,
+    private readonly className: string,
+    private readonly characterDelaySeconds?: number,
+  ) {
+    super();
+  }
 
-  return root;
+  override eq(other: AnimatedLoadingTextLine) {
+    return this.animatedText === other.animatedText
+      && this.suffixText === other.suffixText
+      && this.className === other.className
+      && this.characterDelaySeconds === other.characterDelaySeconds;
+  }
+
+  override updateDOM(dom: HTMLElement) {
+    if (dom.dataset.animatedText !== this.animatedText || dom.dataset.className !== this.className) {
+      return false;
+    }
+
+    const suffix = dom.querySelector<HTMLElement>(".cm-workingLineAnimatedSuffix");
+    if (!suffix) {
+      return false;
+    }
+
+    suffix.textContent = this.suffixText;
+    return true;
+  }
+
+  override toDOM(view: EditorView) {
+    const root = view.dom.ownerDocument.createElement("span");
+    root.className = this.className;
+    root.dataset.animatedText = this.animatedText;
+    root.dataset.className = this.className;
+    root.append(createAnimatedLoadingTextElement(this.animatedText, {
+      document: view.dom.ownerDocument,
+      className: "cm-workingLineAnimatedPrefix",
+      ...(this.characterDelaySeconds !== undefined ? { characterDelaySeconds: this.characterDelaySeconds } : {}),
+    }));
+    const suffix = view.dom.ownerDocument.createElement("span");
+    suffix.className = "cm-workingLineAnimatedSuffix";
+    suffix.textContent = this.suffixText;
+    root.append(suffix);
+    return root;
+  }
 }
 
 class CodeBlockWidget extends WidgetType {
@@ -1559,6 +1592,20 @@ function buildTranscriptDocument(
         });
       }
     }
+    if (line.animatedText?.kind === "loading" && line.text.length > 0) {
+      const animatedFrom = Math.max(0, Math.min(line.text.length, line.animatedText.from));
+      const animatedTo = Math.max(animatedFrom, Math.min(line.text.length, line.animatedText.to));
+      replacements.push({
+        from,
+        to: lineEnd,
+        widget: new AnimatedLoadingTextLine(
+          line.text.slice(animatedFrom, animatedTo),
+          line.text.slice(animatedTo),
+          "cm-workingLineAnimatedText",
+        ),
+        signature: `loading:${line.kind}:${line.text.slice(animatedFrom, animatedTo)}:${line.text.slice(animatedTo)}`,
+      });
+    }
     if (index < allLines.length - 1) {
       text += "\n";
       offset += 1;
@@ -1981,14 +2028,16 @@ function buildEditorTheme() {
         color: "#7f8790",
         fontSize: "13px",
       },
-      ".cm-codeToken.tok-workingPulseEdge": {
-        color: "rgba(255, 255, 255, 0.42)",
+      ".cm-workingLineAnimatedText": {
+        display: "inline-flex",
+        alignItems: "baseline",
+        gap: "0",
+        fontSize: "13px",
+        color: "#7f8790",
       },
-      ".cm-codeToken.tok-workingPulseMid": {
-        color: "rgba(255, 255, 255, 0.76)",
-      },
-      ".cm-codeToken.tok-workingPulseCore": {
-        color: "#ffffff",
+      ".cm-workingLineAnimatedPrefix, .cm-workingLineAnimatedSuffix": {
+        fontSize: "inherit",
+        color: "inherit",
       },
       ".cm-line-promptInput": {
         color: "#d6dbe0",
@@ -2339,14 +2388,6 @@ function buildEditorTheme() {
       ".cm-commandWidgetAnimatedText": {
         display: "inline",
       },
-      ".cm-commandWidgetCommandChar": {
-        display: "inline-block",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetCommandChar": {
-        color: "#8f99a3",
-        animation: "cm-commandWidgetTextPulse 1.24s ease-in-out infinite",
-        willChange: "color",
-      },
       ".cm-commandWidgetSurface.cm-line-workItemDone .cm-commandWidgetPrefix": {
         color: "#c8d0d8",
       },
@@ -2364,26 +2405,6 @@ function buildEditorTheme() {
       },
       ".cm-commandWidgetSurface.cm-line-workItemDeclined .cm-commandWidgetGlyph": {
         color: "#f0c36a",
-      },
-      "@keyframes cm-commandWidgetTextPulse": {
-        "0%, 100%": {
-          color: "#8f99a3",
-        },
-        "38%": {
-          color: "#8f99a3",
-        },
-        "52%": {
-          color: "rgba(255, 255, 255, 0.56)",
-        },
-        "60%": {
-          color: "#ffffff",
-        },
-        "72%": {
-          color: "rgba(255, 255, 255, 0.56)",
-        },
-        "86%": {
-          color: "#8f99a3",
-        },
       },
       ".cm-codeBlockSurface": {
         position: "relative",
@@ -2707,10 +2728,7 @@ function scrollConversationToBottom(view: EditorView) {
     return;
   }
 
-  scrollContainer.scrollTop = Math.max(
-    0,
-    scrollContainer.scrollHeight - scrollContainer.clientHeight,
-  );
+  scrollContainer.scrollTop = resolveInitialConversationScrollTop(scrollContainer, null);
 }
 
 export function readConversationScrollOffsetFromBottom(scrollContainer: {
@@ -2726,6 +2744,17 @@ export function resolveConversationScrollTopForOffsetFromBottom(scrollContainer:
   readonly clientHeight: number;
 }, offsetFromBottom: number) {
   return Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight - Math.max(0, offsetFromBottom));
+}
+
+export function resolveInitialConversationScrollTop(scrollContainer: {
+  readonly scrollHeight: number;
+  readonly clientHeight: number;
+}, offsetFromBottom: number | null) {
+  if (offsetFromBottom === null) {
+    return Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+  }
+
+  return resolveConversationScrollTopForOffsetFromBottom(scrollContainer, offsetFromBottom);
 }
 
 function restoreConversationScrollOffsetFromBottom(view: EditorView, offsetFromBottom: number) {
@@ -3065,7 +3094,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const promptFocusDisabledRef = useRef(promptFocusDisabled);
     const promptInputDisabledRef = useRef(promptInputDisabled);
     const composerAttachmentsRef = useRef(composerAttachments);
-    const initialScrollAppliedRef = useRef(false);
     const expandedCommandSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const collapsedFileChangeSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const appliedDecorationSignatureRef = useRef("");
@@ -3614,7 +3642,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       },
     }), [deletePromptText, focusHistoryRegion, focusPromptRegion, insertTextIntoDraft, selectAllHistoryText, submitDraft]);
 
-    useEffect(() => {
+    useLayoutEffect(() => {
       if (!editorRef.current) {
         return undefined;
       }
@@ -3823,7 +3851,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       });
 
       viewRef.current = view;
-      initialScrollAppliedRef.current = false;
       const scrollContainer = getConversationScrollContainer(view);
       const reportScrollOffsetFromBottom = () => {
         if (!scrollContainer) {
@@ -3834,23 +3861,26 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       if (scrollContainer) {
         scrollContainer.addEventListener("scroll", reportScrollOffsetFromBottom, { passive: true });
       }
+      const applyInitialScrollPosition = () => {
+        if (initialScrollOffsetFromBottomRef.current === null) {
+          scrollConversationToBottom(view);
+        } else {
+          restoreConversationScrollOffsetFromBottom(view, initialScrollOffsetFromBottomRef.current);
+        }
+        reportScrollOffsetFromBottom();
+      };
+      applyInitialScrollPosition();
+      let cancelled = false;
       requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          if (initialScrollAppliedRef.current) {
-            return;
-          }
-          if (initialScrollOffsetFromBottomRef.current === null) {
-            scrollConversationToBottom(view);
-          } else {
-            restoreConversationScrollOffsetFromBottom(view, initialScrollOffsetFromBottomRef.current);
-          }
-          initialScrollAppliedRef.current = true;
-          reportScrollOffsetFromBottom();
-        });
+        if (cancelled) {
+          return;
+        }
+        applyInitialScrollPosition();
       });
       appliedDecorationSignatureRef.current = buildDecorationSignature(initialDocModel);
 
       return () => {
+        cancelled = true;
         if (scrollContainer) {
           scrollContainer.removeEventListener("scroll", reportScrollOffsetFromBottom);
         }

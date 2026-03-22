@@ -1,4 +1,9 @@
-import type { OrchestrationEvent, OrchestrationReadModel, OrchestrationThread } from "@t3tools/contracts";
+import type {
+  OrchestrationEvent,
+  OrchestrationReadModel,
+  OrchestrationSession,
+  OrchestrationThread,
+} from "@t3tools/contracts";
 
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_ACTIVITIES = 500;
@@ -35,6 +40,54 @@ function updateThread(
   });
 
   return changed ? { ...snapshot, threads } : snapshot;
+}
+
+function reconcileLatestTurnWithSession(
+  thread: OrchestrationThread,
+  session: OrchestrationSession,
+): OrchestrationThread["latestTurn"] {
+  if (session.status === "running" && session.activeTurnId !== null) {
+    return {
+      turnId: session.activeTurnId,
+      state: "running",
+      requestedAt:
+        thread.latestTurn?.turnId === session.activeTurnId
+          ? thread.latestTurn.requestedAt
+          : session.updatedAt,
+      startedAt:
+        thread.latestTurn?.turnId === session.activeTurnId
+          ? (thread.latestTurn.startedAt ?? session.updatedAt)
+          : session.updatedAt,
+      completedAt: null,
+      assistantMessageId:
+        thread.latestTurn?.turnId === session.activeTurnId
+          ? thread.latestTurn.assistantMessageId
+          : null,
+    };
+  }
+
+  if (!thread.latestTurn || thread.latestTurn.state !== "running") {
+    return thread.latestTurn;
+  }
+
+  const nextState =
+    session.status === "error"
+      ? "error"
+      : session.status === "interrupted" || session.status === "stopped"
+        ? "interrupted"
+        : session.status === "ready"
+          ? "completed"
+          : thread.latestTurn.state;
+
+  if (nextState === thread.latestTurn.state && thread.latestTurn.completedAt !== null) {
+    return thread.latestTurn;
+  }
+
+  return {
+    ...thread.latestTurn,
+    state: nextState,
+    completedAt: thread.latestTurn.completedAt ?? session.updatedAt,
+  };
 }
 
 export function reconcileReadModelWithEvents(
@@ -169,6 +222,18 @@ export function reconcileReadModelWithEvents(
             updatedAt: event.occurredAt,
           };
         });
+        latestAppliedSequence = event.sequence;
+        latestUpdatedAt = event.occurredAt;
+        break;
+      }
+
+      case "thread.session-set": {
+        nextSnapshot = updateThread(nextSnapshot, event.payload.threadId, (thread) => ({
+          ...thread,
+          session: event.payload.session,
+          latestTurn: reconcileLatestTurnWithSession(thread, event.payload.session),
+          updatedAt: event.occurredAt,
+        }));
         latestAppliedSequence = event.sequence;
         latestUpdatedAt = event.occurredAt;
         break;
