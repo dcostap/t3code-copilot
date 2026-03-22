@@ -627,11 +627,13 @@ export function reconcileProjectLayoutsState(input: {
   readonly projects: ReadonlyArray<OrchestrationProject>;
   readonly threads: ReadonlyArray<OrchestrationThread>;
   readonly preferredThreadId: string | null;
+  readonly pendingThreadIds?: ReadonlySet<OrchestrationThread["id"]>;
 }): ConsoleProjectLayoutsState {
   const projects = input.projects.filter((project) => project.deletedAt === null);
   const projectsById = new Map(projects.map((project) => [project.id, project] as const));
   const threads = input.threads.filter((thread) => thread.deletedAt === null);
   const threadsById = new Map(threads.map((thread) => [thread.id, thread] as const));
+  const pendingThreadIds = input.pendingThreadIds ?? new Set<OrchestrationThread["id"]>();
   const preferredThread = input.preferredThreadId ? (threadsById.get(input.preferredThreadId as OrchestrationThread["id"]) ?? null) : null;
 
   const projectOrder = input.state.projectOrder.filter((projectId) => projectsById.has(projectId));
@@ -667,6 +669,12 @@ export function reconcileProjectLayoutsState(input: {
         }
         if (pane.kind === "thread") {
           const thread = threadsById.get(pane.threadId);
+          if (!thread && pendingThreadIds.has(pane.threadId) && !seenThreadIds.has(pane.threadId)) {
+            seenThreadIds.add(pane.threadId);
+            panesById[pane.id] = pane;
+            nextPaneIds.push(pane.id);
+            continue;
+          }
           if (!thread || thread.projectId !== projectId || seenThreadIds.has(pane.threadId)) {
             const draftPane = createDraftPane({
               id: pane.id,
@@ -733,6 +741,27 @@ export function reconcileProjectLayoutsState(input: {
   };
 }
 
+export function reconcileProjectLayoutsStateWhenReady(input: {
+  readonly state: ConsoleProjectLayoutsState;
+  readonly projects: ReadonlyArray<OrchestrationProject>;
+  readonly threads: ReadonlyArray<OrchestrationThread>;
+  readonly preferredThreadId: string | null;
+  readonly pendingThreadIds?: ReadonlySet<OrchestrationThread["id"]>;
+  readonly hydrated: boolean;
+}): ConsoleProjectLayoutsState {
+  if (!input.hydrated) {
+    return input.state;
+  }
+
+  return reconcileProjectLayoutsState({
+    state: input.state,
+    projects: input.projects,
+    threads: input.threads,
+    preferredThreadId: input.preferredThreadId,
+    ...(input.pendingThreadIds ? { pendingThreadIds: input.pendingThreadIds } : {}),
+  });
+}
+
 function updateLayoutState(
   state: ConsoleProjectLayoutsState,
   projectId: OrchestrationProject["id"],
@@ -770,17 +799,21 @@ export function useConsoleProjectLayouts(input: {
   readonly threads: ReadonlyArray<OrchestrationThread>;
   readonly projects: ReadonlyArray<OrchestrationProject>;
   readonly preferredThreadId: string | null;
+  readonly pendingThreadIds?: ReadonlySet<OrchestrationThread["id"]>;
+  readonly hydrated: boolean;
 }): ConsoleProjectLayoutsModel {
   const [state, setState] = useState<ConsoleProjectLayoutsState>(() => readPersistedState());
 
   useEffect(() => {
-    setState((existing) => reconcileProjectLayoutsState({
+    setState((existing) => reconcileProjectLayoutsStateWhenReady({
       state: existing,
       threads: input.threads,
       projects: input.projects,
       preferredThreadId: input.preferredThreadId,
+      ...(input.pendingThreadIds ? { pendingThreadIds: input.pendingThreadIds } : {}),
+      hydrated: input.hydrated,
     }));
-  }, [input.preferredThreadId, input.projects, input.threads]);
+  }, [input.hydrated, input.pendingThreadIds, input.preferredThreadId, input.projects, input.threads]);
 
   useEffect(() => {
     persistState(state);

@@ -804,6 +804,9 @@ body {
 /* ── Status bar ───────────────────────────────────────── */
 
 .status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   max-width: 1000px;
   margin: 0 auto;
@@ -813,6 +816,33 @@ body {
   color: #555b62;
   font-size: 13px;
   line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.status-line__segment {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.status-line__segment--title,
+.status-line__segment--detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-line__segment--title {
+  flex: 1 1 320px;
+}
+
+.status-line__segment--detail {
+  flex: 1 1 220px;
+}
+
+.status-line__separator {
+  flex: 0 0 auto;
+  opacity: 0.55;
 }
 
 .project-workspace {
@@ -834,6 +864,7 @@ body {
   --project-sidebar-min-width: 244px;
   --project-sidebar-max-width: 366px;
   --project-editor-priority-width: 1000px;
+  --project-topbar-window-controls-inset: 0px;
   --project-sidebar-width: clamp(
     var(--project-sidebar-min-width),
     calc(100% - var(--project-editor-priority-width)),
@@ -853,6 +884,13 @@ body {
   max-width: var(--project-sidebar-width);
 }
 
+.project-topbar__windowControlsSpacer {
+  flex: 0 0 var(--project-topbar-window-controls-inset);
+  width: var(--project-topbar-window-controls-inset);
+  min-width: var(--project-topbar-window-controls-inset);
+  max-width: var(--project-topbar-window-controls-inset);
+}
+
 .project-sidebar {
   display: flex;
   flex: 0 0 var(--project-sidebar-width);
@@ -870,6 +908,9 @@ body {
 }
 
 .project-sidebar__addProject {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   border: 0;
   background: transparent;
   color: #aea59d;
@@ -879,6 +920,31 @@ body {
   padding: 0;
   text-align: left;
   transition: color 45ms ease;
+}
+
+.project-sidebar__addProjectGlyph {
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.project-sidebar__addProjectLabel {
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  white-space: nowrap;
+  transform: translateX(-4px);
+  transition:
+    max-width 70ms ease,
+    opacity 70ms ease,
+    transform 70ms ease;
+}
+
+.project-sidebar__addProject:hover .project-sidebar__addProjectLabel,
+.project-sidebar__addProject:focus-visible .project-sidebar__addProjectLabel {
+  max-width: 140px;
+  opacity: 1;
+  transform: translateX(0);
 }
 
 .project-sidebar__addProject:hover,
@@ -1177,6 +1243,12 @@ body {
   margin-top: 14px;
 }
 
+.project-modal__body--stacked {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .project-modal__label {
   display: block;
   color: #8f99a3;
@@ -1233,6 +1305,26 @@ body {
   color: #d49898;
   font-size: 12px;
   margin-top: 10px;
+}
+
+.project-modal__message {
+  color: #dce3e8;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.project-modal__message--muted {
+  color: #98a2ab;
+}
+
+.project-modal__pathPreview {
+  border: 1px solid rgba(95, 103, 111, 0.32);
+  background: rgba(10, 13, 17, 0.92);
+  color: #eef3f7;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 10px 12px;
+  word-break: break-all;
 }
 
 .project-modal__actions {

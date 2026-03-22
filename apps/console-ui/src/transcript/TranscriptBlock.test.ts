@@ -61,26 +61,47 @@ describe("blockToLines", () => {
       "approvalPrompt",
       "approvalPrompt",
       "approvalPrompt",
-      "approvalPrompt",
     ]);
-    expect(lines[0]?.text).toContain("User input requested");
-    expect(lines[1]?.text).toContain("Source");
-    expect(lines[1]?.userInputRef).toEqual({ requestId: "req-1", questionIndex: 0 });
-    expect(lines[2]?.text).toContain("Demo");
-    expect(lines[2]?.userInputRef).toEqual({
+    expect(lines[0]?.text).toBe("    Source: Which mode should this console stay in?");
+    expect(lines[0]?.userInputRef).toEqual({ requestId: "req-1", questionIndex: 0 });
+    expect(lines[1]?.text).toBe("      1  Demo: Keep using local orchestration fixtures.");
+    expect(lines[1]?.userInputRef).toEqual({
       requestId: "req-1",
       questionIndex: 0,
       optionIndex: 0,
     });
-    expect(lines[3]?.text).toContain("Live");
-    expect(lines[3]?.userInputRef).toEqual({
+    expect(lines[2]?.text).toBe("      2  Live: Connect to the orchestration websocket.");
+    expect(lines[2]?.userInputRef).toEqual({
       requestId: "req-1",
       questionIndex: 0,
       optionIndex: 1,
     });
   });
 
-  it("appends resolved custom answers as plain user text", () => {
+  it("omits the generic Question header and avoids duplicating identical option descriptions", () => {
+    const lines = blockToLines({
+      type: "user-input-request",
+      requestId: "req-dup",
+      questions: [
+        {
+          header: "Question",
+          question: "Is the ask_user tool working as expected?",
+          options: [
+            { label: "Yes", description: "Yes" },
+            { label: "No", description: "No" },
+          ],
+        },
+      ],
+    });
+
+    expect(lines.map((line) => line.text)).toEqual([
+      "    Is the ask_user tool working as expected?",
+      "      1  Yes",
+      "      2  No",
+    ]);
+  });
+
+  it("keeps resolved user input questions highlighted without appending a duplicate answer line", () => {
     const lines = blockToLines({
       type: "user-input-request",
       requestId: "req-2",
@@ -99,24 +120,21 @@ describe("blockToLines", () => {
       ],
     });
 
-    expect(lines[0]?.text).toContain("User input answered");
-    expect(lines[0]?.extraClasses).toContain("cm-line-userInputResolved");
-    expect(lines[1]?.extraClasses).toEqual(
+    expect(lines[0]?.extraClasses).toEqual(
       expect.arrayContaining(["cm-line-userInputQuestion", "cm-line-userInputResolved"]),
     );
-    expect(lines[2]?.extraClasses).toEqual(
+    expect(lines[1]?.extraClasses).toEqual(
       expect.arrayContaining([
         "cm-line-userInputOption",
         "cm-line-userInputResolved",
         "cm-line-userInputResolvedOption",
       ]),
     );
-    expect(lines.slice(-3).map((line) => line.kind)).toEqual([
-      "userPromptSeparator",
-      "userMessage",
-      "userPromptSeparator",
+    expect(lines.map((line) => line.kind)).toEqual([
+      "approvalPrompt",
+      "approvalPrompt",
+      "approvalPrompt",
     ]);
-    expect(lines.at(-2)?.text).toBe("Staging");
   });
 
   it("emits stable plan step kinds instead of relying on exact glyph formatting", () => {
@@ -193,9 +211,8 @@ describe("blockToLines", () => {
       "tok-added",
       "tok-removed",
     );
-    expect(lines[1]).toEqual({ text: "", kind: "meta" });
-    expect(lines[2]).toEqual({ text: "Finished in 0.0s", kind: "workingLine" });
-    expect(lines[3]).toEqual({ text: "", kind: "workGroupSeparator" });
+    expect(lines[1]).toEqual({ text: "Completed in 0.0s", kind: "workingLine" });
+    expect(lines[2]).toEqual({ text: "", kind: "workGroupSeparator" });
   });
 
   it("preserves lazy diff lookup metadata on edited-file widgets", () => {
@@ -273,9 +290,8 @@ describe("blockToLines", () => {
     expect(lines[1]?.kind).toBe("commandExec");
     expect(lines[1]?.text).toContain("src/two.ts");
     expect(lines[1]?.text).not.toContain("Completed in");
-    expect(lines[2]).toEqual({ text: "", kind: "meta" });
-    expect(lines[3]).toEqual({ text: "Finished in 0.6s", kind: "workingLine" });
-    expect(lines[4]).toEqual({ text: "", kind: "workGroupSeparator" });
+    expect(lines[2]).toEqual({ text: "Completed in 0.6s", kind: "workingLine" });
+    expect(lines[3]).toEqual({ text: "", kind: "workGroupSeparator" });
   });
 
   it("renders read-file work groups as command widgets without pinning signature format", () => {
@@ -302,8 +318,7 @@ describe("blockToLines", () => {
     expect(widgetLine.text).not.toContain("Completed in");
     expect(widgetLine.commandWidgetSignature).toEqual(expect.any(String));
     expectHighlightClasses(widgetLine, "tok-commandWidgetGlyph", "tok-commandWidgetPrefix");
-    expect(lines[1]).toEqual({ text: "", kind: "meta" });
-    expect(lines[2]).toEqual({ text: "Finished in 0.6s", kind: "workingLine" });
+    expect(lines[1]).toEqual({ text: "Completed in 0.6s", kind: "workingLine" });
   });
 
   it("does not duplicate command detail when it matches the command text", () => {
@@ -433,8 +448,7 @@ describe("blockToLines", () => {
     expect(lines[0]?.text).not.toContain("Completed in");
     expect(lines[1]?.text).toContain("git status --short");
     expect(lines[1]?.text).not.toContain("Completed in");
-    expect(lines[2]).toEqual({ text: "", kind: "meta" });
-    expect(lines[3]).toEqual({ text: "Finished in 0.3s", kind: "workingLine" });
+    expect(lines[2]).toEqual({ text: "Completed in 0.3s", kind: "workingLine" });
   });
 
   it("renders tool work groups as command widgets without pinning optional output layout", () => {

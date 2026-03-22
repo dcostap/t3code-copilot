@@ -2,6 +2,8 @@ import { useEffect, useRef, type CSSProperties } from "react";
 
 import type { CommandPaletteCommand } from "./commandPaletteCommands";
 
+const COMMAND_PALETTE_MAX_HEIGHT_PX = 950;
+
 export interface CommandPaletteScopeBounds {
   readonly top: number;
   readonly left: number;
@@ -28,11 +30,20 @@ export function resolveCommandPaletteFrameStyle(
     return undefined;
   }
 
+  const roundedTop = Math.max(0, Math.round(scopeBounds.top));
+  const roundedLeft = Math.max(0, Math.round(scopeBounds.left));
+  const roundedWidth = Math.max(0, Math.round(scopeBounds.width));
+  const roundedHeight = Math.max(0, Math.round(scopeBounds.height));
+  const resolvedHeight = Math.min(COMMAND_PALETTE_MAX_HEIGHT_PX, roundedHeight);
+  const centeredTopOffset = roundedHeight > COMMAND_PALETTE_MAX_HEIGHT_PX
+    ? Math.round((roundedHeight - COMMAND_PALETTE_MAX_HEIGHT_PX) / 2)
+    : 0;
+
   return {
-    top: `${Math.max(0, Math.round(scopeBounds.top))}px`,
-    left: `${Math.max(0, Math.round(scopeBounds.left))}px`,
-    width: `${Math.max(0, Math.round(scopeBounds.width))}px`,
-    height: `${Math.max(0, Math.round(scopeBounds.height))}px`,
+    top: `${roundedTop + centeredTopOffset}px`,
+    left: `${roundedLeft}px`,
+    width: `${roundedWidth}px`,
+    height: `${resolvedHeight}px`,
   };
 }
 

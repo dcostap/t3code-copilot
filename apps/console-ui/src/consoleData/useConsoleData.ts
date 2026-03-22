@@ -23,6 +23,11 @@ import {
   type ConsoleBackend,
   type ConsoleBackendConnectionState,
 } from "../consoleBackend";
+import {
+  formatPendingUserInputAnswersAsPrompt,
+  isStaleCopilotUserInputResponseDetail,
+  parsePendingUserInputAnswers,
+} from "../pendingUserInput";
 import { reconcileReadModelWithEvents } from "./readModelReconciliation";
 
 export type ConsoleConnectionState = ConsoleBackendConnectionState;
@@ -96,7 +101,12 @@ export interface ConsoleDataState {
     attachments?: ReadonlyArray<UploadChatImageAttachment>;
     pendingThread?: PendingConsoleThread | null;
   }): Promise<void>;
-  respondToUserInput(threadId: string, requestId: string, answers: Record<string, unknown>): Promise<void>;
+  respondToUserInput(
+    threadId: string,
+    requestId: string,
+    answers: Record<string, unknown>,
+    fallbackPrompt?: string,
+  ): Promise<void>;
   setThreadModel(threadId: string, provider: ProviderKind, model: string): Promise<void>;
   setThreadReasoningEffort(
     threadId: string,
@@ -112,6 +122,12 @@ export interface ConsoleDataState {
 interface OptimisticThreadMetaPatch {
   readonly model?: string;
   readonly modelOptions?: ProviderModelOptions;
+}
+
+interface PendingUserInputFallback {
+  readonly threadId: OrchestrationThread["id"];
+  readonly prompt: string | null;
+  readonly dispatchedFallback: boolean;
 }
 
 function readSearchConfig(): ConsoleSearchConfig {
@@ -224,7 +240,7 @@ function derivePendingUserInputs(thread: OrchestrationThread | null): ConsolePen
 
     if (
       activity.kind === "provider.user-input.respond.failed" &&
-      asString(payload?.detail)?.includes("Unknown pending")
+      isStaleCopilotUserInputResponseDetail(asString(payload?.detail))
     ) {
       openByRequestId.delete(requestId);
     }
@@ -270,31 +286,7 @@ function buildPromptAnswers(
   pendingUserInput: ConsolePendingUserInput,
   prompt: string,
 ): Record<string, string> | null {
-  const trimmed = prompt.trim();
-  if (trimmed.length === 0) {
-    return null;
-  }
-
-  if (pendingUserInput.questions.length === 1) {
-    const question = pendingUserInput.questions[0];
-    if (!question) return null;
-    return { [question.id]: trimmed };
-  }
-
-  const lines = trimmed.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
-  if (lines.length < pendingUserInput.questions.length) {
-    return null;
-  }
-
-  const answers: Record<string, string> = {};
-  pendingUserInput.questions.forEach((question, index) => {
-    const line = lines[index];
-    if (!line) return;
-    const match = /^([^:]+):\s*(.+)$/.exec(line);
-    answers[question.id] = match ? (match[2]?.trim() ?? "") : line;
-  });
-
-  return Object.keys(answers).length === pendingUserInput.questions.length ? answers : null;
+  return parsePendingUserInputAnswers(pendingUserInput.questions, prompt);
 }
 
 function isTurnRunning(thread: OrchestrationThread | null) {
@@ -311,6 +303,33 @@ function findThreadById(
   threadId: string,
 ) {
   return threads.find((thread) => thread.id === threadId) ?? null;
+}
+
+async function dispatchThreadTurnStart(input: {
+  readonly backend: ConsoleBackend;
+  readonly threadId: ThreadId;
+  readonly threadSeed: Pick<PendingConsoleThread, "model" | "interactionMode">;
+  readonly modelOptions?: ProviderModelOptions;
+  readonly prompt: string;
+  readonly attachments: ReadonlyArray<UploadChatImageAttachment>;
+}) {
+  await input.backend.dispatchCommand({
+    type: "thread.turn.start",
+    commandId: makeCommandId(),
+    threadId: input.threadId,
+    message: {
+      messageId: makeId("message") as MessageId,
+      role: "user",
+      text: input.prompt,
+      attachments: input.attachments,
+    },
+    model: input.threadSeed.model,
+    ...(input.modelOptions !== undefined ? { modelOptions: input.modelOptions } : {}),
+    assistantDeliveryMode: "streaming",
+    runtimeMode: "full-access",
+    interactionMode: input.threadSeed.interactionMode,
+    createdAt: new Date().toISOString(),
+  });
 }
 
 function updateReasoningEffortModelOptions(
@@ -459,6 +478,7 @@ export function useConsoleData(): ConsoleDataState {
   const promptSubmittingRef = useRef(false);
   const autoApprovedRequestIdsRef = useRef(new Set<string>());
   const respondingUserInputRequestIdsRef = useRef(new Set<string>());
+  const pendingUserInputFallbacksRef = useRef(new Map<string, PendingUserInputFallback>());
   const interruptInFlightRef = useRef(false);
   const stopSessionInFlightRef = useRef(false);
 
@@ -481,6 +501,14 @@ export function useConsoleData(): ConsoleDataState {
     setActiveThreadIdState(threadId);
   }, []);
 
+  const clearRespondingUserInputRequest = useCallback((requestId: string) => {
+    pendingUserInputFallbacksRef.current.delete(requestId);
+    respondingUserInputRequestIdsRef.current.delete(requestId);
+    setRespondingUserInputRequestIds((existing) =>
+      existing.includes(requestId) ? existing.filter((id) => id !== requestId) : existing,
+    );
+  }, []);
+
   useEffect(() => {
     let disposed = false;
     latestEventSequenceRef.current = 0;
@@ -491,6 +519,7 @@ export function useConsoleData(): ConsoleDataState {
     promptSubmittingRef.current = false;
     autoApprovedRequestIdsRef.current.clear();
     respondingUserInputRequestIdsRef.current.clear();
+    pendingUserInputFallbacksRef.current.clear();
     interruptInFlightRef.current = false;
     stopSessionInFlightRef.current = false;
     orchestrationEventsRef.current = [];
@@ -747,6 +776,79 @@ export function useConsoleData(): ConsoleDataState {
     }
   }, [backend, connectionState, thread]);
 
+  useEffect(() => {
+    if (!canDispatchLiveCommand(connectionState) || pendingUserInputFallbacksRef.current.size === 0) {
+      return;
+    }
+
+    void (async () => {
+      for (const [requestId, fallback] of pendingUserInputFallbacksRef.current.entries()) {
+        const targetThread = findThreadById(threads, fallback.threadId);
+        if (!targetThread) {
+          clearRespondingUserInputRequest(requestId);
+          continue;
+        }
+
+        const requestActivities = [...targetThread.activities]
+          .toSorted(compareActivitiesByOrder)
+          .filter((activity) => asString(asRecord(activity.payload)?.requestId) === requestId);
+
+        if (requestActivities.some((activity) => activity.kind === "user-input.resolved")) {
+          clearRespondingUserInputRequest(requestId);
+          continue;
+        }
+
+        const staleFailure = requestActivities.find((activity) =>
+          activity.kind === "provider.user-input.respond.failed"
+          && isStaleCopilotUserInputResponseDetail(asString(asRecord(activity.payload)?.detail)),
+        );
+        if (!staleFailure) {
+          if (requestActivities.some((activity) => activity.kind === "provider.user-input.respond.failed")) {
+            clearRespondingUserInputRequest(requestId);
+          }
+          continue;
+        }
+
+        if (!fallback.prompt) {
+          clearRespondingUserInputRequest(requestId);
+          continue;
+        }
+
+        if (fallback.dispatchedFallback) {
+          clearRespondingUserInputRequest(requestId);
+          continue;
+        }
+
+        pendingUserInputFallbacksRef.current.set(requestId, {
+          ...fallback,
+          dispatchedFallback: true,
+        });
+
+        try {
+          await dispatchThreadTurnStart({
+            backend,
+            threadId: targetThread.id,
+            threadSeed: {
+              model: targetThread.model,
+              interactionMode: targetThread.interactionMode,
+            },
+            ...(targetThread.modelOptions !== undefined ? { modelOptions: targetThread.modelOptions } : {}),
+            prompt: fallback.prompt,
+            attachments: [],
+          });
+        } catch (nextError) {
+          setError(
+            nextError instanceof Error
+              ? `Fallback ask_user submission failed: ${nextError.message}`
+              : "Fallback ask_user submission failed.",
+          );
+        } finally {
+          clearRespondingUserInputRequest(requestId);
+        }
+      }
+    })();
+  }, [backend, clearRespondingUserInputRequest, connectionState, threads]);
+
   const project = useMemo(() => {
     if (!snapshot || !thread) return null;
     return snapshot.projects.find((entry: OrchestrationProject) => entry.id === thread.projectId) ?? null;
@@ -916,6 +1018,43 @@ export function useConsoleData(): ConsoleDataState {
     [assertLiveCommandReady, backend, snapshot, thread],
   );
 
+  const dispatchUserInputResponse = useCallback(
+    async (
+      targetThread: OrchestrationThread,
+      requestId: string,
+      answers: Record<string, unknown>,
+      fallbackPrompt?: string,
+    ) => {
+      if (pendingUserInputFallbacksRef.current.has(requestId) || respondingUserInputRequestIdsRef.current.has(requestId)) {
+        return;
+      }
+
+      pendingUserInputFallbacksRef.current.set(requestId, {
+        threadId: targetThread.id,
+        prompt: fallbackPrompt ?? null,
+        dispatchedFallback: false,
+      });
+      respondingUserInputRequestIdsRef.current.add(requestId);
+      setRespondingUserInputRequestIds((existing) =>
+        existing.includes(requestId) ? existing : [...existing, requestId],
+      );
+      try {
+        await backend.dispatchCommand({
+          type: "thread.user-input.respond",
+          commandId: makeCommandId(),
+          threadId: targetThread.id,
+          requestId: requestId as ApprovalRequestId,
+          answers,
+          createdAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        clearRespondingUserInputRequest(requestId);
+        throw error;
+      }
+    },
+    [backend, clearRespondingUserInputRequest],
+  );
+
   const submitPrompt = useCallback(
     async (input: {
       threadId: string;
@@ -946,35 +1085,16 @@ export function useConsoleData(): ConsoleDataState {
           throw new Error("Pending user input expects one answer per question.");
         }
 
-        if (respondingUserInputRequestIdsRef.current.has(pendingUserInput.requestId)) {
-          return;
+        if (!targetThread) {
+          throw new Error("No orchestration thread is available.");
         }
-
-        respondingUserInputRequestIdsRef.current.add(pendingUserInput.requestId);
-        setRespondingUserInputRequestIds((existing) =>
-          existing.includes(pendingUserInput.requestId)
-            ? existing
-            : [...existing, pendingUserInput.requestId],
+        await dispatchUserInputResponse(
+          targetThread,
+          pendingUserInput.requestId,
+          answers,
+          formatPendingUserInputAnswersAsPrompt(pendingUserInput.questions, answers) ?? undefined,
         );
-        try {
-          if (!targetThread) {
-            throw new Error("No orchestration thread is available.");
-          }
-          await backend.dispatchCommand({
-            type: "thread.user-input.respond",
-            commandId: makeCommandId(),
-            threadId: targetThread.id,
-            requestId: pendingUserInput.requestId as ApprovalRequestId,
-            answers,
-            createdAt: new Date().toISOString(),
-          });
-          return;
-        } finally {
-          respondingUserInputRequestIdsRef.current.delete(pendingUserInput.requestId);
-          setRespondingUserInputRequestIds((existing) =>
-            existing.filter((id) => id !== pendingUserInput.requestId),
-          );
-        }
+        return;
       }
 
       if (targetThread && isTurnRunning(targetThread)) {
@@ -985,65 +1105,37 @@ export function useConsoleData(): ConsoleDataState {
       setIsPromptSubmitting(true);
       try {
         const dispatchThreadId = targetThread?.id ?? (input.threadId as ThreadId);
-        await backend.dispatchCommand({
-          type: "thread.turn.start",
-          commandId: makeCommandId(),
+        await dispatchThreadTurnStart({
+          backend,
           threadId: dispatchThreadId,
-          message: {
-            messageId: makeId("message") as MessageId,
-            role: "user",
-            text: trimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
-            attachments,
-          },
-          model: threadSeed.model,
-          ...(targetThread?.modelOptions !== undefined
-            ? { modelOptions: targetThread.modelOptions }
-            : {}),
-          assistantDeliveryMode: "streaming",
-          runtimeMode: "full-access",
-          interactionMode: threadSeed.interactionMode,
-          createdAt: new Date().toISOString(),
+          threadSeed,
+          ...(targetThread?.modelOptions !== undefined ? { modelOptions: targetThread.modelOptions } : {}),
+          prompt: trimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+          attachments,
         });
       } finally {
         promptSubmittingRef.current = false;
         setIsPromptSubmitting(false);
       }
     },
-    [assertLiveCommandReady, backend, threads],
+    [assertLiveCommandReady, backend, dispatchUserInputResponse, threads],
   );
 
   const respondToUserInput = useCallback(
-    async (threadId: string, requestId: string, answers: Record<string, unknown>) => {
+    async (
+      threadId: string,
+      requestId: string,
+      answers: Record<string, unknown>,
+      fallbackPrompt?: string,
+    ) => {
       const targetThread = findThreadById(threads, threadId);
       if (!targetThread) {
         throw new Error("No orchestration thread is available.");
       }
       assertLiveCommandReady();
-      if (respondingUserInputRequestIdsRef.current.has(requestId)) {
-        return;
-      }
-
-      respondingUserInputRequestIdsRef.current.add(requestId);
-      setRespondingUserInputRequestIds((existing) =>
-        existing.includes(requestId) ? existing : [...existing, requestId],
-      );
-      try {
-        await backend.dispatchCommand({
-          type: "thread.user-input.respond",
-          commandId: makeCommandId(),
-          threadId: targetThread.id,
-          requestId: requestId as ApprovalRequestId,
-          answers,
-          createdAt: new Date().toISOString(),
-        });
-      } finally {
-        respondingUserInputRequestIdsRef.current.delete(requestId);
-        setRespondingUserInputRequestIds((existing) =>
-          existing.filter((id) => id !== requestId),
-        );
-      }
+      await dispatchUserInputResponse(targetThread, requestId, answers, fallbackPrompt);
     },
-    [assertLiveCommandReady, backend, threads],
+    [assertLiveCommandReady, dispatchUserInputResponse, threads],
   );
 
   const setThreadModel = useCallback(async (threadId: string, provider: ProviderKind, model: string) => {

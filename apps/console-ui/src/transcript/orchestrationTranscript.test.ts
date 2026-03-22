@@ -728,7 +728,7 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
-  it("keeps resolved user-input request blocks in the transcript in answered state", () => {
+  it("renders resolved user-input answers as a follow-up user message", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
@@ -748,6 +748,7 @@ describe("threadToTranscriptBlocks", () => {
             requestId: "req-user-input-1",
             questions: [
               {
+                id: "answer",
                 header: "Source",
                 question: "Which mode should this console stay in?",
                 options: [
@@ -785,6 +786,7 @@ describe("threadToTranscriptBlocks", () => {
         answers: { answer: "Demo" },
         questions: [
           {
+            id: "answer",
             header: "Source",
             question: "Which mode should this console stay in?",
             options: [
@@ -793,6 +795,94 @@ describe("threadToTranscriptBlocks", () => {
             ],
           },
         ],
+      },
+      {
+        type: "user-message",
+        text: "Demo",
+      },
+    ]);
+  });
+
+  it("normalizes stale Copilot ask_user fallback replies into the same follow-up user message", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      messages: [{
+        id: MessageId.makeUnsafe("message-fallback-answer"),
+        role: "user",
+        text: "Yes",
+        attachments: [],
+        turnId: TurnId.makeUnsafe("turn-fallback-answer"),
+        streaming: false,
+        createdAt: "2026-03-11T09:00:02.000Z",
+        updatedAt: "2026-03-11T09:00:02.000Z",
+      }],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-user-input-requested-stale"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "req-user-input-stale",
+            questions: [
+              {
+                id: "answer",
+                header: "Answer",
+                question: "Is the ask_user tool working as expected?",
+                options: [
+                  { label: "Yes", description: "Yes" },
+                  { label: "No", description: "No" },
+                ],
+              },
+            ],
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:00.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-user-input-respond-failed-stale"),
+          tone: "error",
+          kind: "provider.user-input.respond.failed",
+          summary: "Provider user input response failed",
+          payload: {
+            requestId: "req-user-input-stale",
+            detail: "Provider adapter request failed (copilot) for session.userInput.respond: Unknown pending GitHub Copilot user-input request 'copilot-user-input-stale'.",
+          },
+          turnId: null,
+          sequence: 2,
+          createdAt: "2026-03-11T09:00:01.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "user-input-request",
+        requestId: "req-user-input-stale",
+        resolved: true,
+        answers: { answer: "Yes" },
+        questions: [
+          {
+            id: "answer",
+            header: "Answer",
+            question: "Is the ask_user tool working as expected?",
+            options: [
+              { label: "Yes", description: "Yes" },
+              { label: "No", description: "No" },
+            ],
+          },
+        ],
+      },
+      {
+        type: "user-message",
+        text: "Yes",
       },
     ]);
   });
@@ -1065,6 +1155,388 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("places the assistant finished-state after same-turn tool work and pending user-input prompts", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      checkpoints: [],
+      proposedPlans: [],
+      messages: [
+        {
+          id: MessageId.makeUnsafe("assistant-finished-after-ask-user"),
+          role: "assistant",
+          text: "I need one more thing from you.",
+          attachments: [],
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-03-11T09:00:00.000Z",
+          updatedAt: "2026-03-11T09:00:01.000Z",
+        },
+      ],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-report-intent-before-question"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "report_intent started",
+          payload: {
+            itemType: "tool",
+            itemId: "report-intent-before-question",
+            title: "report_intent",
+            status: "completed",
+            data: {
+              arguments: {
+                intent: "Asking user input",
+              },
+            },
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:02.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-user-input-requested-after-tool"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "req-finished-after-ask-user",
+            questions: [
+              {
+                id: "answer",
+                header: "Question",
+                question: "What should I do next?",
+                options: [
+                  { label: "Continue", description: "Continue" },
+                  { label: "Stop", description: "Stop" },
+                ],
+              },
+            ],
+          },
+          turnId: null,
+          sequence: 2,
+          createdAt: "2026-03-11T09:00:03.000Z",
+        },
+      ],
+      latestTurn: null,
+      session: {
+        ...thread!.session!,
+        status: "running",
+        activeTurnId: null,
+        updatedAt: "2026-03-11T09:00:03.000Z",
+      },
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "I need one more thing from you.",
+        streaming: false,
+      },
+      {
+        type: "work-group",
+        title: "report_intent",
+        status: "done",
+        startedAt: "2026-03-11T09:00:02.000Z",
+        endedAt: "2026-03-11T09:00:02.000Z",
+        items: [
+          {
+            kind: "tool",
+            label: "report_intent",
+            status: "done",
+            detail: "intent=Asking user input",
+          },
+        ],
+      },
+      {
+        type: "user-input-request",
+        requestId: "req-finished-after-ask-user",
+        questions: [
+          {
+            id: "answer",
+            header: "Question",
+            question: "What should I do next?",
+            options: [
+              { label: "Continue", description: "Continue" },
+              { label: "Stop", description: "Stop" },
+            ],
+          },
+        ],
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        finishedAt: "2026-03-11T09:00:03.000Z",
+      },
+    ]);
+  });
+
+  it("places the assistant finished-state after later visible turn activities even when turn ids drift", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      checkpoints: [],
+      proposedPlans: [],
+      messages: [
+        {
+          id: MessageId.makeUnsafe("assistant-finished-after-drifted-activities"),
+          role: "assistant",
+          text: "I'm just testing stuff.",
+          attachments: [],
+          turnId: TurnId.makeUnsafe("assistant-turn"),
+          streaming: false,
+          createdAt: "2026-03-11T09:00:00.000Z",
+          updatedAt: "2026-03-11T09:00:01.000Z",
+        },
+      ],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-reasoning-drifted"),
+          tone: "info",
+          kind: "reasoning.text",
+          summary: "Assembling parameters",
+          payload: {
+            text: "Assembling parameters for file listing",
+          },
+          turnId: TurnId.makeUnsafe("activity-turn"),
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:02.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-report-intent-drifted"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "report_intent complete",
+          payload: {
+            itemType: "tool",
+            itemId: "report-intent-drifted",
+            title: "report_intent",
+            status: "completed",
+            data: {
+              arguments: {
+                intent: "Listing files",
+              },
+            },
+          },
+          turnId: TurnId.makeUnsafe("activity-turn"),
+          sequence: 2,
+          createdAt: "2026-03-11T09:00:03.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-user-input-requested-drifted"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "req-drifted-ordering",
+            questions: [
+              {
+                id: "color",
+                header: "Dummy question",
+                question: "Which color do you prefer?",
+                options: [
+                  { label: "Red", description: "Red" },
+                  { label: "Blue", description: "Blue" },
+                  { label: "Green", description: "Green" },
+                ],
+              },
+            ],
+          },
+          turnId: TurnId.makeUnsafe("activity-turn"),
+          sequence: 3,
+          createdAt: "2026-03-11T09:00:04.000Z",
+        },
+      ],
+      latestTurn: null,
+      session: {
+        ...thread!.session!,
+        status: "running",
+        activeTurnId: null,
+        updatedAt: "2026-03-11T09:00:04.000Z",
+      },
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "I'm just testing stuff.",
+        streaming: false,
+      },
+      {
+        type: "reasoning-text",
+        text: "Assembling parameters for file listing",
+      },
+      {
+        type: "work-group",
+        title: "report_intent",
+        status: "done",
+        startedAt: "2026-03-11T09:00:03.000Z",
+        endedAt: "2026-03-11T09:00:03.000Z",
+        items: [
+          {
+            kind: "tool",
+            label: "report_intent",
+            status: "done",
+            detail: "intent=Listing files",
+          },
+        ],
+      },
+      {
+        type: "user-input-request",
+        requestId: "req-drifted-ordering",
+        questions: [
+          {
+            id: "color",
+            header: "Dummy question",
+            question: "Which color do you prefer?",
+            options: [
+              { label: "Red", description: "Red" },
+              { label: "Blue", description: "Blue" },
+              { label: "Green", description: "Green" },
+            ],
+          },
+        ],
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        finishedAt: "2026-03-11T09:00:04.000Z",
+      },
+    ]);
+  });
+
+  it("places the latest-turn assistant finished-state after later visible transcript activities", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-latest-finished-after-visible-activity");
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      checkpoints: [],
+      proposedPlans: [],
+      messages: [
+        {
+          id: MessageId.makeUnsafe("assistant-latest-turn-finished-after-visible-activity"),
+          role: "assistant",
+          text: "I need one more thing.",
+          attachments: [],
+          turnId,
+          streaming: false,
+          createdAt: "2026-03-11T09:00:00.000Z",
+          updatedAt: "2026-03-11T09:00:02.000Z",
+        },
+      ],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-report-intent-after-latest-complete"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "report_intent complete",
+          payload: {
+            itemType: "tool",
+            itemId: "report-intent-after-latest-complete",
+            title: "report_intent",
+            status: "completed",
+            data: {
+              arguments: {
+                intent: "Prompting the user",
+              },
+            },
+          },
+          turnId,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:03.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-user-input-requested-after-latest-complete"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "req-latest-finished-after-visible-activity",
+            questions: [
+              {
+                id: "next_step",
+                header: "Question",
+                question: "What should I do next?",
+                options: [
+                  { label: "Continue", description: "Continue" },
+                  { label: "Stop", description: "Stop" },
+                ],
+              },
+            ],
+          },
+          turnId,
+          sequence: 2,
+          createdAt: "2026-03-11T09:00:04.000Z",
+        },
+      ],
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-03-11T09:00:00.000Z",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        completedAt: "2026-03-11T09:00:02.500Z",
+        assistantMessageId: MessageId.makeUnsafe("assistant-latest-turn-finished-after-visible-activity"),
+      },
+      session: {
+        ...thread!.session!,
+        status: "ready",
+        activeTurnId: null,
+        updatedAt: "2026-03-11T09:00:04.000Z",
+      },
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "I need one more thing.",
+        streaming: false,
+      },
+      {
+        type: "work-group",
+        title: "report_intent",
+        status: "done",
+        startedAt: "2026-03-11T09:00:03.000Z",
+        endedAt: "2026-03-11T09:00:03.000Z",
+        items: [
+          {
+            kind: "tool",
+            label: "report_intent",
+            status: "done",
+            detail: "intent=Prompting the user",
+          },
+        ],
+      },
+      {
+        type: "user-input-request",
+        requestId: "req-latest-finished-after-visible-activity",
+        questions: [
+          {
+            id: "next_step",
+            header: "Question",
+            question: "What should I do next?",
+            options: [
+              { label: "Continue", description: "Continue" },
+              { label: "Stop", description: "Stop" },
+            ],
+          },
+        ],
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        finishedAt: "2026-03-11T09:00:04.000Z",
+      },
+    ]);
+  });
+
   it("shows a finished-state block for a completed latest turn even if the message still streams", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
@@ -1164,17 +1636,17 @@ describe("threadToTranscriptBlocks", () => {
         streaming: false,
       },
       {
-        type: "finished-state",
-        startedAt: "2026-03-11T09:00:00.000Z",
-        finishedAt: "2026-03-11T09:00:02.500Z",
-      },
-      {
         type: "reasoning-summary",
         text: "Exploring filesystem",
       },
       {
         type: "reasoning-text",
         text: "Need an accurate top-level snapshot first.",
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        finishedAt: "2026-03-11T09:00:03.000Z",
       },
     ]);
   });
@@ -1297,6 +1769,148 @@ describe("threadToTranscriptBlocks", () => {
         now: "2026-03-12T09:00:04.500Z",
       },
     ]);
+  });
+
+  it("suppresses the working-state block while a user-input request is still pending", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        messages: [],
+        proposedPlans: [],
+        checkpoints: [],
+        activities: [{
+          id: EventId.makeUnsafe("activity-user-input-pending"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "req-pending",
+            questions: [{
+              id: "choice",
+              header: "Source",
+              question: "Which mode should this console stay in?",
+              options: [
+                { label: "Demo", description: "Keep using local orchestration fixtures." },
+                { label: "Live", description: "Connect to the orchestration websocket." },
+              ],
+            }],
+          },
+          turnId: TurnId.makeUnsafe("turn-running"),
+          sequence: 1,
+          createdAt: "2026-03-12T09:00:03.000Z",
+        }],
+        latestTurn: {
+          turnId: TurnId.makeUnsafe("turn-running"),
+          state: "running",
+          requestedAt: "2026-03-12T09:00:00.000Z",
+          startedAt: "2026-03-12T09:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe("turn-running"),
+          updatedAt: "2026-03-12T09:00:04.000Z",
+        },
+      },
+      { now: "2026-03-12T09:00:04.500Z" },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "user-input-request",
+        requestId: "req-pending",
+        questions: [{
+          id: "choice",
+          header: "Source",
+          question: "Which mode should this console stay in?",
+          options: [
+            { label: "Demo", description: "Keep using local orchestration fixtures." },
+            { label: "Live", description: "Connect to the orchestration websocket." },
+          ],
+        }],
+      },
+    ]);
+  });
+
+  it("hides ask_user tool activities and their follow-up work events", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-tool-started-ask-user"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "ask_user started",
+          payload: {
+            itemId: "tool-ask-user-1",
+            title: "ask_user",
+            status: "inProgress",
+            data: {
+              item: {
+                id: "tool-ask-user-1",
+                toolName: "ask_user",
+              },
+            },
+          },
+          turnId: null,
+          sequence: 1,
+          createdAt: "2026-03-12T09:00:00.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-tool-completed-ask-user"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "ask_user complete",
+          payload: {
+            itemId: "tool-ask-user-1",
+            title: "ask_user",
+            status: "completed",
+            detail: "Asked the user a question.",
+            data: {
+              item: {
+                id: "tool-ask-user-1",
+                toolName: "ask_user",
+                result: {
+                  id: "tool-ask-user-1",
+                  toolName: "ask_user",
+                },
+              },
+            },
+          },
+          turnId: null,
+          sequence: 2,
+          createdAt: "2026-03-12T09:00:01.000Z",
+        },
+        {
+          id: EventId.makeUnsafe("activity-tool-progress-ask-user"),
+          tone: "tool",
+          kind: "tool.progress",
+          summary: "ask_user progress",
+          payload: {
+            itemId: "tool-ask-user-1",
+            detail: "Waiting for response",
+          },
+          turnId: null,
+          sequence: 3,
+          createdAt: "2026-03-12T09:00:02.000Z",
+        },
+      ],
+    });
+
+    expect(derived).toEqual([]);
   });
 
   it("appends an interrupted-state block with the frozen elapsed time when a running turn is interrupted", () => {
@@ -1492,9 +2106,14 @@ describe("threadToTranscriptBlocks", () => {
       ],
     });
 
-    expect(derived.at(-1)).toEqual({
+    expect(derived).toContainEqual({
       type: "reasoning-text",
       text: "Checking transcript ordering before streaming the answer.",
+    });
+    expect(derived.at(-1)).toEqual({
+      type: "finished-state",
+      startedAt: "2026-03-10T09:01:58.000Z",
+      finishedAt: "2026-03-12T09:00:02.000Z",
     });
   });
 
@@ -1524,10 +2143,104 @@ describe("threadToTranscriptBlocks", () => {
       ],
     });
 
-    expect(derived.at(-1)).toEqual({
+    expect(derived).toContainEqual({
       type: "reasoning-summary",
       text: "Clarifying the car wash situation",
     });
+    expect(derived.at(-1)).toEqual({
+      type: "finished-state",
+      startedAt: "2026-03-10T09:01:58.000Z",
+      finishedAt: "2026-03-12T09:00:02.000Z",
+    });
+  });
+
+  it("force-finishes stuck running work-groups once the assistant turn is completed", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-stuck-work-group");
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-report-intent-started"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "report_intent started",
+          payload: {
+            itemType: "tool",
+            itemId: "report-intent-1",
+            title: "report_intent",
+            status: "inProgress",
+            data: {
+              arguments: {
+                intent: "Asking user input",
+              },
+            },
+          },
+          turnId,
+          sequence: 1,
+          createdAt: "2026-03-12T09:00:01.000Z",
+        },
+      ],
+      messages: [
+        {
+          id: MessageId.makeUnsafe("assistant-message-stuck-work-group"),
+          role: "assistant",
+          text: "All set.",
+          attachments: [],
+          turnId,
+          streaming: false,
+          createdAt: "2026-03-12T09:00:02.000Z",
+          updatedAt: "2026-03-12T09:00:03.000Z",
+        },
+      ],
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-03-12T09:00:00.000Z",
+        startedAt: "2026-03-12T09:00:01.000Z",
+        completedAt: "2026-03-12T09:00:03.500Z",
+        assistantMessageId: MessageId.makeUnsafe("assistant-message-stuck-work-group"),
+      },
+      session: {
+        ...thread!.session!,
+        status: "ready",
+        activeTurnId: null,
+        updatedAt: "2026-03-12T09:00:03.500Z",
+      },
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "work-group",
+        title: "report_intent",
+        status: "done",
+        startedAt: "2026-03-12T09:00:01.000Z",
+        endedAt: "2026-03-12T09:00:03.500Z",
+        items: [
+          {
+            kind: "tool",
+            label: "report_intent",
+            status: "done",
+            detail: "intent=Asking user input",
+          },
+        ],
+      },
+      {
+        type: "assistant-text",
+        text: "All set.",
+        streaming: false,
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-12T09:00:02.000Z",
+        finishedAt: "2026-03-12T09:00:03.500Z",
+      },
+    ]);
   });
 
   it("promotes long unstructured reasoning.summary payloads into reasoning text", () => {
@@ -1558,11 +2271,16 @@ describe("threadToTranscriptBlocks", () => {
       ],
     });
 
-    expect(derived.at(-1)).toEqual({
+    expect(derived).toContainEqual({
       type: "reasoning-text",
       text:
         "I need to respond to the user's request to run a sleep command for two minutes. "
         + "Before I execute the command, I'll include some commentary to clarify that I'm preparing to do substantial work.",
+    });
+    expect(derived.at(-1)).toEqual({
+      type: "finished-state",
+      startedAt: "2026-03-10T09:01:58.000Z",
+      finishedAt: "2026-03-12T09:00:03.000Z",
     });
   });
 

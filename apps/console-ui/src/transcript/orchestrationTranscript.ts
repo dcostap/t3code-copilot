@@ -2,6 +2,7 @@ import type {
   OrchestrationEvent,
   OrchestrationThread,
   OrchestrationThreadActivity,
+  UserInputQuestion,
 } from "@t3tools/contracts";
 
 import type {
@@ -11,6 +12,11 @@ import type {
   UserInputRequestBlock,
   WorkGroupItem,
 } from "./TranscriptBlock";
+import {
+  formatPendingUserInputAnswersAsPrompt,
+  isStaleCopilotUserInputResponseDetail,
+  parsePendingUserInputAnswers,
+} from "../pendingUserInput";
 
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
@@ -22,7 +28,17 @@ interface TranscriptBlockOptions {
 }
 
 interface ActivityBlockOptions {
-  readonly resolvedUserInputsByRequestId?: ReadonlyMap<string, Readonly<Record<string, string>>>;
+  readonly resolvedUserInputsByRequestId?: ReadonlyMap<string, ResolvedUserInputRecord>;
+}
+
+interface ResolvedUserInputRecord {
+  readonly answers: Readonly<Record<string, string>>;
+  readonly createdAt: string;
+}
+
+interface DerivedFallbackUserInputResolutions {
+  readonly answersByRequestId: ReadonlyMap<string, ResolvedUserInputRecord>;
+  readonly hiddenMessageIds: ReadonlySet<string>;
 }
 
 interface TimelineEntry {
@@ -496,8 +512,8 @@ function userInputBlock(payload: Record<string, unknown> | null): UserInputReque
 
 function deriveResolvedUserInputsByRequestId(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
-): ReadonlyMap<string, Readonly<Record<string, string>>> {
-  const resolvedByRequestId = new Map<string, Readonly<Record<string, string>>>();
+): ReadonlyMap<string, ResolvedUserInputRecord> {
+  const resolvedByRequestId = new Map<string, ResolvedUserInputRecord>();
 
   for (const activity of [...activities].toSorted(compareActivitiesByOrder)) {
     const payload = asRecord(activity.payload);
@@ -512,12 +528,270 @@ function deriveResolvedUserInputsByRequestId(
         Object.entries(answersRecord ?? {})
           .filter((entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string"),
       );
-      resolvedByRequestId.set(requestId, answers);
+      resolvedByRequestId.set(requestId, {
+        answers,
+        createdAt: activity.createdAt,
+      });
       continue;
     }
   }
 
   return resolvedByRequestId;
+}
+
+function parseAnswerableUserInputQuestions(payload: Record<string, unknown> | null): ReadonlyArray<UserInputQuestion> | null {
+  const questions = Array.isArray(payload?.questions) ? payload.questions : [];
+  const parsed: UserInputQuestion[] = [];
+
+  for (const entry of questions) {
+    const question = asRecord(entry);
+    const id = asString(question?.id);
+    const header = asString(question?.header);
+    const prompt = asString(question?.question);
+    const options = Array.isArray(question?.options) ? question.options : [];
+    if (!id || !header || !prompt) {
+      continue;
+    }
+
+    const normalizedOptions: UserInputQuestion["options"] = options
+      .map((option) => {
+        const record = asRecord(option);
+        const label = asString(record?.label);
+        const description = asString(record?.description);
+        return label && description ? { label, description } : null;
+      })
+      .filter((option): option is UserInputQuestion["options"][number] => option !== null);
+
+    parsed.push({
+      id,
+      header,
+      question: prompt,
+      options: normalizedOptions,
+    });
+  }
+
+  return parsed.length > 0 ? parsed : null;
+}
+
+function deriveRequestedUserInputQuestionsByRequestId(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ReadonlyMap<string, ReadonlyArray<UserInputQuestion>> {
+  const questionsByRequestId = new Map<string, ReadonlyArray<UserInputQuestion>>();
+
+  for (const activity of [...activities].toSorted(compareActivitiesByOrder)) {
+    if (activity.kind !== "user-input.requested") {
+      continue;
+    }
+
+    const payload = asRecord(activity.payload);
+    const requestId = asString(payload?.requestId);
+    const questions = parseAnswerableUserInputQuestions(payload);
+    if (!requestId || !questions) {
+      continue;
+    }
+
+    questionsByRequestId.set(requestId, questions);
+  }
+
+  return questionsByRequestId;
+}
+
+function deriveFallbackUserInputResolutions(
+  thread: OrchestrationThread,
+  requestedQuestionsByRequestId: ReadonlyMap<string, ReadonlyArray<UserInputQuestion>>,
+): DerivedFallbackUserInputResolutions {
+  const staleFailureByRequestId = new Map<string, string>();
+
+  for (const activity of [...thread.activities].toSorted(compareActivitiesByOrder)) {
+    const payload = asRecord(activity.payload);
+    const requestId = asString(payload?.requestId);
+    if (!requestId) {
+      continue;
+    }
+
+    if (
+      activity.kind === "provider.user-input.respond.failed" &&
+      isStaleCopilotUserInputResponseDetail(asString(payload?.detail))
+    ) {
+      staleFailureByRequestId.set(requestId, activity.createdAt);
+    }
+  }
+
+  const answersByRequestId = new Map<string, ResolvedUserInputRecord>();
+  const hiddenMessageIds = new Set<string>();
+  const userMessages = thread.messages
+    .filter((message) => message.role === "user")
+    .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+
+  for (const [requestId, failureCreatedAt] of [...staleFailureByRequestId.entries()].toSorted((left, right) =>
+    left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]),
+  )) {
+    const questions = requestedQuestionsByRequestId.get(requestId);
+    if (!questions) {
+      continue;
+    }
+
+    const fallbackMessage = userMessages.find((message) =>
+      !hiddenMessageIds.has(message.id) && message.createdAt >= failureCreatedAt,
+    );
+    if (!fallbackMessage) {
+      continue;
+    }
+
+    const answers = parsePendingUserInputAnswers(questions, fallbackMessage.text);
+    if (!answers) {
+      continue;
+    }
+
+    answersByRequestId.set(requestId, {
+      answers,
+      createdAt: fallbackMessage.createdAt,
+    });
+    hiddenMessageIds.add(fallbackMessage.id);
+  }
+
+  return { answersByRequestId, hiddenMessageIds };
+}
+
+function normalizeToolName(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, "_");
+  return normalized.length > 0 ? normalized : null;
+}
+
+function extractToolName(payload: Record<string, unknown> | null): string | null {
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  const result = asRecord(item?.result);
+  return (
+    asString(payload?.title)
+    ?? asString(item?.toolName)
+    ?? asString(result?.toolName)
+    ?? asString(data?.toolName)
+    ?? asString(data?.mcpToolName)
+  );
+}
+
+function isAskUserToolPayload(payload: Record<string, unknown> | null): boolean {
+  return normalizeToolName(extractToolName(payload)) === "ask_user";
+}
+
+function deriveAskUserHiddenWorkItemIds(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ReadonlySet<string> {
+  const hiddenItemIds = new Set<string>();
+
+  for (const activity of activities) {
+    const payload = asRecord(activity.payload);
+    if (!isAskUserToolPayload(payload)) {
+      continue;
+    }
+    const itemId = extractWorkItemId(payload);
+    if (itemId) {
+      hiddenItemIds.add(itemId);
+    }
+  }
+
+  return hiddenItemIds;
+}
+
+function shouldHideActivityFromTranscript(
+  activity: OrchestrationThreadActivity,
+  askUserHiddenWorkItemIds: ReadonlySet<string>,
+): boolean {
+  const payload = asRecord(activity.payload);
+  if (isAskUserToolPayload(payload)) {
+    return true;
+  }
+
+  const itemId = extractWorkItemId(payload);
+  if (itemId && askUserHiddenWorkItemIds.has(itemId)) {
+    return true;
+  }
+
+  if (activity.kind !== "provider.user-input.respond.failed") {
+    return false;
+  }
+
+  return isStaleCopilotUserInputResponseDetail(asString(payload?.detail));
+}
+
+function willActivityRenderInTranscript(
+  activity: OrchestrationThreadActivity,
+  askUserHiddenWorkItemIds: ReadonlySet<string>,
+): boolean {
+  if (shouldHideActivityFromTranscript(activity, askUserHiddenWorkItemIds)) {
+    return false;
+  }
+
+  if (activityToWorkItem(activity)) {
+    return true;
+  }
+
+  return activityToBlocks(activity, {}).length > 0;
+}
+
+function hasOpenPendingUserInputRequest(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): boolean {
+  const openRequestIds = new Set<string>();
+
+  for (const activity of [...activities].toSorted(compareActivitiesByOrder)) {
+    const payload = asRecord(activity.payload);
+    const requestId = asString(payload?.requestId);
+    if (!requestId) {
+      continue;
+    }
+
+    if (activity.kind === "user-input.requested") {
+      openRequestIds.add(requestId);
+      continue;
+    }
+
+    if (activity.kind === "user-input.resolved") {
+      openRequestIds.delete(requestId);
+      continue;
+    }
+
+    if (
+      activity.kind === "provider.user-input.respond.failed"
+      && isStaleCopilotUserInputResponseDetail(asString(payload?.detail))
+    ) {
+      openRequestIds.delete(requestId);
+    }
+  }
+
+  return openRequestIds.size > 0;
+}
+
+function buildUserInputAnswerTimelineEntries(
+  requestedQuestionsByRequestId: ReadonlyMap<string, ReadonlyArray<UserInputQuestion>>,
+  resolvedUserInputsByRequestId: ReadonlyMap<string, ResolvedUserInputRecord>,
+): ReadonlyArray<TimelineEntry> {
+  const entries: TimelineEntry[] = [];
+
+  for (const [requestId, resolved] of resolvedUserInputsByRequestId) {
+    const questions = requestedQuestionsByRequestId.get(requestId);
+    const text = questions ? formatPendingUserInputAnswersAsPrompt(questions, resolved.answers) : null;
+    if (!text) {
+      continue;
+    }
+
+    entries.push({
+      id: `user-input-answer:${requestId}:${resolved.createdAt}`,
+      createdAt: resolved.createdAt,
+      source: "message",
+      blocks: [{
+        type: "user-message",
+        text,
+      }],
+    });
+  }
+
+  return entries;
 }
 
 function isWorkActivityType(itemType: string | null) {
@@ -856,7 +1130,7 @@ function activityToBlocks(
     case "user-input.requested": {
       const requestId = asString(payload?.requestId);
       const block = userInputBlock(payload);
-      const resolvedAnswers =
+      const resolvedUserInput =
         requestId && options.resolvedUserInputsByRequestId
           ? options.resolvedUserInputsByRequestId.get(requestId)
           : undefined;
@@ -864,12 +1138,12 @@ function activityToBlocks(
         return [{ type: "status", text: activity.summary }];
       }
 
-      return [
-        resolvedAnswers
+        return [
+        resolvedUserInput
           ? {
               ...block,
               resolved: true,
-              answers: resolvedAnswers,
+              answers: resolvedUserInput.answers,
             }
           : block,
       ];
@@ -947,6 +1221,13 @@ function compareByCreatedAt(left: TimelineEntry, right: TimelineEntry) {
       return left.sequence - right.sequence;
     }
   }
+
+  const leftIsFinishedState = left.blocks?.every((block) => block.type === "finished-state") ?? false;
+  const rightIsFinishedState = right.blocks?.every((block) => block.type === "finished-state") ?? false;
+  if (left.createdAt === right.createdAt && leftIsFinishedState !== rightIsFinishedState) {
+    return leftIsFinishedState ? 1 : -1;
+  }
+
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
@@ -1062,35 +1343,26 @@ function buildAssistantMessageEntriesFromEvents(
   }
 
   flushSegment(message.streaming);
-  if (shouldAppendFinishedState(thread, message) && entries.length > 0) {
-    const lastEntryIndex = entries.length - 1;
-    const lastEntry = entries[lastEntryIndex];
-    if (lastEntry) {
-      entries[lastEntryIndex] = {
-        ...lastEntry,
-        blocks: [
-          ...(lastEntry.blocks ?? []),
-          createFinishedStateBlock(message.createdAt, resolveFinishedAt(thread, message)),
-        ],
-      };
-    }
-  }
   return entries.length > 0 ? entries : null;
 }
 
-function appendFinishedStateToAssistantBlocks(
+function buildFinishedStateEntryForAssistantMessage(
   thread: OrchestrationThread,
-  blocks: TranscriptBlock[],
   message: OrchestrationThread["messages"][number],
+  askUserHiddenWorkItemIds: ReadonlySet<string>,
 ) {
-  if (!shouldAppendFinishedState(thread, message) || blocks.length === 0) {
-    return blocks;
+  if (!shouldAppendFinishedState(thread, message)) {
+    return null;
   }
 
-  return [
-    ...blocks,
-    createFinishedStateBlock(message.createdAt, resolveFinishedAt(thread, message)),
-  ];
+  const finishedAt = resolveFinishedAt(thread, message, askUserHiddenWorkItemIds);
+  return {
+    id: `message:${message.id}:finished`,
+    createdAt: finishedAt,
+    source: "message" as const,
+    turnId: message.turnId,
+    blocks: [createFinishedStateBlock(message.createdAt, finishedAt)],
+  };
 }
 
 function shouldAppendFinishedState(
@@ -1109,11 +1381,35 @@ function shouldAppendFinishedState(
 function resolveFinishedAt(
   thread: OrchestrationThread,
   message: OrchestrationThread["messages"][number],
+  askUserHiddenWorkItemIds: ReadonlySet<string>,
 ) {
-  if (thread.latestTurn?.turnId === message.turnId && thread.latestTurn.state === "completed") {
-    return thread.latestTurn.completedAt ?? message.updatedAt;
-  }
-  return message.updatedAt;
+  const baseFinishedAt =
+    thread.latestTurn?.turnId === message.turnId && thread.latestTurn.state === "completed"
+      ? (thread.latestTurn.completedAt ?? message.updatedAt)
+      : message.updatedAt;
+
+  const nextMessageCreatedAt = thread.messages
+    .filter((candidate) =>
+      candidate.id !== message.id
+      && candidate.createdAt.localeCompare(message.createdAt) > 0
+    )
+    .map((candidate) => candidate.createdAt)
+    .toSorted((left, right) => left.localeCompare(right))
+    .at(0);
+
+  const latestVisibleRelatedActivityAt = thread.activities
+    .filter((activity) =>
+      willActivityRenderInTranscript(activity, askUserHiddenWorkItemIds)
+      && activity.createdAt.localeCompare(baseFinishedAt) >= 0
+      && (!nextMessageCreatedAt || activity.createdAt.localeCompare(nextMessageCreatedAt) < 0)
+    )
+    .map((activity) => activity.createdAt)
+    .toSorted((left, right) => left.localeCompare(right))
+    .at(-1);
+
+  return latestVisibleRelatedActivityAt && latestVisibleRelatedActivityAt.localeCompare(baseFinishedAt) > 0
+    ? latestVisibleRelatedActivityAt
+    : baseFinishedAt;
 }
 
 function createFinishedStateBlock(startedAt: string, finishedAt: string): FinishedStateBlock {
@@ -1122,6 +1418,56 @@ function createFinishedStateBlock(startedAt: string, finishedAt: string): Finish
     startedAt,
     finishedAt,
   };
+}
+
+function resolveTranscriptFinishedAt(thread: OrchestrationThread, blocks: ReadonlyArray<TranscriptBlock>): string | null {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block?.type === "finished-state") {
+      return block.finishedAt;
+    }
+  }
+
+  if (thread.latestTurn?.state === "completed") {
+    return thread.latestTurn.completedAt
+      ?? thread.session?.updatedAt
+      ?? thread.updatedAt;
+  }
+
+  return null;
+}
+
+function finalizeRunningTranscriptBlocks(
+  blocks: ReadonlyArray<TranscriptBlock>,
+  finishedAt: string,
+): TranscriptBlock[] {
+  return blocks.map((block) => {
+    if (block.type === "tool-call" && block.status === "running") {
+      return {
+        ...block,
+        status: "done",
+      };
+    }
+
+    if (block.type === "work-group" && block.status === "running") {
+      const { pulseOriginAt: _pulseOriginAt, ...rest } = block;
+      return {
+        ...rest,
+        status: "done",
+        endedAt: finishedAt,
+        items: block.items.map((item) =>
+          item.status === "running"
+            ? {
+                ...item,
+                status: "done",
+              }
+            : item
+        ),
+      };
+    }
+
+    return block;
+  });
 }
 
 function isAssistantMessageEntry(entry: TimelineEntry) {
@@ -1145,21 +1491,26 @@ function appendFinishedStateToLatestTurnEntries(
     }
   }
   const targetEntry = targetIndex >= 0 ? entries[targetIndex] : null;
-  if (!targetEntry || targetEntry.blocks?.some((block) => block.type === "finished-state")) {
+  const hasFinishedStateEntry = entries.some((entry) =>
+    entry.turnId === latestTurn.turnId && (entry.blocks?.some((block) => block.type === "finished-state") ?? false)
+  );
+  if (!targetEntry || hasFinishedStateEntry) {
     return entries;
   }
 
   const nextEntries = entries.slice();
-  nextEntries[targetIndex] = {
-    ...targetEntry,
+  nextEntries.push({
+    id: `turn:${latestTurn.turnId}:finished`,
+    createdAt: latestTurn.completedAt ?? targetEntry.createdAt,
+    source: "message",
+    turnId: latestTurn.turnId,
     blocks: [
-      ...(targetEntry.blocks ?? []),
       createFinishedStateBlock(
         latestTurn.startedAt ?? targetEntry.createdAt,
         latestTurn.completedAt ?? targetEntry.createdAt,
       ),
     ],
-  };
+  });
   return nextEntries;
 }
 
@@ -1167,7 +1518,20 @@ export function threadToTranscriptBlocks(
   thread: OrchestrationThread,
   options: TranscriptBlockOptions = {},
 ): TranscriptBlock[] {
-  const resolvedUserInputsByRequestId = deriveResolvedUserInputsByRequestId(thread.activities);
+  const requestedUserInputQuestionsByRequestId = deriveRequestedUserInputQuestionsByRequestId(thread.activities);
+  const explicitResolvedUserInputsByRequestId = deriveResolvedUserInputsByRequestId(thread.activities);
+  const fallbackUserInputResolutions = deriveFallbackUserInputResolutions(
+    thread,
+    requestedUserInputQuestionsByRequestId,
+  );
+  const resolvedUserInputsByRequestId = new Map(explicitResolvedUserInputsByRequestId);
+  for (const [requestId, resolved] of fallbackUserInputResolutions.answersByRequestId) {
+    if (!resolvedUserInputsByRequestId.has(requestId)) {
+      resolvedUserInputsByRequestId.set(requestId, resolved);
+    }
+  }
+  const askUserHiddenWorkItemIds = deriveAskUserHiddenWorkItemIds(thread.activities);
+  const pendingUserInputOpen = hasOpenPendingUserInputRequest(thread.activities);
   const assistantBoundariesByTurnId = buildAssistantBoundaryMap(thread.activities);
   const checkpointsByAssistantMessageId = new Map(
     thread.checkpoints
@@ -1178,6 +1542,9 @@ export function threadToTranscriptBlocks(
   const entries: TimelineEntry[] = [];
 
   for (const message of thread.messages) {
+    if (fallbackUserInputResolutions.hiddenMessageIds.has(message.id)) {
+      continue;
+    }
     const text =
       message.attachments && message.attachments.length > 0 && message.text === IMAGE_ONLY_BOOTSTRAP_PROMPT
         ? ""
@@ -1220,19 +1587,13 @@ export function threadToTranscriptBlocks(
 
     if (message.role === "assistant") {
       const checkpoint = checkpointsByAssistantMessageId.get(message.id);
+      const finishedStateEntry = buildFinishedStateEntryForAssistantMessage(thread, message, askUserHiddenWorkItemIds);
       if (assistantEntries) {
         entries.push(...assistantEntries);
+        if (finishedStateEntry) {
+          entries.push(finishedStateEntry);
+        }
       } else if (checkpoint) {
-        entries.push({
-          id: `message:${message.id}`,
-          createdAt: message.createdAt,
-          source: "message",
-          turnId: message.turnId,
-          blocks: appendFinishedStateToAssistantBlocks(thread, blocks, message),
-        });
-        continue;
-      } else {
-        blocks = appendFinishedStateToAssistantBlocks(thread, blocks, message);
         entries.push({
           id: `message:${message.id}`,
           createdAt: message.createdAt,
@@ -1240,6 +1601,21 @@ export function threadToTranscriptBlocks(
           turnId: message.turnId,
           blocks,
         });
+        if (finishedStateEntry) {
+          entries.push(finishedStateEntry);
+        }
+        continue;
+      } else {
+        entries.push({
+          id: `message:${message.id}`,
+          createdAt: message.createdAt,
+          source: "message",
+          turnId: message.turnId,
+          blocks,
+        });
+        if (finishedStateEntry) {
+          entries.push(finishedStateEntry);
+        }
         continue;
       }
       continue;
@@ -1269,7 +1645,17 @@ export function threadToTranscriptBlocks(
     });
   }
 
+  entries.push(
+    ...buildUserInputAnswerTimelineEntries(
+      requestedUserInputQuestionsByRequestId,
+      resolvedUserInputsByRequestId,
+    ),
+  );
+
   for (const activity of thread.activities) {
+    if (shouldHideActivityFromTranscript(activity, askUserHiddenWorkItemIds)) {
+      continue;
+    }
     entries.push({
       id: `activity:${activity.id}`,
       createdAt: activity.createdAt,
@@ -1399,7 +1785,13 @@ export function threadToTranscriptBlocks(
     }
   }
 
-  if (thread.latestTurn?.state === "running" || thread.session?.status === "running") {
+  const transcriptFinishedAt = resolveTranscriptFinishedAt(thread, blocks);
+  if (transcriptFinishedAt) {
+    const finalizedBlocks = finalizeRunningTranscriptBlocks(blocks, transcriptFinishedAt);
+    blocks.splice(0, blocks.length, ...finalizedBlocks);
+  }
+
+  if (!pendingUserInputOpen && (thread.latestTurn?.state === "running" || thread.session?.status === "running")) {
     const startedAt =
       thread.latestTurn?.startedAt
       ?? thread.latestTurn?.requestedAt

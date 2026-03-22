@@ -11,6 +11,7 @@ import {
   type CSSProperties,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -35,7 +36,12 @@ import {
   toUploadImageAttachment,
   type ComposerImageAttachment,
 } from "./composerAttachments";
-import { resolvePendingUserInputAnswer } from "./pendingUserInput";
+import {
+  formatPendingUserInputAnswersAsPrompt,
+  resolvePendingUserInputAnswer,
+  resolvePendingUserInputShortcut,
+} from "./pendingUserInput";
+import { readClientPlatform, resolveDesktopWindowControlsInsetPx } from "./windowControls";
 import {
   hasNonCollapsedSelectionInsideElement,
   TranscriptRenderer,
@@ -78,11 +84,16 @@ interface PaneView {
   readonly pendingUserInput: ReturnType<ReturnType<typeof useConsoleData>["getPendingUserInputs"]>[number] | null;
   readonly pendingQuestionIndex: number;
   readonly pendingQuestion: ReturnType<ReturnType<typeof useConsoleData>["getPendingUserInputs"]>[number]["questions"][number] | null;
+  readonly pendingQuestionOptionIndex: number | null;
   readonly draftAnswers: Record<string, string>;
   readonly cwd: string | null;
   readonly interactionMode: "default" | "plan";
   readonly provider: ProviderKind;
   readonly model: string;
+}
+
+interface PaneScrollState {
+  readonly offsetFromBottom: number;
 }
 
 interface ThreadStatusDescriptor {
@@ -100,6 +111,13 @@ interface ThreadContextMenuState {
   readonly threadId: OrchestrationThread["id"];
   readonly x: number;
   readonly y: number;
+}
+
+interface DuplicateProjectMatch {
+  readonly projectId: OrchestrationProject["id"];
+  readonly title: string;
+  readonly workspaceRoot: string;
+  readonly isArchived: boolean;
 }
 
 interface ThreadSelectionSummary {
@@ -123,6 +141,19 @@ function arePaletteScopeBoundsEqual(
     && left?.left === right?.left
     && left?.width === right?.width
     && left?.height === right?.height;
+}
+
+function measurePaletteScopeBounds(element: HTMLElement | null): CommandPaletteScopeBounds | null {
+  if (!element) {
+    return null;
+  }
+  const rect = element.getBoundingClientRect();
+  return {
+    top: Math.max(0, Math.round(rect.top)),
+    left: Math.max(0, Math.round(rect.left)),
+    width: Math.max(0, Math.round(rect.width)),
+    height: Math.max(0, Math.round(rect.height)),
+  };
 }
 
 function isDesktopBridgeAvailable() {
@@ -163,6 +194,37 @@ function normalizeProjectPathInput(value: string) {
     return trimmed.slice(1, -1).trim();
   }
   return trimmed;
+}
+
+export function normalizeProjectWorkspaceRootForComparison(value: string) {
+  const normalized = normalizeProjectPathInput(value).replace(/\//g, "\\").replace(/[\\]+$/, "");
+  return normalized.toLowerCase();
+}
+
+export function findDuplicateProjectForWorkspaceRoot(input: {
+  readonly projects: ReadonlyArray<OrchestrationProject>;
+  readonly archivedProjectIds: ReadonlySet<OrchestrationProject["id"]>;
+  readonly workspaceRoot: string;
+}): DuplicateProjectMatch | null {
+  const comparisonKey = normalizeProjectWorkspaceRootForComparison(input.workspaceRoot);
+  if (comparisonKey.length === 0) {
+    return null;
+  }
+  const matches = input.projects.filter(
+    (project) =>
+      project.deletedAt === null
+      && normalizeProjectWorkspaceRootForComparison(project.workspaceRoot) === comparisonKey,
+  );
+  if (matches.length === 0) {
+    return null;
+  }
+  const preferredMatch = matches.find((project) => !input.archivedProjectIds.has(project.id)) ?? matches[0]!;
+  return {
+    projectId: preferredMatch.id,
+    title: preferredMatch.title,
+    workspaceRoot: preferredMatch.workspaceRoot,
+    isArchived: input.archivedProjectIds.has(preferredMatch.id),
+  };
 }
 
 function deriveProjectTitleFromPath(workspaceRoot: string) {
@@ -564,14 +626,23 @@ export function shouldRetainPendingPromptSend(input: {
 export function App() {
   const isDesktop = useMemo(isDesktopBridgeAvailable, []);
   const consoleData = useConsoleData();
+  const [pendingThreadByPaneId, setPendingThreadByPaneId] = useState<
+    Record<string, { readonly threadId: OrchestrationThread["id"]; readonly pendingThread: PendingConsoleThread }>
+  >({});
   const projects = useMemo(
     () => consoleData.snapshot?.projects ?? EMPTY_PROJECTS,
     [consoleData.snapshot?.projects],
+  );
+  const pendingThreadIds = useMemo(
+    () => new Set(Object.values(pendingThreadByPaneId).map((entry) => entry.threadId)),
+    [pendingThreadByPaneId],
   );
   const workspace = useConsoleProjectLayouts({
     threads: consoleData.threads,
     projects,
     preferredThreadId: consoleData.activeThreadId,
+    pendingThreadIds,
+    hydrated: consoleData.snapshot !== null,
   });
 
   const getPendingUserInputs = consoleData.getPendingUserInputs;
@@ -591,6 +662,7 @@ export function App() {
   const stopSession = consoleData.stopSession;
 
   const [nowIso, setNowIso] = useState(() => new Date().toISOString());
+  const [animationNowIso, setAnimationNowIso] = useState(() => new Date().toISOString());
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
@@ -599,9 +671,7 @@ export function App() {
   const [pendingPromptSendStartedAtByThreadId, setPendingPromptSendStartedAtByThreadId] = useState<Record<string, string>>({});
   const [composerAttachmentsByPaneId, setComposerAttachmentsByPaneId] = useState<Record<string, ReadonlyArray<ComposerImageAttachment>>>({});
   const [composerDraftByPaneId, setComposerDraftByPaneId] = useState<Record<string, string>>(() => readPersistedPaneDrafts());
-  const [pendingThreadByPaneId, setPendingThreadByPaneId] = useState<
-    Record<string, { readonly threadId: OrchestrationThread["id"]; readonly pendingThread: PendingConsoleThread }>
-  >({});
+  const [paneScrollStateByPaneId, setPaneScrollStateByPaneId] = useState<Record<string, PaneScrollState>>({});
   const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<Record<string, Record<string, string>>>({});
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] = useState<Record<string, number>>({});
   const [pendingDraftPaneIds, setPendingDraftPaneIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -615,6 +685,7 @@ export function App() {
   const [projectModalOpen, setProjectModalOpen] = useState(false);
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [projectModalError, setProjectModalError] = useState<string | null>(null);
+  const [duplicateProjectConfirm, setDuplicateProjectConfirm] = useState<DuplicateProjectMatch | null>(null);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [pendingProjectActivationId, setPendingProjectActivationId] = useState<OrchestrationProject["id"] | null>(null);
   const [archivedProjectIds, setArchivedProjectIds] = useState<ReadonlySet<OrchestrationProject["id"]>>(
@@ -635,12 +706,19 @@ export function App() {
   const hasInitiallyFocusedPromptRef = useRef(false);
   const composerAttachmentsRef = useRef(composerAttachmentsByPaneId);
   const projectPathInputRef = useRef<HTMLInputElement | null>(null);
+  const duplicateProjectConfirmPrimaryActionRef = useRef<HTMLButtonElement | null>(null);
   const manageProjectSelectAllRef = useRef<HTMLInputElement | null>(null);
   const manageProjectTableShellRef = useRef<HTMLDivElement | null>(null);
   const manageProjectCloseButtonRef = useRef<HTMLButtonElement | null>(null);
   const lastManagedThreadRowSelectionIdRef = useRef<OrchestrationThread["id"] | null>(null);
   const pointerManagedThreadSelectionAnchorIdRef = useRef<OrchestrationThread["id"] | null>(null);
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
+  const hasAnimatedTranscript = useMemo(
+    () =>
+      Object.keys(pendingPromptSendStartedAtByThreadId).length > 0
+      || consoleData.threads.some((thread) => isThreadTurnRunning(thread.id)),
+    [consoleData.threads, isThreadTurnRunning, pendingPromptSendStartedAtByThreadId],
+  );
 
   useEffect(() => {
     const handle = window.setInterval(() => {
@@ -648,6 +726,17 @@ export function App() {
     }, 1000);
     return () => window.clearInterval(handle);
   }, []);
+
+  useEffect(() => {
+    if (!hasAnimatedTranscript) {
+      setAnimationNowIso(new Date().toISOString());
+      return;
+    }
+    const handle = window.setInterval(() => {
+      setAnimationNowIso(new Date().toISOString());
+    }, 120);
+    return () => window.clearInterval(handle);
+  }, [hasAnimatedTranscript]);
 
   useEffect(() => {
     persistPaneDrafts(composerDraftByPaneId);
@@ -668,6 +757,15 @@ export function App() {
     focusInput();
     requestAnimationFrame(focusInput);
   }, [projectModalOpen]);
+
+  useEffect(() => {
+    if (!duplicateProjectConfirm) {
+      return;
+    }
+    const focusAction = () => duplicateProjectConfirmPrimaryActionRef.current?.focus();
+    focusAction();
+    requestAnimationFrame(focusAction);
+  }, [duplicateProjectConfirm]);
 
   const orderedThreadsByProjectId = useMemo(() => {
     const map = new Map<string, OrchestrationThread[]>();
@@ -733,6 +831,10 @@ export function App() {
       return Object.keys(next).length === Object.keys(existing).length ? existing : next;
     });
     setPendingThreadByPaneId((existing) => {
+      const next = Object.fromEntries(Object.entries(existing).filter(([paneId]) => livePaneIdSet.has(paneId)));
+      return Object.keys(next).length === Object.keys(existing).length ? existing : next;
+    });
+    setPaneScrollStateByPaneId((existing) => {
       const next = Object.fromEntries(Object.entries(existing).filter(([paneId]) => livePaneIdSet.has(paneId)));
       return Object.keys(next).length === Object.keys(existing).length ? existing : next;
     });
@@ -879,6 +981,7 @@ export function App() {
 
   const hasBlockingModal = projectModalOpen
     || managedProjectId !== null
+    || duplicateProjectConfirm !== null
     || projectArchiveConfirmId !== null
     || threadDeleteConfirmId !== null;
 
@@ -1049,6 +1152,21 @@ export function App() {
           ? pendingUserInputQuestionIndexByRequestId[pendingUserInput.requestId] ?? 0
           : 0;
         const pendingQuestion = pendingUserInput?.questions[pendingQuestionIndex] ?? null;
+        const pendingQuestionDraftAnswer = pendingQuestion
+          ? (
+              pendingUserInputAnswersByRequestId[pendingUserInput?.requestId ?? ""]?.[pendingQuestion.id]
+                ?? null
+            )
+          : null;
+        const pendingQuestionDraft = composerDraftByPaneId[pane.id] ?? "";
+        const pendingQuestionOptionShortcut = pendingQuestion
+          ? resolvePendingUserInputShortcut(pendingQuestionDraft, pendingQuestion.options)
+          : null;
+        const pendingQuestionAnsweredOptionIndex = pendingQuestion && pendingQuestionDraftAnswer
+          ? pendingQuestion.options.findIndex((option) => option.label === pendingQuestionDraftAnswer)
+          : -1;
+        const pendingQuestionOptionIndex = pendingQuestionOptionShortcut?.optionIndex
+          ?? (pendingQuestionAnsweredOptionIndex >= 0 ? pendingQuestionAnsweredOptionIndex : null);
         const provider: ProviderKind = thread?.provider
           ?? pendingThread?.provider
           ?? (pane.kind === "draft" ? pane.setup.selectedProvider : "codex");
@@ -1056,7 +1174,7 @@ export function App() {
           ?? pendingThread?.model
           ?? (pane.kind === "draft" ? pane.setup.selectedModel : DEFAULT_MODEL_BY_PROVIDER[provider]);
         const effectiveNow = thread && (isThreadTurnRunning(thread.id) || pendingPromptSendStartedAtByThreadId[thread.id])
-          ? nowIso
+          ? animationNowIso
           : undefined;
         const blocks = thread
           ? threadToTranscriptBlocks(thread, {
@@ -1094,6 +1212,7 @@ export function App() {
           pendingUserInput,
           pendingQuestionIndex,
           pendingQuestion,
+          pendingQuestionOptionIndex,
           draftAnswers: pendingUserInput ? (pendingUserInputAnswersByRequestId[pendingUserInput.requestId] ?? {}) : {},
           cwd: thread
             ? resolveThreadCwd(thread, projects)
@@ -1108,11 +1227,12 @@ export function App() {
     activeTab,
     attachmentPreviewBaseUrl,
     composerAttachmentsByPaneId,
+    composerDraftByPaneId,
     consoleData.threads,
     getPendingUserInputs,
     getThreadEvents,
     isThreadTurnRunning,
-    nowIso,
+    animationNowIso,
     pendingPromptSendStartedAtByThreadId,
     pendingThreadByPaneId,
     pendingUserInputAnswersByRequestId,
@@ -1127,10 +1247,15 @@ export function App() {
   );
 
   const openPalette = useCallback(() => {
+    setPaletteScopeBounds(
+      activePaneView?.thread
+        ? measurePaletteScopeBounds(paneElementRefs.current[activePaneView.pane.id] ?? null)
+        : null,
+    );
     setPaletteOpen(true);
     setPaletteQuery("");
     setSelectedCommandIndex(0);
-  }, []);
+  }, [activePaneView]);
 
   const closePalette = useCallback(() => {
     setPaletteOpen(false);
@@ -1539,6 +1664,7 @@ export function App() {
   const handleOpenProjectModal = useCallback(() => {
     setProjectModalError(null);
     setProjectPathDraft("");
+    setDuplicateProjectConfirm(null);
     setProjectModalOpen(true);
   }, []);
 
@@ -1548,6 +1674,7 @@ export function App() {
     }
     setProjectModalOpen(false);
     setProjectModalError(null);
+    setDuplicateProjectConfirm(null);
   }, [isCreatingProject]);
 
   const handleBrowseProjectFolder = useCallback(async () => {
@@ -1559,21 +1686,17 @@ export function App() {
     setProjectModalError(null);
   }, []);
 
-  const handleCreateProject = useCallback(async () => {
-    const workspaceRoot = normalizeProjectPathInput(projectPathDraft);
-    if (workspaceRoot.length === 0) {
-      setProjectModalError("Enter a project path.");
+  const handleCloseDuplicateProjectConfirm = useCallback(() => {
+    if (isCreatingProject) {
       return;
     }
-    const duplicateProject = projects.find(
-      (project) => project.workspaceRoot.trim().toLowerCase() === workspaceRoot.toLowerCase(),
-    );
-    if (duplicateProject) {
-      setProjectModalError("That project is already in the sidebar.");
-      return;
-    }
+    setDuplicateProjectConfirm(null);
+  }, [isCreatingProject]);
+
+  const createProjectFromWorkspaceRoot = useCallback(async (workspaceRoot: string) => {
     const title = deriveProjectTitleFromPath(workspaceRoot);
     if (title.length === 0) {
+      setDuplicateProjectConfirm(null);
       setProjectModalError("Enter a valid project path.");
       return;
     }
@@ -1584,13 +1707,59 @@ export function App() {
       setPendingProjectActivationId(created.projectId);
       setProjectModalOpen(false);
       setProjectModalError(null);
+      setDuplicateProjectConfirm(null);
       setProjectPathDraft("");
     } catch (error) {
+      setDuplicateProjectConfirm(null);
       setProjectModalError(error instanceof Error ? error.message : "Failed to add project.");
     } finally {
       setIsCreatingProject(false);
     }
-  }, [createProject, projectPathDraft, projects]);
+  }, [createProject]);
+
+  const handleCreateProject = useCallback(async () => {
+    const workspaceRoot = normalizeProjectPathInput(projectPathDraft);
+    if (workspaceRoot.length === 0) {
+      setProjectModalError("Enter a project path.");
+      return;
+    }
+    const duplicateProject = findDuplicateProjectForWorkspaceRoot({
+      projects,
+      archivedProjectIds,
+      workspaceRoot,
+    });
+    if (duplicateProject) {
+      setProjectModalError(null);
+      setDuplicateProjectConfirm(duplicateProject);
+      return;
+    }
+    await createProjectFromWorkspaceRoot(workspaceRoot);
+  }, [archivedProjectIds, createProjectFromWorkspaceRoot, projectPathDraft, projects]);
+
+  const handleSelectDuplicateProject = useCallback(() => {
+    if (!duplicateProjectConfirm) {
+      return;
+    }
+    if (duplicateProjectConfirm.isArchived) {
+      setArchivedProjectIds((existing) => {
+        const next = new Set(existing);
+        next.delete(duplicateProjectConfirm.projectId);
+        return next;
+      });
+    }
+    setPendingProjectActivationId(duplicateProjectConfirm.projectId);
+    setDuplicateProjectConfirm(null);
+    setProjectModalOpen(false);
+    setProjectModalError(null);
+    setProjectPathDraft("");
+  }, [duplicateProjectConfirm]);
+
+  const handleCreateDuplicateProject = useCallback(async () => {
+    if (!duplicateProjectConfirm) {
+      return;
+    }
+    await createProjectFromWorkspaceRoot(normalizeProjectPathInput(projectPathDraft));
+  }, [createProjectFromWorkspaceRoot, duplicateProjectConfirm, projectPathDraft]);
 
   const handleSubmit = useCallback(async (paneView: PaneView, value: string) => {
     const attachmentSnapshot = [...(composerAttachmentsRef.current[paneView.pane.id] ?? [])];
@@ -1627,11 +1796,16 @@ export function App() {
           return;
         }
 
-        await respondToUserInput(paneView.threadId, paneView.pendingUserInput.requestId, nextAnswers);
         setPendingUserInputAnswersByRequestId((existing) => ({
           ...existing,
           [paneView.pendingUserInput!.requestId]: nextAnswers,
         }));
+        await respondToUserInput(
+          paneView.threadId,
+          paneView.pendingUserInput.requestId,
+          nextAnswers,
+          formatPendingUserInputAnswersAsPrompt(paneView.pendingUserInput.questions, nextAnswers) ?? undefined,
+        );
         setSubmitError(null);
         return;
       }
@@ -1958,7 +2132,7 @@ export function App() {
     setSelectedCommandIndex((current) => Math.min(current, Math.max(filteredCommands.length - 1, 0)));
   }, [filteredCommands.length]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!paletteOpen || !activePaneView?.thread) {
       setPaletteScopeBounds((current) => current === null ? current : null);
       return;
@@ -1966,23 +2140,11 @@ export function App() {
 
     const paneId = activePaneView.pane.id;
     const updateBounds = () => {
-      const element = paneElementRefs.current[paneId];
-      if (!element) {
-        setPaletteScopeBounds((current) => current === null ? current : null);
-        return;
-      }
-
-      const rect = element.getBoundingClientRect();
-      const nextBounds: CommandPaletteScopeBounds = {
-        top: Math.max(0, Math.round(rect.top)),
-        left: Math.max(0, Math.round(rect.left)),
-        width: Math.max(0, Math.round(rect.width)),
-        height: Math.max(0, Math.round(rect.height)),
-      };
+      const nextBounds = measurePaletteScopeBounds(paneElementRefs.current[paneId] ?? null);
       setPaletteScopeBounds((current) => arePaletteScopeBoundsEqual(current, nextBounds) ? current : nextBounds);
     };
 
-    const animationFrame = requestAnimationFrame(updateBounds);
+    updateBounds();
     const element = paneElementRefs.current[paneId];
     const resizeObserver = typeof ResizeObserver !== "undefined" && element
       ? new ResizeObserver(updateBounds)
@@ -1993,7 +2155,6 @@ export function App() {
     window.addEventListener("resize", updateBounds);
 
     return () => {
-      cancelAnimationFrame(animationFrame);
       resizeObserver?.disconnect();
       window.removeEventListener("resize", updateBounds);
     };
@@ -2080,7 +2241,65 @@ export function App() {
     return `${paneView.project.title} · ${paneView.project.workspaceRoot}`;
   }, [submitError]);
 
+  const renderPaneFooter = useCallback((paneView: PaneView) => {
+    if (paneView.isActive && submitError) {
+      return <span className="status-line__segment status-line__segment--detail">{submitError}</span>;
+    }
+
+    if (paneView.setup) {
+      return (
+        <>
+          <span className="status-line__segment">Draft</span>
+          <span className="status-line__separator">·</span>
+          <span className="status-line__segment">{paneView.setup.selectedProvider}</span>
+          <span className="status-line__separator">·</span>
+          <span className="status-line__segment">{paneView.setup.selectedModel}</span>
+          <span className="status-line__separator">·</span>
+          <span className="status-line__segment status-line__segment--detail">
+            {paneView.cwd ?? paneView.project.workspaceRoot}
+          </span>
+        </>
+      );
+    }
+
+    if (paneView.thread) {
+      return (
+        <>
+          <span
+            className="status-line__segment status-line__segment--title"
+            title={paneView.thread.title}
+          >
+            {paneView.thread.title}
+          </span>
+          <span className="status-line__separator">·</span>
+          <span className="status-line__segment">{paneView.thread.provider}</span>
+          <span className="status-line__separator">·</span>
+          <span className="status-line__segment">{paneView.model}</span>
+          <span className="status-line__separator">·</span>
+          <span
+            className="status-line__segment status-line__segment--detail"
+            title={paneView.cwd ?? paneView.project.workspaceRoot}
+          >
+            {paneView.cwd ?? paneView.project.workspaceRoot}
+          </span>
+        </>
+      );
+    }
+
+    return <span className="status-line__segment status-line__segment--detail">{paneView.project.title} · {paneView.project.workspaceRoot}</span>;
+  }, [submitError]);
+
   const shellClassName = `console-shell${isDesktop ? " console-shell--desktop" : ""}`;
+  const desktopWindowControlsInsetPx = useMemo(
+    () => resolveDesktopWindowControlsInsetPx(isDesktop, readClientPlatform()),
+    [isDesktop],
+  );
+  const topbarStyle = useMemo(
+    () => ({
+      "--project-topbar-window-controls-inset": `${desktopWindowControlsInsetPx}px`,
+    }) as CSSProperties,
+    [desktopWindowControlsInsetPx],
+  );
   const activePaneGridClassName = activeTab
     ? `project-pane-grid project-pane-grid--${Math.min(Math.max(activeTab.paneIds.length, 1), 6)}`
     : "project-pane-grid project-pane-grid--1";
@@ -2100,7 +2319,7 @@ export function App() {
     ? consoleData.threads.find((thread) => thread.id === threadDeleteConfirmId && thread.deletedAt === null) ?? null
     : null;
   const topbar = (
-    <div className="project-topbar">
+    <div className="project-topbar" style={topbarStyle}>
       <div className="project-topbar__sidebarSpacer" />
       {workspace.activeProject && activeLayout ? (
         <div className="project-tabs">
@@ -2136,6 +2355,7 @@ export function App() {
       ) : (
         <div className="project-tabs project-tabs--empty" />
       )}
+      <div className="project-topbar__windowControlsSpacer" aria-hidden="true" />
     </div>
   );
 
@@ -2163,8 +2383,9 @@ export function App() {
         <div className="project-workspace">
           <aside className="project-sidebar">
             <div className="project-sidebar__topAction">
-              <button type="button" className="project-sidebar__addProject" onClick={handleOpenProjectModal}>
-                Add project...
+              <button type="button" className="project-sidebar__addProject" onClick={handleOpenProjectModal} aria-label="Add project">
+                <span className="project-sidebar__addProjectGlyph" aria-hidden="true">+</span>
+                <span className="project-sidebar__addProjectLabel">Add project...</span>
               </button>
             </div>
             <div className="project-tree" role="tree" aria-label="Projects">
@@ -2363,12 +2584,27 @@ export function App() {
                                     pendingUserInputHighlight: {
                                       requestId: paneView.pendingUserInput.requestId,
                                       questionIndex: paneView.pendingQuestionIndex,
+                                      ...(paneView.pendingQuestionOptionIndex !== null
+                                        ? { optionIndex: paneView.pendingQuestionOptionIndex }
+                                        : {}),
                                     },
                                   }
                                 : {})}
                             onAddImageFiles={(files) => handleAddImageFilesForPane(paneView.pane.id, files)}
                             onDraftChange={(value) => setComposerDraftForPane(paneView.pane.id, value)}
                             onRemoveImage={(attachmentId) => handleRemoveImageForPane(paneView.pane.id, attachmentId)}
+                            initialScrollOffsetFromBottom={paneScrollStateByPaneId[paneView.pane.id]?.offsetFromBottom ?? null}
+                            onScrollOffsetFromBottomChange={(offsetFromBottom) =>
+                              setPaneScrollStateByPaneId((existing) => {
+                                const current = existing[paneView.pane.id];
+                                if (current?.offsetFromBottom === offsetFromBottom) {
+                                  return existing;
+                                }
+                                return {
+                                  ...existing,
+                                  [paneView.pane.id]: { offsetFromBottom },
+                                };
+                              })}
                             resolveInlineDiff={(lookup) =>
                               getTurnDiff({
                                 threadId: lookup.threadId as ThreadId,
@@ -2385,7 +2621,9 @@ export function App() {
                             }
                           />
                         </div>
-                        <footer className="status-line">{getPaneFooterText(paneView)}</footer>
+                        <footer className="status-line" title={getPaneFooterText(paneView)}>
+                          {renderPaneFooter(paneView)}
+                        </footer>
                     </section>
                   );
                 })}
@@ -2771,6 +3009,9 @@ export function App() {
                   value={projectPathDraft}
                   onChange={(event) => {
                     setProjectPathDraft(event.target.value);
+                    if (duplicateProjectConfirm) {
+                      setDuplicateProjectConfirm(null);
+                    }
                     if (projectModalError) {
                       setProjectModalError(null);
                     }
@@ -2803,6 +3044,61 @@ export function App() {
               </button>
               <button type="button" className="project-modal__action project-modal__action--primary" onClick={() => void handleCreateProject()} disabled={isCreatingProject}>
                 {isCreatingProject ? "Adding..." : "OK"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {duplicateProjectConfirm ? (
+        <div className="project-modal-overlay" role="presentation" onMouseDown={handleCloseDuplicateProjectConfirm}>
+          <section
+            className="project-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Project already exists"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="project-modal__title">Project path already exists</div>
+            <div className="project-modal__body project-modal__body--stacked">
+              <div className="project-modal__message">
+                {duplicateProjectConfirm.isArchived
+                  ? "This path already belongs to an archived project in the app."
+                  : "This path already belongs to a project in the app."}
+              </div>
+              <div className="project-modal__pathPreview" title={duplicateProjectConfirm.workspaceRoot}>
+                {duplicateProjectConfirm.workspaceRoot}
+              </div>
+              <div className="project-modal__message project-modal__message--muted">
+                {duplicateProjectConfirm.isArchived
+                  ? `Selecting "${duplicateProjectConfirm.title}" will undraft it and bring it back into the sidebar.`
+                  : `Selecting "${duplicateProjectConfirm.title}" will focus that existing project instead of creating another one.`}
+              </div>
+            </div>
+            <div className="project-modal__actions">
+              <button
+                ref={duplicateProjectConfirmPrimaryActionRef}
+                type="button"
+                className="project-modal__action project-modal__action--primary"
+                onClick={handleSelectDuplicateProject}
+                disabled={isCreatingProject}
+              >
+                {duplicateProjectConfirm.isArchived ? "Undraft and select existing project" : "Select existing project"}
+              </button>
+              <button
+                type="button"
+                className="project-modal__action"
+                onClick={() => void handleCreateDuplicateProject()}
+                disabled={isCreatingProject}
+              >
+                {isCreatingProject ? "Adding..." : "Create new project with this path"}
+              </button>
+              <button
+                type="button"
+                className="project-modal__action project-modal__action--secondary"
+                onClick={handleCloseDuplicateProjectConfirm}
+                disabled={isCreatingProject}
+              >
+                Cancel
               </button>
             </div>
           </section>

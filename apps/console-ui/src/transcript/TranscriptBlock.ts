@@ -11,6 +11,7 @@ import { highlightCodeFence } from "./codeFenceHighlight";
 // ── Line-level decoration kinds (reused from the prototype) ─────────
 
 export type LineKind =
+  | "blockGap"
   | "body"
   | "reasoningSeparator"
   | "reasoningSummary"
@@ -953,11 +954,9 @@ function formatWorkGroupFooter(block: WorkGroupBlock) {
 }
 
 function finishedWorkGroupFooterLines(block: WorkGroupBlock): AnnotatedLine[] {
-  const elapsedLabel = formatElapsedDuration(Date.parse(block.endedAt) - Date.parse(block.startedAt));
   return [
-    { text: "", kind: "meta" },
     {
-      text: `Finished in ${elapsedLabel}`,
+      text: capitalizeInlineLabel(formatWorkGroupFooter(block)),
       kind: "workingLine",
     },
   ];
@@ -1393,6 +1392,21 @@ function summarizeCheckpointFiles(
   );
 }
 
+function formatUserInputQuestionLine(header: string, question: string) {
+  return header.trim().toLowerCase() === "question" ? question : `${header}: ${question}`;
+}
+
+function formatUserInputOptionLine(
+  optionIndex: number,
+  label: string,
+  description: string,
+) {
+  const normalizedLabel = label.trim().toLowerCase();
+  const normalizedDescription = description.trim().toLowerCase();
+  const detail = normalizedLabel === normalizedDescription ? label : `${label}: ${description}`;
+  return `      ${optionIndex + 1}  ${detail}`;
+}
+
 export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
   switch (block.type) {
     case "user-message":
@@ -1473,17 +1487,11 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
     }
 
     case "user-input-request": {
-      const lines: AnnotatedLine[] = [
-        {
-          text: block.resolved ? "[✓] User input answered" : "[?] User input requested",
-          kind: "approvalPrompt",
-          ...(block.resolved ? { extraClasses: ["cm-line-userInputResolved"] } : {}),
-        },
-      ];
+      const lines: AnnotatedLine[] = [];
       block.questions.forEach((question, questionIndex) => {
         const answer = question.id ? block.answers?.[question.id] : undefined;
         lines.push({
-          text: `    ${question.header}: ${question.question}`,
+          text: `    ${formatUserInputQuestionLine(question.header, question.question)}`,
           kind: "approvalPrompt",
           extraClasses: [
             "cm-line-userInputQuestion",
@@ -1497,7 +1505,7 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
         question.options.forEach((option, optionIndex) => {
           lines.push(
             {
-              text: `      ${optionIndex + 1}  ${option.label}: ${option.description}`,
+              text: formatUserInputOptionLine(optionIndex, option.label, option.description),
               kind: "approvalPrompt",
               extraClasses: [
                 "cm-line-userInputOption",
@@ -1511,16 +1519,9 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
                 questionIndex,
                 optionIndex,
               },
-            },
-          );
+              },
+            );
         });
-        if (block.resolved && answer && !question.options.some((option) => option.label === answer)) {
-          lines.push(
-            ...userPromptToLines(
-              block.questions.length > 1 ? `${question.header}: ${answer}` : answer,
-            ),
-          );
-        }
       });
       return lines;
     }

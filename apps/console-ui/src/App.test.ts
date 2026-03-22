@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import { EventId } from "@t3tools/contracts";
 
 import {
+  findDuplicateProjectForWorkspaceRoot,
   findReusableDraftPaneForThreadOpen,
   formatManageThreadTimestamp,
   isPaletteToggleShortcut,
+  normalizeProjectWorkspaceRootForComparison,
   parsePersistedArchivedProjectIds,
   resolveManagedThreadRowSelection,
   summarizeThreadSelection,
@@ -201,6 +203,48 @@ describe("parsePersistedArchivedProjectIds", () => {
 
   it("ignores malformed archived project storage", () => {
     expect(parsePersistedArchivedProjectIds("{not-json")).toEqual(new Set());
+  });
+});
+
+describe("normalizeProjectWorkspaceRootForComparison", () => {
+  it("normalizes slashes, trailing separators, quotes, and case", () => {
+    expect(normalizeProjectWorkspaceRootForComparison("\"C:/Projects/Repo\\\\\"")).toBe("c:\\projects\\repo");
+  });
+});
+
+describe("findDuplicateProjectForWorkspaceRoot", () => {
+  it("finds an existing matching project by normalized path", () => {
+    const snapshot = buildTestSnapshot();
+    const match = findDuplicateProjectForWorkspaceRoot({
+      projects: snapshot.projects,
+      archivedProjectIds: new Set(),
+      workspaceRoot: "c:/projects/t3code-copilot/",
+    });
+
+    expect(match).toEqual({
+      projectId: snapshot.projects[0]!.id,
+      title: snapshot.projects[0]!.title,
+      workspaceRoot: snapshot.projects[0]!.workspaceRoot,
+      isArchived: false,
+    });
+  });
+
+  it("prefers a visible project over an archived duplicate", () => {
+    const snapshot = buildTestSnapshot();
+    const visible = snapshot.projects[0]!;
+    const archived = {
+      ...visible,
+      id: "project:archived" as typeof visible.id,
+    };
+
+    const match = findDuplicateProjectForWorkspaceRoot({
+      projects: [archived, visible],
+      archivedProjectIds: new Set([archived.id]),
+      workspaceRoot: visible.workspaceRoot,
+    });
+
+    expect(match?.projectId).toBe(visible.id);
+    expect(match?.isArchived).toBe(false);
   });
 });
 

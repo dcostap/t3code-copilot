@@ -135,6 +135,7 @@ interface TranscriptRendererProps {
   readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
   readonly cwd?: string | null;
   readonly interactionMode?: "default" | "plan";
+  readonly initialScrollOffsetFromBottom?: number | null;
   readonly promptFocusDisabled?: boolean;
   readonly promptInputDisabled?: boolean;
   readonly pendingUserInputHighlight?: {
@@ -146,6 +147,7 @@ interface TranscriptRendererProps {
   onAddImageFiles?(files: ReadonlyArray<File>): void;
   onDraftChange?(value: string): void;
   onRemoveImage?(attachmentId: string): void;
+  onScrollOffsetFromBottomChange?(offsetFromBottom: number): void;
   resolveInlineDiff?(lookup: InlineDiffLookup): Promise<string | null>;
   onSubmit?(value: string): Promise<void> | void;
 }
@@ -1357,7 +1359,7 @@ function trimBlockBoundarySpacerLines(lines: ReadonlyArray<AnnotatedLine>) {
   return lines.slice(start, end);
 }
 
-function flattenBlocks(
+export function flattenBlocks(
   blocks: ReadonlyArray<TranscriptBlock>,
   pendingUserInputHighlight?: {
     readonly requestId: string;
@@ -1374,7 +1376,10 @@ function flattenBlocks(
 
   for (const block of blocks) {
     const rawBlockLines = trimBlockBoundarySpacerLines(blockToLines(block));
-    const blockLines = rawBlockLines.map((line, lineIndex) => {
+    if (seenVisibleBlock && rawBlockLines.length > 0) {
+      allLines.push({ text: "", kind: "blockGap" });
+    }
+    const blockLines = rawBlockLines.map((line) => {
       let nextLine = line;
 
       const userInputRef = nextLine.userInputRef;
@@ -1394,10 +1399,6 @@ function flattenBlocks(
         ) {
           extraClasses.push("cm-line-userInputActiveOption");
         }
-      }
-
-      if (seenVisibleBlock && lineIndex === 0) {
-        extraClasses.push("cm-line-blockStart");
       }
 
       return extraClasses.length === 0 ? nextLine : Object.assign({}, nextLine, { extraClasses });
@@ -1769,8 +1770,12 @@ function buildEditorTheme() {
         padding: "0",
         whiteSpace: "pre-wrap",
       },
-      ".cm-line-blockStart": {
-        paddingTop: "1.8em",
+      ".cm-line-blockGap": {
+        height: "0",
+        minHeight: "0",
+        lineHeight: "0",
+        fontSize: "0",
+        paddingTop: "1.8rem",
       },
       ".cm-line-meta": { color: "#5f676f" },
       ".cm-line-body": { color: "#cfd4d9" },
@@ -2046,9 +2051,6 @@ function buildEditorTheme() {
       ".cm-line-userMessageStart::before": {
         color: "#8e959d",
       },
-      ".cm-line-userMessageStart.cm-line-blockStart::before": {
-        top: "1.7em",
-      },
       ".cm-line-promptSeparator": {
         position: "relative",
         height: "0",
@@ -2103,15 +2105,15 @@ function buildEditorTheme() {
       ".cm-line-divider": { color: "#40464d" },
       ".cm-line-status": { color: "#6c737b", fontStyle: "italic" },
       ".cm-line-approvalPrompt": {
-        color: "#e8a84c",
+        color: "#aab2bb",
         overflowWrap: "anywhere",
       },
       ".cm-line-userInputQuestion": {
-        color: "#cfa764",
+        color: "#c5ccd4",
         overflowWrap: "anywhere",
       },
       ".cm-line-userInputOption": {
-        color: "#d1a65f",
+        color: "#aab2bb",
         overflowWrap: "anywhere",
       },
       ".cm-line-userInputResolved": { opacity: "0.54" },
@@ -2120,15 +2122,15 @@ function buildEditorTheme() {
         opacity: "0.72",
       },
       ".cm-line-userInputAnsweredOption": {
-        color: "#eed3a0",
-        backgroundColor: "rgba(88, 70, 35, 0.26)",
+        color: "#dde4eb",
+        backgroundColor: "rgba(77, 96, 119, 0.26)",
         fontWeight: "600",
         opacity: "1",
       },
-      ".cm-line-userInputActiveQuestion": { color: "#f0bc6b" },
+      ".cm-line-userInputActiveQuestion": {},
       ".cm-line-userInputActiveOption": {
-        color: "#f3c877",
-        backgroundColor: "rgba(93, 72, 31, 0.22)",
+        color: "#e3e8ee",
+        backgroundColor: "rgba(77, 96, 119, 0.22)",
       },
       ".cm-line-commandExec": {
         minWidth: "0",
@@ -2750,10 +2752,7 @@ function isConversationScrollNearBottom(view: EditorView, thresholdPx = 24) {
     return false;
   }
 
-  return (
-    scrollContainer.scrollHeight - (scrollContainer.scrollTop + scrollContainer.clientHeight)
-      <= thresholdPx
-  );
+  return readConversationScrollOffsetFromBottom(scrollContainer) <= thresholdPx;
 }
 
 function scrollConversationToBottom(view: EditorView) {
@@ -2766,6 +2765,30 @@ function scrollConversationToBottom(view: EditorView) {
     0,
     scrollContainer.scrollHeight - scrollContainer.clientHeight,
   );
+}
+
+export function readConversationScrollOffsetFromBottom(scrollContainer: {
+  readonly scrollHeight: number;
+  readonly scrollTop: number;
+  readonly clientHeight: number;
+}) {
+  return Math.max(0, scrollContainer.scrollHeight - (scrollContainer.scrollTop + scrollContainer.clientHeight));
+}
+
+export function resolveConversationScrollTopForOffsetFromBottom(scrollContainer: {
+  readonly scrollHeight: number;
+  readonly clientHeight: number;
+}, offsetFromBottom: number) {
+  return Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight - Math.max(0, offsetFromBottom));
+}
+
+function restoreConversationScrollOffsetFromBottom(view: EditorView, offsetFromBottom: number) {
+  const scrollContainer = getConversationScrollContainer(view);
+  if (!scrollContainer) {
+    return;
+  }
+
+  scrollContainer.scrollTop = resolveConversationScrollTopForOffsetFromBottom(scrollContainer, offsetFromBottom);
 }
 
 function keepCursorWithinViewportPadding(view: EditorView) {
@@ -2873,11 +2896,11 @@ function clampStoredSelectionToHistory(
   state: EditorState,
   selection: StoredSelection,
 ): StoredSelection {
-  const historyLimit = getHistorySelectionLimit(state);
-  return {
-    anchor: Math.min(selection.anchor, historyLimit),
-    head: Math.min(selection.head, historyLimit),
-  };
+  return resolveHistorySelectionForDocument(
+    state.doc,
+    state.field(promptStartField),
+    selection,
+  );
 }
 
 export function resolvePromptSelectionForDocument(
@@ -2894,15 +2917,30 @@ export function resolvePromptSelectionForDocument(
   };
 }
 
+export function resolveHistorySelectionForDocument(
+  doc: Text,
+  promptStart: number,
+  stored: StoredSelection | null,
+): StoredSelection {
+  const historyLimit = getHistorySelectionLimitForPromptStart(doc, promptStart);
+  if (!stored) {
+    return { anchor: historyLimit, head: historyLimit };
+  }
+  return {
+    anchor: Math.min(stored.anchor, historyLimit),
+    head: Math.min(stored.head, historyLimit),
+  };
+}
+
 function resolveHistorySelection(
   state: EditorState,
   stored: StoredSelection | null,
 ): StoredSelection {
-  const historyLimit = getHistorySelectionLimit(state);
-  if (!stored) {
-    return { anchor: historyLimit, head: historyLimit };
-  }
-  return clampStoredSelectionToHistory(state, stored);
+  return resolveHistorySelectionForDocument(
+    state.doc,
+    state.field(promptStartField),
+    stored,
+  );
 }
 
 export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, TranscriptRendererProps>(
@@ -2912,12 +2950,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       composerAttachments = [],
       cwd,
       interactionMode: _interactionMode = "default",
+      initialScrollOffsetFromBottom = null,
       promptFocusDisabled = false,
       promptInputDisabled = false,
       pendingUserInputHighlight,
       onAddImageFiles,
       onDraftChange,
       onRemoveImage,
+      onScrollOffsetFromBottomChange,
       resolveInlineDiff,
       onSubmit,
       submitDisabled = false,
@@ -2937,10 +2977,13 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     });
     const onSubmitRef = useRef(onSubmit);
     const onDraftChangeRef = useRef(onDraftChange);
+    const onScrollOffsetFromBottomChangeRef = useRef(onScrollOffsetFromBottomChange);
+    const initialScrollOffsetFromBottomRef = useRef(initialScrollOffsetFromBottom);
     const resolveInlineDiffRef = useRef(resolveInlineDiff);
     const submitDisabledRef = useRef(submitDisabled);
     const promptFocusDisabledRef = useRef(promptFocusDisabled);
     const composerAttachmentsRef = useRef(composerAttachments);
+    const initialScrollAppliedRef = useRef(false);
     const expandedCommandSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const collapsedFileChangeSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const appliedDecorationSignatureRef = useRef("");
@@ -2962,6 +3005,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       draftRef.current = draft;
       onSubmitRef.current = onSubmit;
       onDraftChangeRef.current = onDraftChange;
+      onScrollOffsetFromBottomChangeRef.current = onScrollOffsetFromBottomChange;
+      initialScrollOffsetFromBottomRef.current = initialScrollOffsetFromBottom;
       resolveInlineDiffRef.current = resolveInlineDiff;
       submitDisabledRef.current = submitDisabled;
       promptFocusDisabledRef.current = promptFocusDisabled;
@@ -2973,7 +3018,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       composerAttachments,
       draft,
       expandedCommandSignatures,
+      initialScrollOffsetFromBottom,
       onDraftChange,
+      onScrollOffsetFromBottomChange,
       onSubmit,
       promptFocusDisabled,
       promptInputDisabled,
@@ -3562,9 +3609,37 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       });
 
       viewRef.current = view;
+      initialScrollAppliedRef.current = false;
+      const scrollContainer = getConversationScrollContainer(view);
+      const reportScrollOffsetFromBottom = () => {
+        if (!scrollContainer) {
+          return;
+        }
+        onScrollOffsetFromBottomChangeRef.current?.(readConversationScrollOffsetFromBottom(scrollContainer));
+      };
+      if (scrollContainer) {
+        scrollContainer.addEventListener("scroll", reportScrollOffsetFromBottom, { passive: true });
+      }
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (initialScrollAppliedRef.current) {
+            return;
+          }
+          if (initialScrollOffsetFromBottomRef.current === null) {
+            scrollConversationToBottom(view);
+          } else {
+            restoreConversationScrollOffsetFromBottom(view, initialScrollOffsetFromBottomRef.current);
+          }
+          initialScrollAppliedRef.current = true;
+          reportScrollOffsetFromBottom();
+        });
+      });
       appliedDecorationSignatureRef.current = buildDecorationSignature(initialDocModel);
 
       return () => {
+        if (scrollContainer) {
+          scrollContainer.removeEventListener("scroll", reportScrollOffsetFromBottom);
+        }
         view.destroy();
         viewRef.current = null;
       };
@@ -3595,12 +3670,16 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
       const shouldPinToBottom = isConversationScrollNearBottom(view);
       const minimalDocChange = isTextStable ? null : computeMinimalDocChange(currentText, docModel.text);
+      const nextDoc = Text.of(docModel.text.split("\n"));
 
       syncingViewRef.current = true;
       const syncedHistorySelection =
         activeRegionRef.current === "history"
-          ? resolveHistorySelection(view.state, historySelectionRef.current)
+          ? resolveHistorySelectionForDocument(nextDoc, docModel.promptStart, historySelectionRef.current)
           : null;
+      if (syncedHistorySelection) {
+        historySelectionRef.current = syncedHistorySelection;
+      }
       view.dispatch({
         ...(minimalDocChange ? { changes: minimalDocChange } : {}),
         ...(syncedHistorySelection
@@ -3632,6 +3711,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       if (shouldPinToBottom) {
         requestAnimationFrame(() => {
           scrollConversationToBottom(view);
+          onScrollOffsetFromBottomChangeRef.current?.(0);
         });
       }
     }, [docModel]);

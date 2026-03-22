@@ -7,6 +7,7 @@ import type {
 
 import {
   reconcileProjectLayoutsState,
+  reconcileProjectLayoutsStateWhenReady,
   resolveThreadCwd,
   type ConsoleProjectLayoutsState,
 } from "./consoleSessions";
@@ -222,5 +223,81 @@ describe("reconcileProjectLayoutsState", () => {
     });
 
     expect(state.layoutsByProjectId[project.id]?.panesById["pane:1"]?.kind).toBe("draft");
+  });
+
+  it("preserves panes for pending threads until the thread snapshot arrives", () => {
+    const pendingThreadId = "thread:pending" as OrchestrationThread["id"];
+
+    const state = reconcileProjectLayoutsState({
+      state: {
+        ...createEmptyState(),
+        projectOrder: [project.id],
+        activeProjectId: project.id,
+        layoutsByProjectId: {
+          [project.id]: {
+            projectId: project.id,
+            activeTabId: "tab:1",
+            updatedAt: "2026-03-12T10:00:00.000Z",
+            tabs: [
+              {
+                id: "tab:1",
+                paneIds: ["pane:1"],
+                activePaneId: "pane:1",
+                createdAt: "2026-03-12T10:00:00.000Z",
+              },
+            ],
+            panesById: {
+              "pane:1": { id: "pane:1", kind: "thread", threadId: pendingThreadId },
+            },
+          },
+        },
+      },
+      threads: [],
+      projects: [project],
+      preferredThreadId: null,
+      pendingThreadIds: new Set([pendingThreadId]),
+    });
+
+    expect(state.layoutsByProjectId[project.id]?.panesById["pane:1"]).toEqual({
+      id: "pane:1",
+      kind: "thread",
+      threadId: pendingThreadId,
+    });
+  });
+
+  it("preserves the persisted layout state before snapshot hydration", () => {
+    const persistedState: ConsoleProjectLayoutsState = {
+      ...createEmptyState(),
+      projectOrder: [project.id],
+      activeProjectId: project.id,
+      layoutsByProjectId: {
+        [project.id]: {
+          projectId: project.id,
+          activeTabId: "tab:1",
+          updatedAt: "2026-03-12T10:00:00.000Z",
+          tabs: [{
+            id: "tab:1",
+            paneIds: ["pane:thread"],
+            activePaneId: "pane:thread",
+            createdAt: "2026-03-12T10:00:00.000Z",
+          }],
+          panesById: {
+            "pane:thread": {
+              id: "pane:thread",
+              kind: "thread",
+              threadId: "thread:restored" as OrchestrationThread["id"],
+            },
+          },
+        },
+      },
+    };
+
+    expect(reconcileProjectLayoutsStateWhenReady({
+      state: persistedState,
+      projects: [],
+      threads: [],
+      preferredThreadId: null,
+      hydrated: false,
+    })).toBe(persistedState);
   });
 });

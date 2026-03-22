@@ -5,20 +5,78 @@ export interface CommandPaletteCommand {
   readonly keywords?: ReadonlyArray<string>;
 }
 
-/** Simple substring match across id, label, optional context text, and optional keywords. */
+function tokenizeCommandPaletteQuery(query: string) {
+  return query
+    .toLowerCase()
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
+}
+
+function commandSearchFields(command: CommandPaletteCommand) {
+  return [
+    command.id,
+    command.label,
+    command.contextText ?? "",
+    ...(command.keywords ?? []),
+  ].map((value) => value.toLowerCase());
+}
+
+function matchesOrderedTokens(haystack: string, tokens: ReadonlyArray<string>) {
+  let position = 0;
+  for (const token of tokens) {
+    const foundAt = haystack.indexOf(token, position);
+    if (foundAt === -1) {
+      return false;
+    }
+    position = foundAt + token.length;
+  }
+  return true;
+}
+
+function scoreCommandPaletteCommand(command: CommandPaletteCommand, normalizedQuery: string, tokens: ReadonlyArray<string>) {
+  const fields = commandSearchFields(command);
+  const joined = fields.join("\n");
+
+  if (command.label.toLowerCase().includes(normalizedQuery)) {
+    return 6;
+  }
+  if (joined.includes(normalizedQuery)) {
+    return 5;
+  }
+  if (matchesOrderedTokens(command.label.toLowerCase(), tokens)) {
+    return 4;
+  }
+  if (fields.some((field) => matchesOrderedTokens(field, tokens))) {
+    return 3;
+  }
+  if (matchesOrderedTokens(joined, tokens)) {
+    return 2;
+  }
+  if (tokens.every((token) => joined.includes(token))) {
+    return 1;
+  }
+  return 0;
+}
+
+/** Token-aware filtering across id, label, context text, and keywords with ordered matching. */
 export function filterCommandPaletteCommands(
   commands: ReadonlyArray<CommandPaletteCommand>,
   query: string,
 ): ReadonlyArray<CommandPaletteCommand> {
-  const q = query.toLowerCase().trim();
-  if (q.length === 0) {
+  const normalizedQuery = query.toLowerCase().trim();
+  const tokens = tokenizeCommandPaletteQuery(query);
+  if (tokens.length === 0) {
     return commands;
   }
 
-  return commands.filter((command) => {
-    if (command.id.toLowerCase().includes(q)) return true;
-    if (command.label.toLowerCase().includes(q)) return true;
-    if (command.contextText?.toLowerCase().includes(q)) return true;
-    return (command.keywords ?? []).some((keyword) => keyword.toLowerCase().includes(q));
-  });
+  return commands
+    .map((command, index) => ({
+      command,
+      index,
+      score: scoreCommandPaletteCommand(command, normalizedQuery, tokens),
+    }))
+    .filter((entry) => entry.score > 0)
+    .toSorted((left, right) => right.score - left.score || left.index - right.index)
+    .map((entry) => entry.command);
 }
