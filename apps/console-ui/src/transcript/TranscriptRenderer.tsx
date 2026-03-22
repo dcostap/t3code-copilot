@@ -130,6 +130,20 @@ interface StoredPromptSelection {
   readonly headOffset: number;
 }
 
+interface PromptCaretBox {
+  readonly top: number;
+  readonly left: number;
+  readonly width: number;
+  readonly height: number;
+  readonly text: string;
+}
+
+interface PromptCaretMeasureElements {
+  readonly mirror: HTMLDivElement;
+  readonly textNode: globalThis.Text;
+  readonly marker: HTMLSpanElement;
+}
+
 interface TranscriptRendererProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
   readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
@@ -189,6 +203,9 @@ export interface TranscriptRendererHandle {
   focus(): void;
   focusPrompt(options?: FocusPromptOptions): void;
   focusHistory(): void;
+  isHistoryActive(): boolean;
+  hasHistorySelection(): boolean;
+  selectAllHistory(): boolean;
   insertPromptText(text: string): void;
   deletePromptBackward(): void;
   deletePromptForward(): void;
@@ -591,54 +608,6 @@ export function shouldRenderCommandWidgetToggleRail(options: {
   readonly summaryOverflowing: boolean;
 }) {
   return options.expanded || options.hasHiddenExpansionContent || options.summaryOverflowing;
-}
-
-export function resolveCommandWidgetCopyRowFromNode(target: unknown) {
-  if (!target || typeof target !== "object") {
-    return null;
-  }
-
-  const targetElement =
-    "closest" in target && typeof target.closest === "function"
-      ? target
-      : "parentElement" in target && target.parentElement && typeof target.parentElement === "object"
-        ? target.parentElement
-        : null;
-  if (!targetElement || !("closest" in targetElement) || typeof targetElement.closest !== "function") {
-    return null;
-  }
-
-  const row = targetElement.closest(".cm-commandWidgetCopyRow");
-  return row && typeof row === "object" ? row : null;
-}
-
-export function shouldUseCustomCommandWidgetCopy(
-  selection:
-    | {
-        rangeCount: number;
-        isCollapsed: boolean;
-        getRangeAt(index: number): {
-          startContainer: unknown;
-          endContainer: unknown;
-        };
-      }
-    | null,
-) {
-  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
-    return false;
-  }
-
-  for (let index = 0; index < selection.rangeCount; index += 1) {
-    const range = selection.getRangeAt(index);
-    if (!resolveCommandWidgetCopyRowFromNode(range.startContainer)) {
-      return false;
-    }
-    if (!resolveCommandWidgetCopyRowFromNode(range.endContainer)) {
-      return false;
-    }
-  }
-
-  return true;
 }
 
 async function openTranscriptLink(
@@ -2704,29 +2673,6 @@ export function prefixCopiedUserMessageStarts(
   return prefixCopiedLinesInOrder(text, selectedSegments, USER_MESSAGE_COPY_PREFIX);
 }
 
-function serializeCommandWidgetSelection(view: EditorView, selection: Selection | null) {
-  if (!selection || !shouldUseCustomCommandWidgetCopy(selection)) {
-    return null;
-  }
-
-  const rows = view.dom.querySelectorAll<HTMLElement>(".cm-commandWidgetCopyRow");
-  const parts: string[] = [];
-  for (const row of rows) {
-    const copyText = row.dataset.copyText;
-    if (!copyText) {
-      continue;
-    }
-    for (let index = 0; index < selection.rangeCount; index += 1) {
-      if (selection.getRangeAt(index).intersectsNode(row)) {
-        parts.push(copyText);
-        break;
-      }
-    }
-  }
-
-  return parts.length > 0 ? parts.join("\n") : null;
-}
-
 function preserveConversationScrollPosition(view: EditorView, update: () => void) {
   const scrollContainer = getConversationScrollContainer(view);
   if (!scrollContainer) {
@@ -2874,14 +2820,149 @@ export function resolvePromptTextareaLayout(lineHeight: number, scrollHeight: nu
   };
 }
 
+function measurePromptCaretBox(
+  textarea: HTMLTextAreaElement,
+  selection: StoredPromptSelection,
+): PromptCaretBox | null {
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return null;
+  }
+  if (document.activeElement !== textarea) {
+    return null;
+  }
+
+  const caretOffset = Math.max(0, Math.min(selection.headOffset, textarea.value.length));
+  const computedStyle = window.getComputedStyle(textarea);
+  const measureElements = getPromptCaretMeasureElements(document);
+  const { mirror, textNode, marker } = measureElements;
+  mirror.style.width = `${textarea.clientWidth}px`;
+  mirror.style.padding = computedStyle.padding;
+  mirror.style.border = computedStyle.border;
+  mirror.style.font = computedStyle.font;
+  mirror.style.fontKerning = computedStyle.fontKerning;
+  mirror.style.fontStretch = computedStyle.fontStretch;
+  mirror.style.fontVariant = computedStyle.fontVariant;
+  mirror.style.letterSpacing = computedStyle.letterSpacing;
+  mirror.style.lineHeight = computedStyle.lineHeight;
+  mirror.style.tabSize = computedStyle.tabSize;
+  mirror.style.textIndent = computedStyle.textIndent;
+  mirror.style.textTransform = computedStyle.textTransform;
+  mirror.style.textRendering = computedStyle.textRendering;
+
+  const beforeCaret = textarea.value.slice(0, caretOffset);
+  textNode.nodeValue = beforeCaret;
+  const nextCharacter = textarea.value.slice(caretOffset, caretOffset + 1);
+  const displayCharacter = nextCharacter === "\t"
+    ? " "
+    : nextCharacter && nextCharacter !== "\n"
+      ? nextCharacter
+      : "\u00a0";
+  marker.textContent = displayCharacter;
+
+  const mirrorRect = mirror.getBoundingClientRect();
+  const markerRect = marker.getBoundingClientRect();
+
+  const lineHeight = Number.parseFloat(computedStyle.lineHeight || "0") || markerRect.height || 20;
+  const top = Math.floor(markerRect.top - mirrorRect.top - textarea.scrollTop);
+  const left = Math.floor(markerRect.left - mirrorRect.left - textarea.scrollLeft);
+  const width = Math.ceil(Math.max(8, markerRect.width || Number.parseFloat(computedStyle.fontSize || "0") * 0.6 || 8));
+  const height = Math.max(1, Math.round(lineHeight));
+
+  if (!Number.isFinite(top) || !Number.isFinite(left) || !Number.isFinite(width) || !Number.isFinite(height)) {
+    return null;
+  }
+
+  return { top, left, width, height, text: displayCharacter };
+}
+
+let promptCaretMeasureElements: PromptCaretMeasureElements | null = null;
+
+function getPromptCaretMeasureElements(doc: Document): PromptCaretMeasureElements {
+  if (promptCaretMeasureElements) {
+    return promptCaretMeasureElements;
+  }
+
+  const mirror = doc.createElement("div");
+  mirror.style.position = "fixed";
+  mirror.style.left = "-100000px";
+  mirror.style.top = "0";
+  mirror.style.visibility = "hidden";
+  mirror.style.pointerEvents = "none";
+  mirror.style.whiteSpace = "pre-wrap";
+  mirror.style.overflowWrap = "break-word";
+  mirror.style.wordBreak = "break-word";
+  mirror.style.boxSizing = "border-box";
+
+  const textNode: globalThis.Text = doc.createTextNode("");
+  const marker = doc.createElement("span");
+  marker.style.display = "inline-block";
+  mirror.append(textNode, marker);
+  doc.body.append(mirror);
+
+  const elements: PromptCaretMeasureElements = {
+    mirror,
+    textNode,
+    marker,
+  };
+  promptCaretMeasureElements = elements;
+  return elements;
+}
+
 export function shouldRedirectHistoryTypingToPrompt(
   event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey">,
+  options?: {
+    readonly promptFocusDisabled?: boolean;
+    readonly promptInputDisabled?: boolean;
+  },
 ) {
+  if (options?.promptFocusDisabled || options?.promptInputDisabled) {
+    return false;
+  }
+
   if (event.ctrlKey || event.metaKey || event.altKey) {
     return false;
   }
 
   return event.key.length === 1;
+}
+
+export function shouldSelectAllHistoryFromHistoryKeydown(
+  event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey">,
+  activeRegion: TranscriptRegion,
+) {
+  return activeRegion === "history"
+    && (event.ctrlKey || event.metaKey)
+    && !event.altKey
+    && event.key.toLowerCase() === "a";
+}
+
+export function shouldSelectAllPromptFromPromptKeydown(
+  event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey">,
+) {
+  return (event.ctrlKey || event.metaKey)
+    && !event.altKey
+    && event.key.toLowerCase() === "a";
+}
+
+export function shouldUseNativePromptCaret(
+  cssSupports:
+    | ((property: string, value: string) => boolean)
+    | null
+    | undefined,
+) {
+  return Boolean(
+    cssSupports?.("caret-shape", "block")
+    && cssSupports("caret-animation", "manual"),
+  );
+}
+
+export function shouldRedirectPlainTextPasteToPrompt(input: {
+  readonly targetIsPrompt: boolean;
+  readonly hasFiles: boolean;
+  readonly promptInputDisabled: boolean;
+  readonly text: string;
+}) {
+  return !input.targetIsPrompt && !input.hasFiles && !input.promptInputDisabled && input.text.length > 0;
 }
 
 export function shouldKeepCursorPaddingForTransactions(
@@ -2982,6 +3063,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const resolveInlineDiffRef = useRef(resolveInlineDiff);
     const submitDisabledRef = useRef(submitDisabled);
     const promptFocusDisabledRef = useRef(promptFocusDisabled);
+    const promptInputDisabledRef = useRef(promptInputDisabled);
     const composerAttachmentsRef = useRef(composerAttachments);
     const initialScrollAppliedRef = useRef(false);
     const expandedCommandSignaturesRef = useRef<ReadonlySet<string>>(new Set());
@@ -2999,6 +3081,16 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     >(() => new Map());
     const [isDraggingImages, setIsDraggingImages] = useState(false);
     const [draft, setDraft] = useState("");
+    const useNativePromptCaret = useMemo(
+      () =>
+        shouldUseNativePromptCaret(
+          typeof CSS !== "undefined" && typeof CSS.supports === "function"
+            ? CSS.supports.bind(CSS) as (property: string, value: string) => boolean
+            : null,
+        ),
+      [],
+    );
+    const promptCaretRef = useRef<HTMLDivElement | null>(null);
     const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
     useEffect(() => {
@@ -3010,6 +3102,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       resolveInlineDiffRef.current = resolveInlineDiff;
       submitDisabledRef.current = submitDisabled;
       promptFocusDisabledRef.current = promptFocusDisabled;
+      promptInputDisabledRef.current = promptInputDisabled;
       composerAttachmentsRef.current = composerAttachments;
       expandedCommandSignaturesRef.current = expandedCommandSignatures;
       collapsedFileChangeSignaturesRef.current = collapsedFileChangeSignatures;
@@ -3068,12 +3161,50 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       promptSelectionRef.current = { anchorOffset, headOffset };
     }, []);
 
+    const applyPromptCaretBox = useCallback((box: PromptCaretBox | null) => {
+      const caret = promptCaretRef.current;
+      if (!caret) {
+        return;
+      }
+      if (!box) {
+        caret.hidden = true;
+        caret.textContent = "";
+        return;
+      }
+      caret.hidden = false;
+      caret.style.top = `${box.top}px`;
+      caret.style.left = `${box.left}px`;
+      caret.style.width = `${box.width}px`;
+      caret.style.height = `${box.height}px`;
+      caret.textContent = box.text;
+    }, []);
+
+    const syncPromptCaretBox = useCallback((textarea = promptTextareaRef.current) => {
+      if (useNativePromptCaret || !textarea || promptInputDisabledRef.current) {
+        applyPromptCaretBox(null);
+        return;
+      }
+      applyPromptCaretBox(measurePromptCaretBox(textarea, promptSelectionRef.current));
+    }, [applyPromptCaretBox, useNativePromptCaret]);
+
     const syncPromptSelection = useCallback((textarea = promptTextareaRef.current) => {
       const fallbackOffset = draftRef.current.length;
       const anchorOffset = textarea?.selectionStart ?? fallbackOffset;
       const headOffset = textarea?.selectionEnd ?? fallbackOffset;
       setPromptSelectionValue(anchorOffset, headOffset);
-    }, [setPromptSelectionValue]);
+      syncPromptCaretBox(textarea);
+    }, [setPromptSelectionValue, syncPromptCaretBox]);
+
+    const clearHistorySelection = useCallback(() => {
+      if (typeof window === "undefined") {
+        return;
+      }
+      const selection = window.getSelection();
+      if (!hasNonCollapsedSelectionInsideElement(selection, editorRef.current)) {
+        return;
+      }
+      selection?.removeAllRanges();
+    }, []);
 
     const focusPromptInput = useCallback((_options?: FocusPromptOptions) => {
       if (promptFocusDisabledRef.current) {
@@ -3091,7 +3222,28 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       const headOffset = Math.min(storedHeadOffset, maxOffset);
       textarea.setSelectionRange(anchorOffset, headOffset);
       setPromptSelectionValue(anchorOffset, headOffset);
-    }, [setPromptSelectionValue]);
+      syncPromptCaretBox(textarea);
+    }, [setPromptSelectionValue, syncPromptCaretBox]);
+
+    const preparePromptInteraction = useCallback(() => {
+      clearHistorySelection();
+    }, [clearHistorySelection]);
+
+    const collapsePromptSelectionToCaret = useCallback(() => {
+      const caretOffset = promptSelectionRef.current.headOffset;
+      setPromptSelectionValue(caretOffset, caretOffset);
+      const textarea = promptTextareaRef.current;
+      if (!textarea) {
+        applyPromptCaretBox(null);
+        return;
+      }
+      textarea.setSelectionRange(caretOffset, caretOffset);
+      syncPromptCaretBox(textarea);
+    }, [applyPromptCaretBox, setPromptSelectionValue, syncPromptCaretBox]);
+
+    const prepareHistoryInteraction = useCallback(() => {
+      collapsePromptSelectionToCaret();
+    }, [collapsePromptSelectionToCaret]);
 
     const autosizePromptInput = useCallback(() => {
       const textarea = promptTextareaRef.current;
@@ -3119,13 +3271,15 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       };
       applyAutosize();
       restoreScrollPositionSnapshots(scrollSnapshots);
-    }, []);
+      syncPromptCaretBox(textarea);
+    }, [syncPromptCaretBox]);
 
     useLayoutEffect(() => {
       autosizePromptInput();
     }, [autosizePromptInput, draft]);
 
     const insertTextIntoDraft = useCallback((text: string) => {
+      preparePromptInteraction();
       const { anchorOffset, headOffset } = promptSelectionRef.current;
       const selectionStart = Math.min(anchorOffset, headOffset);
       const selectionEnd = Math.max(anchorOffset, headOffset);
@@ -3143,10 +3297,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         nextTextarea.focus({ preventScroll: true });
         nextTextarea.setSelectionRange(nextCursor, nextCursor);
+        syncPromptCaretBox(nextTextarea);
       });
-    }, [setDraftValue, setPromptSelectionValue]);
+    }, [preparePromptInteraction, setDraftValue, setPromptSelectionValue, syncPromptCaretBox]);
 
     const deletePromptText = useCallback((direction: "backward" | "forward") => {
+      preparePromptInteraction();
       const { anchorOffset, headOffset } = promptSelectionRef.current;
       const selectionStart = Math.min(anchorOffset, headOffset);
       const selectionEnd = Math.max(anchorOffset, headOffset);
@@ -3178,13 +3334,15 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         textarea.focus({ preventScroll: true });
         textarea.setSelectionRange(deleteFrom, deleteFrom);
+        syncPromptCaretBox(textarea);
       });
-    }, [setDraftValue, setPromptSelectionValue]);
+    }, [preparePromptInteraction, setDraftValue, setPromptSelectionValue, syncPromptCaretBox]);
 
     const handlePromptInputChange = useCallback((event: ReactChangeEvent<HTMLTextAreaElement>) => {
+      preparePromptInteraction();
       setDraftValue(event.target.value);
       syncPromptSelection(event.target);
-    }, [setDraftValue, syncPromptSelection]);
+    }, [preparePromptInteraction, setDraftValue, syncPromptSelection]);
 
     const submitDraft = useCallback(async () => {
       const value = draftRef.current.trim();
@@ -3210,25 +3368,65 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       return true;
     }, [focusPromptInput, setDraftValue]);
 
+    const selectAllHistoryText = useCallback(() => {
+      if (typeof window === "undefined" || typeof document === "undefined") {
+        return false;
+      }
+      const container = editorRef.current;
+      const selection = window.getSelection();
+      if (!container || !selection) {
+        return false;
+      }
+      const range = document.createRange();
+      range.selectNodeContents(container);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      prepareHistoryInteraction();
+      return true;
+    }, [prepareHistoryInteraction]);
+
     const handlePromptInputKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+      if (shouldSelectAllPromptFromPromptKeydown(event)) {
+        event.preventDefault();
+        preparePromptInteraction();
+        const selectionEnd = event.currentTarget.value.length;
+        event.currentTarget.setSelectionRange(0, selectionEnd, "forward");
+        setPromptSelectionValue(0, selectionEnd);
+        syncPromptCaretBox(event.currentTarget);
+        return;
+      }
       if (event.key !== "Enter" || event.shiftKey) {
         return;
       }
       event.preventDefault();
       void submitDraft();
-    }, [submitDraft]);
+    }, [preparePromptInteraction, setPromptSelectionValue, submitDraft, syncPromptCaretBox]);
 
     const handlePromptInputSelectionChange = useCallback((event: { currentTarget: HTMLTextAreaElement }) => {
+      preparePromptInteraction();
+      syncPromptSelection(event.currentTarget);
+    }, [preparePromptInteraction, syncPromptSelection]);
+
+    const handlePromptInputFocus = useCallback((event: { currentTarget: HTMLTextAreaElement }) => {
       syncPromptSelection(event.currentTarget);
     }, [syncPromptSelection]);
 
+    const handlePromptInputBlur = useCallback(() => {
+      applyPromptCaretBox(null);
+    }, [applyPromptCaretBox]);
+
+    const handlePromptInputScroll = useCallback((event: { currentTarget: HTMLTextAreaElement }) => {
+      syncPromptCaretBox(event.currentTarget);
+    }, [syncPromptCaretBox]);
+
     const handlePromptBodyMouseDown = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
-      if (event.target instanceof HTMLElement && event.target.closest("button, textarea")) {
+      if (event.target instanceof HTMLElement && event.target.closest("button, textarea, .attachment-panel")) {
         return;
       }
       event.preventDefault();
+      preparePromptInteraction();
       focusPromptInput();
-    }, [focusPromptInput]);
+    }, [preparePromptInteraction, focusPromptInput]);
 
     const requestInlineDiff = useCallback((signature: string, lookup: InlineDiffLookup) => {
       const resolver = resolveInlineDiffRef.current;
@@ -3286,12 +3484,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
     const focusPromptRegion = useCallback((options?: FocusPromptOptions) => {
       activeRegionRef.current = "prompt";
+      preparePromptInteraction();
       requestAnimationFrame(() => {
         focusPromptInput(options);
       });
-    }, [focusPromptInput]);
+    }, [focusPromptInput, preparePromptInteraction]);
 
     const focusHistoryRegion = useCallback((view: EditorView) => {
+      prepareHistoryInteraction();
       activeRegionRef.current = "history";
       syncActiveRegionClass(view);
       const historySelection = resolveHistorySelection(view.state, historySelectionRef.current);
@@ -3305,7 +3505,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       requestAnimationFrame(() => {
         keepCursorWithinViewportPadding(view);
       });
-    }, [syncActiveRegionClass]);
+    }, [prepareHistoryInteraction, syncActiveRegionClass]);
 
     const redirectHistoryTypingToPrompt = useCallback(
       (view: EditorView, text: string) => {
@@ -3381,6 +3581,18 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         focusHistoryRegion(view);
       },
+      isHistoryActive() {
+        return activeRegionRef.current === "history";
+      },
+      hasHistorySelection() {
+        if (typeof window === "undefined") {
+          return false;
+        }
+        return hasNonCollapsedSelectionInsideElement(window.getSelection(), editorRef.current);
+      },
+      selectAllHistory() {
+        return selectAllHistoryText();
+      },
       insertPromptText(text) {
         insertTextIntoDraft(text);
       },
@@ -3400,7 +3612,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         scrollConversationToBottom(view);
       },
-    }), [deletePromptText, focusHistoryRegion, focusPromptRegion, insertTextIntoDraft, submitDraft]);
+    }), [deletePromptText, focusHistoryRegion, focusPromptRegion, insertTextIntoDraft, selectAllHistoryText, submitDraft]);
 
     useEffect(() => {
       if (!editorRef.current) {
@@ -3496,6 +3708,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           }),
           EditorView.domEventHandlers({
             focus(_event, view) {
+              prepareHistoryInteraction();
               activeRegionRef.current = "history";
               syncActiveRegionClass(view);
               const nextSelection = resolveHistorySelection(view.state, historySelectionRef.current);
@@ -3514,10 +3727,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                 _event.preventDefault();
                 return true;
               }
+              prepareHistoryInteraction();
               updateActiveRegionFromPointer(view, _event);
               return false;
             },
             click(event, view) {
+              prepareHistoryInteraction();
               const interactiveMark = resolveInteractiveMarkFromMouseEvent(view, event, docModelRef.current.marks);
               if (interactiveMark?.link) {
                 event.preventDefault();
@@ -3564,30 +3779,29 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                   } else {
                     next.add(signature);
                   }
-                  return next;
+                    return next;
+                  });
                 });
-              });
-              return true;
-            },
-            copy(event, view) {
-              const selection = typeof window !== "undefined" ? window.getSelection() : null;
-              const serializedSelection = serializeCommandWidgetSelection(view, selection);
-              if (!serializedSelection) {
-                return false;
-              }
-              event.preventDefault();
-              event.clipboardData?.setData("text/plain", serializedSelection);
               return true;
             },
             keydown(event, view) {
               if (activeRegionRef.current !== "history") {
                 return false;
               }
-              if (!shouldRedirectHistoryTypingToPrompt(event)) {
+              if (shouldSelectAllHistoryFromHistoryKeydown(event, activeRegionRef.current)) {
+                event.preventDefault();
+                selectAllHistoryText();
+                return true;
+              }
+              if (!shouldRedirectHistoryTypingToPrompt(event, {
+                promptFocusDisabled: promptFocusDisabledRef.current,
+                promptInputDisabled: promptInputDisabledRef.current,
+              })) {
                 return false;
               }
 
               event.preventDefault();
+              focusPromptInput();
               redirectHistoryTypingToPrompt(view, event.key);
               return true;
             },
@@ -3645,10 +3859,13 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       };
     }, [
       cwd,
+      focusPromptInput,
       focusPromptRegion,
+      prepareHistoryInteraction,
       requestInlineDiff,
       redirectHistoryTypingToPrompt,
       resolveCommandWidgetSignatureFromMouseEvent,
+      selectAllHistoryText,
       syncActiveRegionClass,
       storeSelectionForRegion,
       updateActiveRegionFromPointer,
@@ -3733,13 +3950,25 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
     const handlePasteCapture = useCallback((event: ReactClipboardEvent<HTMLDivElement>) => {
       const files = Array.from(event.clipboardData.files);
-      if (files.length === 0) {
+      if (files.length > 0) {
+        if (handleIncomingFiles(files)) {
+          event.preventDefault();
+        }
         return;
       }
-      if (handleIncomingFiles(files)) {
-        event.preventDefault();
+      const text = event.clipboardData.getData("text/plain");
+      const targetIsPrompt = event.target === promptTextareaRef.current;
+      if (!shouldRedirectPlainTextPasteToPrompt({
+        targetIsPrompt,
+        hasFiles: false,
+        promptInputDisabled,
+        text,
+      })) {
+        return;
       }
-    }, [handleIncomingFiles]);
+      event.preventDefault();
+      insertTextIntoDraft(text);
+    }, [handleIncomingFiles, insertTextIntoDraft, promptInputDisabled]);
 
     const handleDragEnter = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
       if (!event.dataTransfer.types.includes("Files")) {
@@ -3798,6 +4027,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         </div>
         <div
           className={compactPendingUserInputPrompt ? "transcript-prompt transcript-prompt--compact" : "transcript-prompt"}
+          onMouseDown={handlePromptBodyMouseDown}
         >
           {composerAttachments.length > 0 ? (
             <div className="attachment-panel attachment-panel--composer">
@@ -3833,13 +4063,17 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               ))}
             </div>
           ) : null}
-          <div className="transcript-prompt__body" onMouseDown={handlePromptBodyMouseDown}>
+          <div className="transcript-prompt__body">
             <div className="transcript-prompt__row">
               <span className="transcript-prompt__marker" aria-hidden="true">›</span>
               <div className="transcript-prompt__inputShell">
                 <textarea
                   ref={promptTextareaRef}
-                  className="transcript-prompt__input"
+                  className={`transcript-prompt__input ${
+                    useNativePromptCaret
+                      ? "transcript-prompt__input--nativeCaret"
+                      : "transcript-prompt__input--customCaret"
+                  }`}
                   value={draft}
                   rows={2}
                   spellCheck={false}
@@ -3849,14 +4083,21 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                   aria-disabled={promptInputDisabled}
                   readOnly={promptInputDisabled}
                   onChange={handlePromptInputChange}
+                  onBlur={handlePromptInputBlur}
                   onClick={handlePromptInputSelectionChange}
-                  onFocus={(event) => {
-                    syncPromptSelection(event.currentTarget);
-                  }}
+                  onFocus={handlePromptInputFocus}
                   onKeyDown={handlePromptInputKeyDown}
-                  onKeyUp={handlePromptInputSelectionChange}
+                  onScroll={handlePromptInputScroll}
                   onSelect={handlePromptInputSelectionChange}
                 />
+                {useNativePromptCaret ? null : (
+                  <div
+                    ref={promptCaretRef}
+                    aria-hidden="true"
+                    className="transcript-prompt__customCaret"
+                    hidden
+                  />
+                )}
               </div>
             </div>
           </div>

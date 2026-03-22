@@ -1514,6 +1514,27 @@ function appendFinishedStateToLatestTurnEntries(
   return nextEntries;
 }
 
+function findRunningAssistantMessage(thread: OrchestrationThread) {
+  const latestTurnId = thread.latestTurn?.turnId ?? thread.session?.activeTurnId ?? null;
+  const runningStartedAt =
+    thread.latestTurn?.startedAt
+    ?? thread.latestTurn?.requestedAt
+    ?? thread.session?.updatedAt
+    ?? thread.updatedAt;
+
+  return thread.messages
+    .filter((message) =>
+      message.role === "assistant"
+      && (
+        latestTurnId
+          ? message.turnId === latestTurnId
+          : message.createdAt.localeCompare(runningStartedAt) >= 0
+      ))
+    .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .at(-1)
+    ?? null;
+}
+
 export function threadToTranscriptBlocks(
   thread: OrchestrationThread,
   options: TranscriptBlockOptions = {},
@@ -1792,15 +1813,16 @@ export function threadToTranscriptBlocks(
   }
 
   if (!pendingUserInputOpen && (thread.latestTurn?.state === "running" || thread.session?.status === "running")) {
-    const startedAt =
+    const waitingStartedAt =
       thread.latestTurn?.startedAt
       ?? thread.latestTurn?.requestedAt
       ?? thread.session?.updatedAt
       ?? thread.updatedAt;
+    const runningAssistantMessage = findRunningAssistantMessage(thread);
     const now = options.now ?? new Date().toISOString();
     blocks.push({
-      type: "working-state",
-      startedAt,
+      type: runningAssistantMessage ? "working-state" : "waiting-state",
+      startedAt: runningAssistantMessage?.createdAt ?? waitingStartedAt,
       now,
     });
   } else if (thread.latestTurn?.state === "interrupted") {

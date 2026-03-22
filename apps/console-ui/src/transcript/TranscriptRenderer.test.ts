@@ -4,6 +4,11 @@ import {
   flattenBlocks,
   readConversationScrollOffsetFromBottom,
   resolveConversationScrollTopForOffsetFromBottom,
+  shouldRedirectHistoryTypingToPrompt,
+  shouldRedirectPlainTextPasteToPrompt,
+  shouldSelectAllHistoryFromHistoryKeydown,
+  shouldSelectAllPromptFromPromptKeydown,
+  shouldUseNativePromptCaret,
 } from "./TranscriptRenderer";
 import type { TranscriptBlock } from "./TranscriptBlock";
 
@@ -20,7 +25,7 @@ describe("flattenBlocks", () => {
         title: "report_intent",
         status: "done",
         startedAt: "2026-03-22T01:00:00.000Z",
-        endedAt: "2026-03-22T01:00:01.000Z",
+        endedAt: "2026-03-22T01:00:01.100Z",
         items: [
           {
             kind: "tool",
@@ -98,5 +103,101 @@ describe("conversation scroll state helpers", () => {
       scrollHeight: 1200,
       clientHeight: 400,
     }, 150)).toBe(650);
+  });
+});
+
+describe("shouldRedirectHistoryTypingToPrompt", () => {
+  it("redirects plain typed characters from history", () => {
+    expect(shouldRedirectHistoryTypingToPrompt({
+      key: "a",
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+    })).toBe(true);
+  });
+
+  it("does not redirect while prompt focus is disabled", () => {
+    expect(shouldRedirectHistoryTypingToPrompt({
+      key: "a",
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+    }, {
+      promptFocusDisabled: true,
+    })).toBe(false);
+  });
+
+  it("does not redirect while prompt input is disabled", () => {
+    expect(shouldRedirectHistoryTypingToPrompt({
+      key: "a",
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+    }, {
+      promptInputDisabled: true,
+    })).toBe(false);
+  });
+});
+
+describe("history shortcut routing", () => {
+  it("routes ctrl+a only when actual focus is in history", () => {
+    expect(shouldSelectAllHistoryFromHistoryKeydown({
+      key: "a",
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+    }, "history")).toBe(true);
+    expect(shouldSelectAllHistoryFromHistoryKeydown({
+      key: "a",
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+    }, "prompt")).toBe(false);
+  });
+
+  it("routes ctrl+a in the prompt so the textarea can own select-all synchronously", () => {
+    expect(shouldSelectAllPromptFromPromptKeydown({
+      key: "a",
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+    })).toBe(true);
+    expect(shouldSelectAllPromptFromPromptKeydown({
+      key: "a",
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+    })).toBe(false);
+  });
+
+  it("prefers the native prompt caret when block shape and manual animation are supported", () => {
+    expect(shouldUseNativePromptCaret((property, value) => (
+      (property === "caret-shape" && value === "block")
+      || (property === "caret-animation" && value === "manual")
+    ))).toBe(true);
+    expect(shouldUseNativePromptCaret((property, value) => (
+      property === "caret-shape" && value === "block"
+    ))).toBe(false);
+  });
+
+  it("redirects plain-text paste to the prompt only when the prompt is not already the target", () => {
+    expect(shouldRedirectPlainTextPasteToPrompt({
+      targetIsPrompt: false,
+      hasFiles: false,
+      promptInputDisabled: false,
+      text: "hello",
+    })).toBe(true);
+    expect(shouldRedirectPlainTextPasteToPrompt({
+      targetIsPrompt: true,
+      hasFiles: false,
+      promptInputDisabled: false,
+      text: "hello",
+    })).toBe(false);
+    expect(shouldRedirectPlainTextPasteToPrompt({
+      targetIsPrompt: false,
+      hasFiles: false,
+      promptInputDisabled: true,
+      text: "hello",
+    })).toBe(false);
   });
 });

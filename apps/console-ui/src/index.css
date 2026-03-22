@@ -448,6 +448,22 @@ body {
   min-width: 0;
 }
 
+.transcript-prompt__customCaret {
+  position: absolute;
+  pointer-events: none;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  background: #ffffff;
+  color: #000000;
+  font: inherit;
+  line-height: inherit;
+  border-radius: 0;
+  overflow: hidden;
+  white-space: pre;
+}
+
 .transcript-prompt__input {
   width: 100%;
   min-height: calc(2 * 1.3em);
@@ -461,9 +477,28 @@ body {
   color: #d6dbe0;
   font: inherit;
   line-height: 1.3;
-  caret-color: auto;
   outline: none;
   overflow-anchor: none;
+}
+
+.transcript-prompt__input--nativeCaret {
+  caret-color: #ffffff;
+  caret-shape: block;
+  caret-animation: manual;
+}
+
+.transcript-prompt__input--customCaret {
+  caret-color: transparent;
+}
+
+.transcript-prompt__input::selection {
+  background: rgb(255 255 255 / 100%);
+  color: #000000;
+}
+
+.transcript-prompt__input::-moz-selection {
+  background: rgb(255 255 255 / 100%);
+  color: #000000;
 }
 
 .attachment-panel {

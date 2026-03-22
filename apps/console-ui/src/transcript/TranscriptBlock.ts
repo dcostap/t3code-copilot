@@ -251,6 +251,12 @@ export interface WorkingStateBlock {
   readonly now: string;
 }
 
+export interface WaitingStateBlock {
+  readonly type: "waiting-state";
+  readonly startedAt: string;
+  readonly now: string;
+}
+
 export interface SendingStateBlock {
   readonly type: "sending-state";
   readonly startedAt: string;
@@ -294,6 +300,7 @@ export type TranscriptBlock =
   | ProposedPlanBlock
   | CheckpointSummaryBlock
   | SendingStateBlock
+  | WaitingStateBlock
   | WorkingStateBlock
   | FinishedStateBlock
   | InterruptedStateBlock
@@ -954,6 +961,16 @@ function formatWorkGroupFooter(block: WorkGroupBlock) {
 }
 
 function finishedWorkGroupFooterLines(block: WorkGroupBlock): AnnotatedLine[] {
+  const startedAtMs = Date.parse(block.startedAt);
+  const endedAtMs = Date.parse(block.endedAt);
+  if (
+    Number.isFinite(startedAtMs)
+    && Number.isFinite(endedAtMs)
+    && endedAtMs - startedAtMs <= 1_000
+  ) {
+    return [];
+  }
+
   return [
     {
       text: capitalizeInlineLabel(formatWorkGroupFooter(block)),
@@ -1580,10 +1597,13 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
     }
 
     case "sending-state":
+    case "waiting-state":
     case "working-state": {
       const elapsedLabel = formatElapsedDuration(Date.parse(block.now) - Date.parse(block.startedAt));
       const text = block.type === "sending-state"
         ? `Sending prompt for ${elapsedLabel}`
+        : block.type === "waiting-state"
+          ? `Waiting for agent for ${elapsedLabel}`
         : `Working for ${elapsedLabel}`;
       const highlightSpans = workingPulseSpans(text, block.now, block.startedAt);
       return [

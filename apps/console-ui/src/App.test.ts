@@ -9,6 +9,8 @@ import {
   normalizeProjectWorkspaceRootForComparison,
   parsePersistedArchivedProjectIds,
   resolveManagedThreadRowSelection,
+  shouldBlockGlobalPromptTypingForSelection,
+  shouldScopeGlobalSelectAllToHistory,
   summarizeThreadSelection,
   shouldRetainPendingPromptSend,
   shouldSuppressTabFocusNavigation,
@@ -99,6 +101,44 @@ describe("isPaletteToggleShortcut", () => {
       shiftKey: false,
       metaKey: false,
       altKey: false,
+    })).toBe(false);
+  });
+});
+
+describe("shouldBlockGlobalPromptTypingForSelection", () => {
+  it("blocks global prompt typing when selection exists outside active history", () => {
+    expect(shouldBlockGlobalPromptTypingForSelection({
+      hasSelectionInDocument: true,
+      hasSelectionInActiveHistory: false,
+    })).toBe(true);
+  });
+
+  it("allows global prompt typing when the selection is in active history", () => {
+    expect(shouldBlockGlobalPromptTypingForSelection({
+      hasSelectionInDocument: true,
+      hasSelectionInActiveHistory: true,
+    })).toBe(false);
+  });
+});
+
+describe("shouldScopeGlobalSelectAllToHistory", () => {
+  it("routes ctrl+a to history when the active pane is in history mode", () => {
+    expect(shouldScopeGlobalSelectAllToHistory({
+      key: "a",
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+      historyActive: true,
+    })).toBe(true);
+  });
+
+  it("does not route ctrl+a when history is not active", () => {
+    expect(shouldScopeGlobalSelectAllToHistory({
+      key: "a",
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+      historyActive: false,
     })).toBe(false);
   });
 });

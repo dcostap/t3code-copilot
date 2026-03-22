@@ -245,6 +245,26 @@ export function isPaletteToggleShortcut(
   return event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "a";
 }
 
+export function shouldBlockGlobalPromptTypingForSelection(input: {
+  readonly hasSelectionInDocument: boolean;
+  readonly hasSelectionInActiveHistory: boolean;
+}) {
+  return input.hasSelectionInDocument && !input.hasSelectionInActiveHistory;
+}
+
+export function shouldScopeGlobalSelectAllToHistory(input: {
+  readonly key: string;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly altKey: boolean;
+  readonly historyActive: boolean;
+}) {
+  return input.historyActive
+    && (input.ctrlKey || input.metaKey)
+    && !input.altKey
+    && input.key.toLowerCase() === "a";
+}
+
 export function summarizeThreadSelection(
   threadIds: ReadonlyArray<string>,
   selectedThreadIds: ReadonlySet<string>,
@@ -2201,23 +2221,37 @@ export function App() {
         return;
       }
 
-      if (
+      const hasSelectionInDocument =
         typeof window !== "undefined"
         && typeof document !== "undefined"
-        && hasNonCollapsedSelectionInsideElement(window.getSelection(), document.body)
-      ) {
+        && hasNonCollapsedSelectionInsideElement(window.getSelection(), document.body);
+      const hasSelectionInActiveHistory = paneRefs.current[workspace.activePaneId]?.hasHistorySelection() ?? false;
+      if (shouldBlockGlobalPromptTypingForSelection({ hasSelectionInDocument, hasSelectionInActiveHistory })) {
+        return;
+      }
+
+      const activePaneHandle = paneRefs.current[workspace.activePaneId];
+      if (shouldScopeGlobalSelectAllToHistory({
+        key: event.key,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        altKey: event.altKey,
+        historyActive: activePaneHandle?.isHistoryActive() ?? false,
+      })) {
+        event.preventDefault();
+        activePaneHandle?.selectAllHistory();
         return;
       }
 
       if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
         event.preventDefault();
-        paneRefs.current[workspace.activePaneId]?.insertPromptText(event.key);
+        activePaneHandle?.insertPromptText(event.key);
         return;
       }
 
       if (event.key === "Backspace") {
         event.preventDefault();
-        paneRefs.current[workspace.activePaneId]?.deletePromptBackward();
+        activePaneHandle?.deletePromptBackward();
       }
     };
 

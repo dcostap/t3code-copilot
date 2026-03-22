@@ -1732,7 +1732,7 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
-  it("appends a transient working-state block while the turn is running", () => {
+  it("appends a waiting-state block while the turn is running but the assistant has not started yet", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
@@ -1764,9 +1764,65 @@ describe("threadToTranscriptBlocks", () => {
 
     expect(derived).toEqual([
       {
-        type: "working-state",
+        type: "waiting-state",
         startedAt: "2026-03-12T09:00:01.000Z",
         now: "2026-03-12T09:00:04.500Z",
+      },
+    ]);
+  });
+
+  it("switches to a working-state block once the assistant message has started", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-running-with-output");
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        proposedPlans: [],
+        checkpoints: [],
+        activities: [],
+        messages: [
+          {
+            id: MessageId.makeUnsafe("assistant-running-message"),
+            role: "assistant",
+            text: "Partial response",
+            attachments: [],
+            turnId,
+            streaming: true,
+            createdAt: "2026-03-12T09:00:03.000Z",
+            updatedAt: "2026-03-12T09:00:04.000Z",
+          },
+        ],
+        latestTurn: {
+          turnId,
+          state: "running",
+          requestedAt: "2026-03-12T09:00:00.000Z",
+          startedAt: "2026-03-12T09:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: MessageId.makeUnsafe("assistant-running-message"),
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: "2026-03-12T09:00:04.000Z",
+        },
+      },
+      { now: "2026-03-12T09:00:05.000Z" },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Partial response",
+        streaming: true,
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-12T09:00:03.000Z",
+        now: "2026-03-12T09:00:05.000Z",
       },
     ]);
   });
@@ -1949,7 +2005,7 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
-  it("keeps reasoning blocks separate while the working-state line stays generic", () => {
+  it("keeps reasoning blocks separate while the waiting-state line stays generic before assistant output starts", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
     expect(thread).toBeDefined();
@@ -2016,7 +2072,7 @@ describe("threadToTranscriptBlocks", () => {
         text: "Need to inspect the workspace tree first.",
       },
       {
-        type: "working-state",
+        type: "waiting-state",
         startedAt: "2026-03-12T09:00:01.000Z",
         now: "2026-03-12T09:00:04.500Z",
       },
