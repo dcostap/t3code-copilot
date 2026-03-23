@@ -767,6 +767,23 @@ describe("blockToLines", () => {
     expect(lines[1]?.animatedText).toEqual({ kind: "loading", from: 0, to: "Working for ".length });
   });
 
+  it("renders a working-state block with a custom intent label", () => {
+    const lines = blockToLines({
+      type: "working-state",
+      startedAt: "1970-01-01T00:00:00.000Z",
+      now: "1970-01-01T00:00:00.180Z",
+      label: "Browsing the internet",
+    });
+
+    expect(lines[1]?.kind).toBe("workingLine");
+    expect(lines[1]?.text).toContain("Browsing the internet for");
+    expect(lines[1]?.animatedText).toEqual({
+      kind: "loading",
+      from: 0,
+      to: "Browsing the internet for ".length,
+    });
+  });
+
   it("renders a waiting-state block with animated loading text", () => {
     const lines = blockToLines({
       type: "waiting-state",

@@ -21,6 +21,7 @@ import {
 } from "react";
 
 import { AnimatedLoadingText } from "./AnimatedLoadingText";
+import { deriveRunningThreadIntentLabel } from "./agentIntent";
 import { CommandPalette } from "./CommandPalette";
 import {
   filterCommandPaletteCommands,
@@ -61,6 +62,7 @@ import { resolveWsHttpOrigin } from "./wsTransport";
 
 const DRAFT_STORAGE_KEY = "t3code:console-pane-drafts:v1";
 const ARCHIVED_PROJECT_IDS_STORAGE_KEY = "t3code:archived-project-ids:v1";
+const UNREAD_THREAD_IDS_STORAGE_KEY = "t3code:unread-thread-ids:v1";
 const EMPTY_PROJECTS: ReadonlyArray<OrchestrationProject> = [];
 const SIDEBAR_THREAD_LIMIT = 7;
 const SIDEBAR_IDLE_HIDE_MS = 10 * 60 * 60 * 1000;
@@ -119,6 +121,12 @@ interface DuplicateProjectMatch {
   readonly title: string;
   readonly workspaceRoot: string;
   readonly isArchived: boolean;
+}
+
+interface ThreadUnreadSnapshot<ThreadId extends string = string> {
+  readonly threadId: ThreadId;
+  readonly isRunning: boolean;
+  readonly isDeleted: boolean;
 }
 
 interface ThreadSelectionSummary {
@@ -451,23 +459,34 @@ function getThreadSortValue(thread: OrchestrationThread) {
   );
 }
 
-function getThreadStatus(
+export function getThreadStatus(
   thread: OrchestrationThread,
   nowIso: string,
   isThreadTurnRunning: boolean,
+  pendingUserInputStartedAt: string | null = null,
 ): ThreadStatusDescriptor {
   if (thread.session?.lastError) {
     return { tone: "error", label: "error" };
   }
 
   const nowMs = parseTimestampMs(nowIso);
+  if (pendingUserInputStartedAt) {
+    const waitingStartedAt = parseTimestampMs(pendingUserInputStartedAt);
+    const label = deriveRunningThreadIntentLabel(thread) ?? "Waiting for input";
+    return {
+      tone: "waiting",
+      label: `${label} ${formatElapsedCompact(nowMs - waitingStartedAt)}`,
+    };
+  }
+
   if (isThreadTurnRunning || thread.latestTurn?.state === "running") {
     const startedAt = parseTimestampMs(
       thread.latestTurn?.startedAt ?? thread.latestTurn?.requestedAt ?? thread.updatedAt,
     );
+    const label = deriveRunningThreadIntentLabel(thread) ?? "Working";
     return {
       tone: "working",
-      label: `working ${formatElapsedCompact(nowMs - startedAt)}`,
+      label: `${label} ${formatElapsedCompact(nowMs - startedAt)}`,
     };
   }
 
@@ -544,6 +563,18 @@ function persistPaneDrafts(draftsByPaneId: Record<string, string>) {
   window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draftsByPaneId));
 }
 
+function areSetsEqual<T>(left: ReadonlySet<T>, right: ReadonlySet<T>) {
+  if (left.size !== right.size) {
+    return false;
+  }
+  for (const value of left) {
+    if (!right.has(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function parsePersistedArchivedProjectIds<ProjectId extends string = string>(raw: string | null) {
   try {
     if (!raw) {
@@ -573,6 +604,82 @@ function persistArchivedProjectIds(projectIds: ReadonlySet<string>) {
     return;
   }
   window.localStorage.setItem(ARCHIVED_PROJECT_IDS_STORAGE_KEY, JSON.stringify([...projectIds]));
+}
+
+export function resolveProjectSelectionAfterArchive<ProjectId extends string>(input: {
+  readonly activeProjectId: ProjectId | null;
+  readonly archivedProjectId: ProjectId;
+  readonly visibleProjectIds: ReadonlyArray<ProjectId>;
+}) {
+  if (input.activeProjectId !== input.archivedProjectId) {
+    return input.activeProjectId;
+  }
+  return input.visibleProjectIds.find((projectId) => projectId !== input.archivedProjectId) ?? null;
+}
+
+export function parsePersistedUnreadThreadIds<ThreadId extends string = string>(raw: string | null) {
+  try {
+    if (!raw) {
+      return new Set<ThreadId>();
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return new Set<ThreadId>();
+    }
+    return new Set(parsed.filter((value): value is ThreadId => typeof value === "string" && value.length > 0));
+  } catch {
+    return new Set<ThreadId>();
+  }
+}
+
+function readPersistedUnreadThreadIds<ThreadId extends string = string>() {
+  if (typeof window === "undefined") {
+    return new Set<ThreadId>();
+  }
+  return parsePersistedUnreadThreadIds<ThreadId>(
+    window.localStorage.getItem(UNREAD_THREAD_IDS_STORAGE_KEY),
+  );
+}
+
+function persistUnreadThreadIds(threadIds: ReadonlySet<string>) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(UNREAD_THREAD_IDS_STORAGE_KEY, JSON.stringify([...threadIds]));
+}
+
+export function reconcileUnreadThreadIds<ThreadId extends string = string>(input: {
+  readonly currentUnreadThreadIds: ReadonlySet<ThreadId>;
+  readonly previousRunningByThreadId: ReadonlyMap<ThreadId, boolean>;
+  readonly threadSnapshots: ReadonlyArray<ThreadUnreadSnapshot<ThreadId>>;
+  readonly activeThreadId: ThreadId | null;
+}) {
+  const visibleThreadIds = new Set<ThreadId>();
+  const nextRunningByThreadId = new Map<ThreadId, boolean>();
+  const nextUnreadThreadIds = new Set(input.currentUnreadThreadIds);
+
+  for (const snapshot of input.threadSnapshots) {
+    if (snapshot.isDeleted) {
+      continue;
+    }
+    visibleThreadIds.add(snapshot.threadId);
+    nextRunningByThreadId.set(snapshot.threadId, snapshot.isRunning);
+    const wasRunning = input.previousRunningByThreadId.get(snapshot.threadId) ?? false;
+    if (wasRunning && !snapshot.isRunning && input.activeThreadId !== snapshot.threadId) {
+      nextUnreadThreadIds.add(snapshot.threadId);
+    }
+  }
+
+  for (const threadId of nextUnreadThreadIds) {
+    if (!visibleThreadIds.has(threadId) || threadId === input.activeThreadId) {
+      nextUnreadThreadIds.delete(threadId);
+    }
+  }
+
+  return {
+    unreadThreadIds: nextUnreadThreadIds,
+    runningByThreadId: nextRunningByThreadId,
+  };
 }
 
 function EmptyWorkspaceSurface(props: {
@@ -704,6 +811,9 @@ export function App() {
   const [threadDeleteConfirmId, setThreadDeleteConfirmId] = useState<OrchestrationThread["id"] | null>(null);
   const [threadDeleteError, setThreadDeleteError] = useState<string | null>(null);
   const [isDeletingThread, setIsDeletingThread] = useState(false);
+  const [unreadThreadIds, setUnreadThreadIds] = useState<ReadonlySet<OrchestrationThread["id"]>>(
+    () => readPersistedUnreadThreadIds<OrchestrationThread["id"]>(),
+  );
   const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
   const paneElementRefs = useRef<Record<string, HTMLElement | null>>({});
   const initializedPaneIdsRef = useRef<Record<string, true>>({});
@@ -716,6 +826,7 @@ export function App() {
   const manageProjectCloseButtonRef = useRef<HTMLButtonElement | null>(null);
   const lastManagedThreadRowSelectionIdRef = useRef<OrchestrationThread["id"] | null>(null);
   const pointerManagedThreadSelectionAnchorIdRef = useRef<OrchestrationThread["id"] | null>(null);
+  const previousRunningByThreadIdRef = useRef<ReadonlyMap<OrchestrationThread["id"], boolean>>(new Map());
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
   const hasAnimatedTranscript = useMemo(
     () =>
@@ -749,6 +860,10 @@ export function App() {
   useEffect(() => {
     persistArchivedProjectIds(archivedProjectIds);
   }, [archivedProjectIds]);
+
+  useEffect(() => {
+    persistUnreadThreadIds(unreadThreadIds);
+  }, [unreadThreadIds]);
 
   useEffect(() => {
     if (!projectModalOpen) {
@@ -787,6 +902,28 @@ export function App() {
     }
     return map;
   }, [consoleData.threads, projects]);
+  const threadUnreadSnapshots = useMemo(
+    () =>
+      consoleData.threads.map((thread) => ({
+        threadId: thread.id,
+        isRunning: isThreadTurnRunning(thread.id),
+        isDeleted: thread.deletedAt !== null,
+      })),
+    [consoleData.threads, isThreadTurnRunning],
+  );
+
+  useEffect(() => {
+    const nextState = reconcileUnreadThreadIds({
+      currentUnreadThreadIds: unreadThreadIds,
+      previousRunningByThreadId: previousRunningByThreadIdRef.current,
+      threadSnapshots: threadUnreadSnapshots,
+      activeThreadId: workspace.activeThreadId,
+    });
+    previousRunningByThreadIdRef.current = nextState.runningByThreadId;
+    if (!areSetsEqual(unreadThreadIds, nextState.unreadThreadIds)) {
+      setUnreadThreadIds(nextState.unreadThreadIds);
+    }
+  }, [threadUnreadSnapshots, unreadThreadIds, workspace.activeThreadId]);
 
   const managedProject = useMemo(
     () => (managedProjectId ? projects.find((project) => project.id === managedProjectId) ?? null : null),
@@ -1444,9 +1581,26 @@ export function App() {
     if (!projectArchiveConfirmId) {
       return;
     }
+    const nextActiveProjectId = resolveProjectSelectionAfterArchive({
+      activeProjectId: workspace.activeProject?.id ?? null,
+      archivedProjectId: projectArchiveConfirmId,
+      visibleProjectIds: workspace.projectViews
+        .map((projectView) => projectView.project.id)
+        .filter((projectId) => !archivedProjectIds.has(projectId)),
+    });
     setArchivedProjectIds((existing) => new Set(existing).add(projectArchiveConfirmId));
+    if (managedProjectId === projectArchiveConfirmId) {
+      setManagedProjectId(null);
+    }
+    if (workspace.activeProject?.id === projectArchiveConfirmId) {
+      if (nextActiveProjectId) {
+        workspace.activateProject(nextActiveProjectId);
+      } else {
+        workspace.clearActiveProject();
+      }
+    }
     setProjectArchiveConfirmId(null);
-  }, [projectArchiveConfirmId]);
+  }, [archivedProjectIds, managedProjectId, projectArchiveConfirmId, workspace]);
 
   const handleCloseManageProjectModal = useCallback(() => {
     if (isDeletingManagedThreads) {
@@ -2336,39 +2490,44 @@ export function App() {
   const threadDeleteConfirmThread = threadDeleteConfirmId
     ? consoleData.threads.find((thread) => thread.id === threadDeleteConfirmId && thread.deletedAt === null) ?? null
     : null;
+  const showTopbarTabStrip = !!(workspace.activeProject && activeLayout && activeLayout.tabs.length > 1);
   const topbar = (
     <div className="project-topbar" style={topbarStyle}>
       <div className="project-topbar__sidebarSpacer" />
       {workspace.activeProject && activeLayout ? (
         <div className="project-tabs">
-          <div className="project-tabs__list" role="tablist" aria-label="Project tabs">
-            {activeLayout.tabs.map((tab, index) => (
-              <button
-                key={tab.id}
-                type="button"
-                role="tab"
-                aria-selected={tab.id === activeLayout.activeTabId}
-                className={`project-tab${tab.id === activeLayout.activeTabId ? " project-tab--active" : ""}`}
-                onClick={() => {
-                  workspace.activateTab(workspace.activeProject!.id, tab.id);
-                  focusPanePrompt(tab.activePaneId);
-                }}
-                onMouseDown={(event) => {
-                  if (event.button !== 1) {
-                    return;
-                  }
-                  event.preventDefault();
-                  event.stopPropagation();
-                  workspace.closeTab(workspace.activeProject!.id, tab.id);
-                }}
-              >
-                <span className="project-tab__title">Tab {index + 1}</span>
-              </button>
-            ))}
-            <button type="button" className="project-tab project-tab--create" onClick={handleCreateDraftTab} aria-label="New tab">
-              +
-            </button>
-          </div>
+          {showTopbarTabStrip ? (
+            <div className="project-tabs__list" role="tablist" aria-label="Project tabs">
+              {activeLayout.tabs.map((tab, index) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab.id === activeLayout.activeTabId}
+                  className={`project-tab${tab.id === activeLayout.activeTabId ? " project-tab--active" : ""}`}
+                  onClick={() => {
+                    workspace.activateTab(workspace.activeProject!.id, tab.id);
+                    focusPanePrompt(tab.activePaneId);
+                  }}
+                  onMouseDown={(event) => {
+                    if (event.button !== 1) {
+                      return;
+                    }
+                    event.preventDefault();
+                    event.stopPropagation();
+                    workspace.closeTab(workspace.activeProject!.id, tab.id);
+                  }}
+                >
+                  <span className="project-tab__title">Tab {index + 1}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="project-tabs__spacer" aria-hidden="true" />
+          )}
+          <button type="button" className="project-tab project-tab--create" onClick={handleCreateDraftTab} aria-label="New tab">
+            +
+          </button>
         </div>
       ) : (
         <div className="project-tabs project-tabs--empty" />
@@ -2412,13 +2571,21 @@ export function App() {
                 const isActiveProject = projectView.project.id === workspace.activeProject?.id;
                 const expandedSidebarThreads = expandedSidebarProjectIds.has(projectView.project.id);
                 const threadEntries = threads.map((thread) => {
-                  const status = getThreadStatus(thread, nowIso, isThreadTurnRunning(thread.id));
+                  const pendingUserInput = getPendingUserInputs(thread.id)[0] ?? null;
+                  const status = getThreadStatus(
+                    thread,
+                    nowIso,
+                    isThreadTurnRunning(thread.id),
+                    pendingUserInput?.createdAt ?? null,
+                  );
                   const ageMs = getThreadAgeMs(thread, nowIso);
+                  const ageLabel = getThreadAgeLabel(thread, nowIso);
                   return {
                     thread,
                     status,
                     tooltip: getThreadFirstPrompt(thread),
-                    ageLabel: getThreadAgeLabel(thread, nowIso),
+                    ageLabel,
+                    sidebarLabel: status.tone === "working" ? status.label : ageLabel,
                     ageMs,
                   };
                 });
@@ -2484,7 +2651,7 @@ export function App() {
                       <div className="project-tree__threads">
                         {threads.length === 0 ? (
                           <div className="project-tree__empty">No threads yet.</div>
-                         ) : visibleThreadEntries.map(({ thread, status, tooltip, ageLabel, ageMs }) => (
+                          ) : visibleThreadEntries.map(({ thread, status, tooltip, sidebarLabel, ageMs }) => (
                             <button
                               key={thread.id}
                               type="button"
@@ -2496,14 +2663,26 @@ export function App() {
                               onDragEnd={() => setDraggedThreadId(null)}
                               onClick={() => handleOpenThread(thread.id)}
                             >
-                              <span className="project-thread__title">{thread.title}</span>
-                              <span
-                                className={`project-thread__status project-thread__status--${status.tone}`}
-                                style={status.tone === "idle"
-                                  ? ({ "--project-thread-status-opacity": getThreadStatusOpacity(ageMs) } as CSSProperties)
-                                  : undefined}
-                              >
-                                {ageLabel}
+                              {status.tone === "working" ? (
+                                <AnimatedLoadingText
+                                  text={thread.title}
+                                  className="project-thread__title project-thread__title--loading"
+                                />
+                              ) : (
+                                <span className="project-thread__title">{thread.title}</span>
+                              )}
+                              <span className="project-thread__meta">
+                                {unreadThreadIds.has(thread.id) ? (
+                                  <span className="project-thread__unreadDot" aria-hidden="true" />
+                                ) : null}
+                                <span
+                                  className={`project-thread__status project-thread__status--${status.tone}`}
+                                  style={status.tone === "idle"
+                                    ? ({ "--project-thread-status-opacity": getThreadStatusOpacity(ageMs) } as CSSProperties)
+                                    : undefined}
+                                >
+                                  {sidebarLabel}
+                                </span>
                               </span>
                             </button>
                           ))
@@ -2740,7 +2919,12 @@ export function App() {
                 {projects.find((project) => project.id === threadContextMenuThread.projectId)?.title ?? "Unknown project"}
               </div>
               <div className="project-context-menu__meta">
-                <span>{getThreadStatus(threadContextMenuThread, nowIso, isThreadTurnRunning(threadContextMenuThread.id)).label}</span>
+                <span>{getThreadStatus(
+                  threadContextMenuThread,
+                  nowIso,
+                  isThreadTurnRunning(threadContextMenuThread.id),
+                  getPendingUserInputs(threadContextMenuThread.id)[0]?.createdAt ?? null,
+                ).label}</span>
                 <span>{threadContextMenuThread.provider}</span>
               </div>
             </div>
@@ -2832,7 +3016,12 @@ export function App() {
                       </td>
                     </tr>
                   ) : managedProjectThreads.map((thread) => {
-                    const status = getThreadStatus(thread, nowIso, isThreadTurnRunning(thread.id));
+                    const status = getThreadStatus(
+                      thread,
+                      nowIso,
+                      isThreadTurnRunning(thread.id),
+                      getPendingUserInputs(thread.id)[0]?.createdAt ?? null,
+                    );
                     const ageMs = getThreadAgeMs(thread, nowIso);
                     const createdAtMs = Math.max(0, parseTimestampMs(nowIso) - parseTimestampMs(thread.createdAt));
                     const isSelected = selectedManagedThreadIds.has(thread.id);

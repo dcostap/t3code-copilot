@@ -5,9 +5,13 @@ import {
   findDuplicateProjectForWorkspaceRoot,
   findReusableDraftPaneForThreadOpen,
   formatManageThreadTimestamp,
+  getThreadStatus,
   isPaletteToggleShortcut,
   normalizeProjectWorkspaceRootForComparison,
   parsePersistedArchivedProjectIds,
+  parsePersistedUnreadThreadIds,
+  reconcileUnreadThreadIds,
+  resolveProjectSelectionAfterArchive,
   resolveManagedThreadRowSelection,
   shouldBlockGlobalPromptTypingForSelection,
   shouldScopeGlobalSelectAllToHistory,
@@ -169,6 +173,118 @@ describe("formatManageThreadTimestamp", () => {
   });
 });
 
+describe("getThreadStatus", () => {
+  it("treats open pending user input as waiting instead of working", () => {
+    const thread = buildTestSnapshot().threads[0]!;
+    const pendingUserInputActivity = {
+      id: EventId.makeUnsafe("activity-pending-user-input"),
+      tone: "info",
+      kind: "user-input.requested",
+      summary: "Question asked",
+      payload: {
+        requestId: "user-input-open-1",
+        questions: [{
+          id: "question-1",
+          header: "Snapshot shape",
+          question: "How should the snapshot be stored?",
+          options: [{
+            label: "Per vehicle",
+            description: "Store one snapshot per imported vehicle.",
+          }],
+        }],
+      },
+      turnId: thread.latestTurn!.turnId,
+      sequence: 999,
+      createdAt: "2026-03-20T12:06:00.000Z",
+    } satisfies (typeof thread.activities)[number];
+    const runningTurn = {
+      ...thread,
+      latestTurn: {
+        ...thread.latestTurn!,
+        state: "running" as const,
+        requestedAt: "2026-03-20T12:00:00.000Z",
+        startedAt: "2026-03-20T12:00:05.000Z",
+        completedAt: null,
+      },
+      session: {
+        ...thread.session!,
+        status: "running" as const,
+        activeTurnId: thread.latestTurn!.turnId,
+        updatedAt: "2026-03-20T12:05:00.000Z",
+      },
+      activities: [
+        ...thread.activities,
+        pendingUserInputActivity,
+      ],
+    };
+
+    expect(getThreadStatus(
+      runningTurn,
+      "2026-03-20T12:16:00.000Z",
+      true,
+      "2026-03-20T12:06:00.000Z",
+    )).toEqual({
+      tone: "waiting",
+      label: "Waiting for input 10m",
+    });
+  });
+
+  it("uses the running intent label while waiting on user input when available", () => {
+    const thread = buildTestSnapshot().threads[0]!;
+    const reportIntentActivity = {
+      id: EventId.makeUnsafe("activity-report-intent"),
+      tone: "tool",
+      kind: "tool.completed",
+      summary: "Report intent",
+      payload: {
+        title: "Report Intent",
+        detail: "intent=asking user",
+        data: {
+          item: {
+            toolName: "report_intent",
+            arguments: {
+              intent: "asking user",
+            },
+          },
+        },
+      },
+      turnId: thread.latestTurn!.turnId,
+      sequence: 998,
+      createdAt: "2026-03-20T12:05:30.000Z",
+    } satisfies (typeof thread.activities)[number];
+    const runningTurn = {
+      ...thread,
+      latestTurn: {
+        ...thread.latestTurn!,
+        state: "running" as const,
+        requestedAt: "2026-03-20T12:00:00.000Z",
+        startedAt: "2026-03-20T12:00:05.000Z",
+        completedAt: null,
+      },
+      session: {
+        ...thread.session!,
+        status: "running" as const,
+        activeTurnId: thread.latestTurn!.turnId,
+        updatedAt: "2026-03-20T12:05:00.000Z",
+      },
+      activities: [
+        ...thread.activities,
+        reportIntentActivity,
+      ],
+    };
+
+    expect(getThreadStatus(
+      runningTurn,
+      "2026-03-20T12:16:00.000Z",
+      true,
+      "2026-03-20T12:06:00.000Z",
+    )).toEqual({
+      tone: "waiting",
+      label: "Asking user 10m",
+    });
+  });
+});
+
 describe("resolveManagedThreadRowSelection", () => {
   it("replaces the selected row set on plain click", () => {
     expect(resolveManagedThreadRowSelection({
@@ -243,6 +359,101 @@ describe("parsePersistedArchivedProjectIds", () => {
 
   it("ignores malformed archived project storage", () => {
     expect(parsePersistedArchivedProjectIds("{not-json")).toEqual(new Set());
+  });
+});
+
+describe("parsePersistedUnreadThreadIds", () => {
+  it("reads unread thread ids from stored json", () => {
+    expect(parsePersistedUnreadThreadIds(JSON.stringify(["thread:1", "thread:2"]))).toEqual(
+      new Set(["thread:1", "thread:2"]),
+    );
+  });
+
+  it("ignores malformed unread thread storage", () => {
+    expect(parsePersistedUnreadThreadIds("{not-json")).toEqual(new Set());
+  });
+});
+
+describe("reconcileUnreadThreadIds", () => {
+  it("marks a thread unread when it transitions from running to finished off-screen", () => {
+    const result = reconcileUnreadThreadIds({
+      currentUnreadThreadIds: new Set<string>(),
+      previousRunningByThreadId: new Map([["thread:1", true]]),
+      threadSnapshots: [
+        { threadId: "thread:1", isRunning: false, isDeleted: false },
+      ],
+      activeThreadId: "thread:2",
+    });
+
+    expect(result.unreadThreadIds).toEqual(new Set(["thread:1"]));
+    expect(result.runningByThreadId).toEqual(new Map([["thread:1", false]]));
+  });
+
+  it("does not mark the currently focused thread unread when it finishes", () => {
+    const result = reconcileUnreadThreadIds({
+      currentUnreadThreadIds: new Set<string>(),
+      previousRunningByThreadId: new Map([["thread:1", true]]),
+      threadSnapshots: [
+        { threadId: "thread:1", isRunning: false, isDeleted: false },
+      ],
+      activeThreadId: "thread:1",
+    });
+
+    expect(result.unreadThreadIds).toEqual(new Set());
+  });
+
+  it("clears unread threads once their pane becomes active", () => {
+    const result = reconcileUnreadThreadIds({
+      currentUnreadThreadIds: new Set(["thread:1", "thread:2"]),
+      previousRunningByThreadId: new Map<string, boolean>(),
+      threadSnapshots: [
+        { threadId: "thread:1", isRunning: false, isDeleted: false },
+        { threadId: "thread:2", isRunning: false, isDeleted: false },
+      ],
+      activeThreadId: "thread:2",
+    });
+
+    expect(result.unreadThreadIds).toEqual(new Set(["thread:1"]));
+  });
+
+  it("drops unread ids for deleted or missing threads", () => {
+    const result = reconcileUnreadThreadIds({
+      currentUnreadThreadIds: new Set(["thread:1", "thread:2", "thread:3"]),
+      previousRunningByThreadId: new Map<string, boolean>(),
+      threadSnapshots: [
+        { threadId: "thread:1", isRunning: false, isDeleted: false },
+        { threadId: "thread:2", isRunning: false, isDeleted: true },
+      ],
+      activeThreadId: null,
+    });
+
+    expect(result.unreadThreadIds).toEqual(new Set(["thread:1"]));
+  });
+});
+
+describe("resolveProjectSelectionAfterArchive", () => {
+  it("switches to another visible project when the active one is archived", () => {
+    expect(resolveProjectSelectionAfterArchive({
+      activeProjectId: "project:1",
+      archivedProjectId: "project:1",
+      visibleProjectIds: ["project:1", "project:2", "project:3"],
+    })).toBe("project:2");
+  });
+
+  it("clears selection when archiving the only visible active project", () => {
+    expect(resolveProjectSelectionAfterArchive({
+      activeProjectId: "project:1",
+      archivedProjectId: "project:1",
+      visibleProjectIds: ["project:1"],
+    })).toBeNull();
+  });
+
+  it("leaves selection alone when archiving a background project", () => {
+    expect(resolveProjectSelectionAfterArchive({
+      activeProjectId: "project:2",
+      archivedProjectId: "project:1",
+      visibleProjectIds: ["project:1", "project:2"],
+    })).toBe("project:2");
   });
 });
 

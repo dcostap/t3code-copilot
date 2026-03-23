@@ -17,6 +17,10 @@ import {
   isStaleCopilotUserInputResponseDetail,
   parsePendingUserInputAnswers,
 } from "../pendingUserInput";
+import {
+  deriveRunningThreadIntentLabel,
+  isReportIntentToolPayload,
+} from "../agentIntent";
 
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
@@ -750,14 +754,14 @@ function isAskUserToolPayload(payload: Record<string, unknown> | null): boolean 
   return normalizeToolName(extractToolName(payload)) === "ask_user";
 }
 
-function deriveAskUserHiddenWorkItemIds(
+function deriveHiddenToolWorkItemIds(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): ReadonlySet<string> {
   const hiddenItemIds = new Set<string>();
 
   for (const activity of activities) {
     const payload = asRecord(activity.payload);
-    if (!isAskUserToolPayload(payload)) {
+    if (!isAskUserToolPayload(payload) && !isReportIntentToolPayload(payload)) {
       continue;
     }
     const itemId = extractWorkItemId(payload);
@@ -771,15 +775,15 @@ function deriveAskUserHiddenWorkItemIds(
 
 function shouldHideActivityFromTranscript(
   activity: OrchestrationThreadActivity,
-  askUserHiddenWorkItemIds: ReadonlySet<string>,
+  hiddenToolWorkItemIds: ReadonlySet<string>,
 ): boolean {
   const payload = asRecord(activity.payload);
-  if (isAskUserToolPayload(payload)) {
+  if (isAskUserToolPayload(payload) || isReportIntentToolPayload(payload)) {
     return true;
   }
 
   const itemId = extractWorkItemId(payload);
-  if (itemId && askUserHiddenWorkItemIds.has(itemId)) {
+  if (itemId && hiddenToolWorkItemIds.has(itemId)) {
     return true;
   }
 
@@ -792,9 +796,9 @@ function shouldHideActivityFromTranscript(
 
 function willActivityRenderInTranscript(
   activity: OrchestrationThreadActivity,
-  askUserHiddenWorkItemIds: ReadonlySet<string>,
+  hiddenToolWorkItemIds: ReadonlySet<string>,
 ): boolean {
-  if (shouldHideActivityFromTranscript(activity, askUserHiddenWorkItemIds)) {
+  if (shouldHideActivityFromTranscript(activity, hiddenToolWorkItemIds)) {
     return false;
   }
 
@@ -1344,7 +1348,7 @@ function buildAssistantMessageEntriesFromEvents(
   message: OrchestrationThread["messages"][number],
   events: ReadonlyArray<OrchestrationEvent>,
   boundariesByTurnId: ReadonlyMap<string, ReadonlyArray<string>>,
-  askUserHiddenWorkItemIds: ReadonlySet<string>,
+  hiddenToolWorkItemIds: ReadonlySet<string>,
 ): TimelineEntry[] | null {
   if (message.role !== "assistant") {
     return null;
@@ -1384,7 +1388,7 @@ function buildAssistantMessageEntriesFromEvents(
   let segmentText = "";
   let segmentCreatedAt: string | null = null;
   const finalFinishedAt = shouldAppendFinishedState(thread, message)
-    ? resolveFinishedAt(thread, message, askUserHiddenWorkItemIds)
+    ? resolveFinishedAt(thread, message, hiddenToolWorkItemIds)
     : null;
 
   const flushSegment = (streaming: boolean, finishedAt?: string) => {
@@ -1465,13 +1469,13 @@ function buildAssistantMessageEntriesFromEvents(
 function buildFinishedStateEntryForAssistantMessage(
   thread: OrchestrationThread,
   message: OrchestrationThread["messages"][number],
-  askUserHiddenWorkItemIds: ReadonlySet<string>,
+  hiddenToolWorkItemIds: ReadonlySet<string>,
 ) {
   if (!shouldAppendFinishedState(thread, message)) {
     return null;
   }
 
-  const finishedAt = resolveFinishedAt(thread, message, askUserHiddenWorkItemIds);
+  const finishedAt = resolveFinishedAt(thread, message, hiddenToolWorkItemIds);
   return {
     id: `message:${message.id}:finished`,
     createdAt: finishedAt,
@@ -1497,7 +1501,7 @@ function shouldAppendFinishedState(
 function resolveFinishedAt(
   thread: OrchestrationThread,
   message: OrchestrationThread["messages"][number],
-  askUserHiddenWorkItemIds: ReadonlySet<string>,
+  hiddenToolWorkItemIds: ReadonlySet<string>,
 ) {
   const baseFinishedAt =
     thread.latestTurn?.turnId === message.turnId && thread.latestTurn.state === "completed"
@@ -1515,7 +1519,11 @@ function resolveFinishedAt(
 
   const latestVisibleRelatedActivityAt = thread.activities
     .filter((activity) =>
-      willActivityRenderInTranscript(activity, askUserHiddenWorkItemIds)
+      willActivityRenderInTranscript(activity, hiddenToolWorkItemIds)
+      && (
+        activity.turnId === message.turnId
+        || isAssistantBoundaryActivity(activity)
+      )
       && activity.createdAt.localeCompare(baseFinishedAt) >= 0
       && (!nextMessageCreatedAt || activity.createdAt.localeCompare(nextMessageCreatedAt) < 0)
     )
@@ -1587,6 +1595,47 @@ function finalizeRunningTranscriptBlocks(
 
     return block;
   });
+}
+
+function isFinishedStateBlock(block: TranscriptBlock): block is FinishedStateBlock {
+  return block.type === "finished-state";
+}
+
+export function collapseTrailingFinishedStateRun(
+  blocks: ReadonlyArray<TranscriptBlock>,
+): TranscriptBlock[] {
+  let trailingStart = blocks.length;
+  while (trailingStart > 0 && isFinishedStateBlock(blocks[trailingStart - 1]!)) {
+    trailingStart -= 1;
+  }
+
+  const trailingBlocks = blocks.slice(trailingStart);
+  if (trailingBlocks.length <= 1) {
+    return [...blocks];
+  }
+
+  const dedupedTrailingBlocks: FinishedStateBlock[] = [];
+  const indexByFinishedAt = new Map<string, number>();
+
+  for (const block of trailingBlocks) {
+    if (!isFinishedStateBlock(block)) {
+      continue;
+    }
+
+    const existingIndex = indexByFinishedAt.get(block.finishedAt);
+    if (existingIndex === undefined) {
+      indexByFinishedAt.set(block.finishedAt, dedupedTrailingBlocks.length);
+      dedupedTrailingBlocks.push(block);
+      continue;
+    }
+
+    const existing = dedupedTrailingBlocks[existingIndex]!;
+    if (block.startedAt.localeCompare(existing.startedAt) > 0) {
+      dedupedTrailingBlocks[existingIndex] = block;
+    }
+  }
+
+  return [...blocks.slice(0, trailingStart), ...dedupedTrailingBlocks];
 }
 
 function isAssistantMessageEntry(entry: TimelineEntry) {
@@ -1868,7 +1917,7 @@ export function threadToTranscriptBlocks(
       resolvedUserInputsByRequestId.set(requestId, resolved);
     }
   }
-  const askUserHiddenWorkItemIds = deriveAskUserHiddenWorkItemIds(thread.activities);
+  const hiddenToolWorkItemIds = deriveHiddenToolWorkItemIds(thread.activities);
   const pendingUserInputOpen = hasOpenPendingUserInputRequest(thread.activities);
   const assistantBoundariesByTurnId = buildAssistantBoundaryMap(thread.activities);
   const checkpointsByAssistantMessageId = new Map(
@@ -1907,7 +1956,7 @@ export function threadToTranscriptBlocks(
             message,
             options.orchestrationEvents,
             assistantBoundariesByTurnId,
-            askUserHiddenWorkItemIds,
+            hiddenToolWorkItemIds,
           )
         : null;
 
@@ -1926,7 +1975,7 @@ export function threadToTranscriptBlocks(
 
     if (message.role === "assistant") {
       const checkpoint = checkpointsByAssistantMessageId.get(message.id);
-      const finishedStateEntry = buildFinishedStateEntryForAssistantMessage(thread, message, askUserHiddenWorkItemIds);
+      const finishedStateEntry = buildFinishedStateEntryForAssistantMessage(thread, message, hiddenToolWorkItemIds);
       if (assistantEntries) {
         entries.push(...assistantEntries);
       } else if (checkpoint) {
@@ -1989,7 +2038,7 @@ export function threadToTranscriptBlocks(
   );
 
   for (const activity of thread.activities) {
-    if (shouldHideActivityFromTranscript(activity, askUserHiddenWorkItemIds)) {
+    if (shouldHideActivityFromTranscript(activity, hiddenToolWorkItemIds)) {
       continue;
     }
     entries.push({
@@ -2135,14 +2184,21 @@ export function threadToTranscriptBlocks(
     blocks.splice(0, blocks.length, ...finalizedBlocks);
   }
 
+  if (pendingUserInputOpen) {
+    const collapsedBlocks = collapseTrailingFinishedStateRun(blocks);
+    blocks.splice(0, blocks.length, ...collapsedBlocks);
+  }
+
   if (!pendingUserInputOpen && (thread.latestTurn?.state === "running" || thread.session?.status === "running")) {
     const waitingStartedAt = findRunningTurnPhaseStartedAt(thread);
     const outputStartedAt = findRunningTurnVisibleOutputStartedAt(thread, sortedEntries);
+    const runningIntentLabel = deriveRunningThreadIntentLabel(thread);
     const now = options.now ?? new Date().toISOString();
     blocks.push({
       type: outputStartedAt ? "working-state" : "waiting-state",
       startedAt: outputStartedAt ?? waitingStartedAt,
       now,
+      ...(runningIntentLabel ? { label: runningIntentLabel } : {}),
     });
   } else if (thread.latestTurn?.state === "interrupted") {
     const startedAt =

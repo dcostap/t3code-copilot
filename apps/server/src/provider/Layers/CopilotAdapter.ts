@@ -109,7 +109,9 @@ interface ActiveCopilotSession extends CopilotTurnTrackingState {
   updatedAt: string;
   lastError: string | undefined;
   toolTitlesByCallId: Map<string, string>;
-  toolItemTypesByCallId: Map<string, "command_execution" | "dynamic_tool_call" | "mcp_tool_call">;
+  toolItemTypesByCallId: Map<string, "command_execution" | "dynamic_tool_call" | "mcp_tool_call" | "file_change">;
+  toolChangedFilesByCallId: Map<string, string[]>;
+  activeToolCallIds: string[];
   pendingApprovalResolvers: Map<string, PendingApprovalRequest>;
   pendingUserInputResolvers: Map<string, PendingUserInputRequest>;
   unsubscribe: () => void;
@@ -336,13 +338,112 @@ function requestDetailFromPermissionRequest(request: PermissionRequest): string 
 
 type CopilotToolExecutionStartEvent = Extract<SessionEvent, { type: "tool.execution_start" }>;
 type CopilotToolExecutionCompleteEvent = Extract<SessionEvent, { type: "tool.execution_complete" }>;
-type CopilotToolItemType = "command_execution" | "dynamic_tool_call" | "mcp_tool_call";
+type CopilotToolItemType = "command_execution" | "dynamic_tool_call" | "mcp_tool_call" | "file_change";
 type CopilotTerminalResultContent = Extract<
   NonNullable<NonNullable<CopilotToolExecutionCompleteEvent["data"]["result"]>["contents"]>[number],
   { type: "terminal" }
 >;
 
 const COPILOT_COMMAND_TOOL_NAMES = new Set(["bash", "cmd", "powershell", "pwsh", "shell", "sh", "zsh"]);
+const COPILOT_FILE_CHANGE_TOOL_NAME_HINTS = [
+  "apply_patch",
+  "create_file",
+  "write_file",
+  "edit_file",
+  "replace",
+  "rename",
+  "move",
+  "delete",
+  "insert_edit",
+  "multi_edit",
+  "notebook",
+];
+const COPILOT_FILE_READ_TOOL_NAME_HINTS = ["read", "view", "search", "list", "glob"];
+
+function extractChangedFiles(value: unknown): string[] {
+  const seen = new Set<string>();
+  const results: string[] = [];
+  const collect = (candidate: unknown, depth: number) => {
+    if (depth > 4 || candidate == null) {
+      return;
+    }
+    if (typeof candidate === "string") {
+      return;
+    }
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) {
+        collect(entry, depth + 1);
+      }
+      return;
+    }
+    const record = asRecord(candidate);
+    if (!record) {
+      return;
+    }
+    for (const key of ["path", "filePath", "relativePath", "filename", "newPath", "oldPath"]) {
+      const path = normalizeString(record[key]);
+      if (!path || seen.has(path)) {
+        continue;
+      }
+      seen.add(path);
+      results.push(path);
+    }
+    for (const key of ["arguments", "result", "input", "data", "changes", "files", "edits", "patch"]) {
+      if (key in record) {
+        collect(record[key], depth + 1);
+      }
+    }
+  };
+
+  collect(value, 0);
+  return results;
+}
+
+function hasLikelyFileMutationShape(value: unknown): boolean {
+  const visit = (candidate: unknown, depth: number): boolean => {
+    if (depth > 4 || candidate == null) {
+      return false;
+    }
+    if (Array.isArray(candidate)) {
+      return candidate.some((entry) => visit(entry, depth + 1));
+    }
+    const record = asRecord(candidate);
+    if (!record) {
+      return false;
+    }
+    const hasPath = ["path", "filePath", "relativePath", "filename", "newPath", "oldPath"]
+      .some((key) => typeof record[key] === "string");
+    const hasMutationData = [
+      "patch",
+      "diff",
+      "edits",
+      "replacement",
+      "replacements",
+      "newText",
+      "oldText",
+      "content",
+      "contents",
+    ].some((key) => key in record);
+    if (hasPath && hasMutationData) {
+      return true;
+    }
+    return ["arguments", "result", "input", "data", "changes", "files", "edits", "patch"]
+      .some((key) => key in record && visit(record[key], depth + 1));
+  };
+
+  return visit(value, 0);
+}
+
+function isLikelyFileChangeToolName(toolName: string | undefined) {
+  const normalized = normalizeString(toolName)?.toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (COPILOT_FILE_READ_TOOL_NAME_HINTS.some((hint) => normalized.includes(hint))) {
+    return false;
+  }
+  return COPILOT_FILE_CHANGE_TOOL_NAME_HINTS.some((hint) => normalized.includes(hint));
+}
 
 function hasCommandExecutionArguments(event: CopilotToolExecutionStartEvent) {
   const argumentsRecord = asRecord(event.data.arguments);
@@ -351,6 +452,11 @@ function hasCommandExecutionArguments(event: CopilotToolExecutionStartEvent) {
   return fullCommandText !== undefined
     || typeof command === "string"
     || (Array.isArray(command) && command.every((entry) => typeof entry === "string"));
+}
+
+function isLikelyFileChangeToolEvent(event: CopilotToolExecutionStartEvent) {
+  return isLikelyFileChangeToolName(event.data.toolName)
+    || hasLikelyFileMutationShape(event.data.arguments);
 }
 
 function itemTypeFromToolEvent(event: CopilotToolExecutionStartEvent): CopilotToolItemType {
@@ -364,7 +470,65 @@ function itemTypeFromToolEvent(event: CopilotToolExecutionStartEvent): CopilotTo
     return "command_execution";
   }
 
+  if (isLikelyFileChangeToolEvent(event)) {
+    return "file_change";
+  }
+
   return "dynamic_tool_call";
+}
+
+function mergeChangedFiles(current: ReadonlyArray<string> | undefined, next: ReadonlyArray<string>) {
+  const merged = new Set(current ?? []);
+  for (const path of next) {
+    const normalized = normalizeString(path);
+    if (normalized) {
+      merged.add(normalized);
+    }
+  }
+  return [...merged];
+}
+
+function rememberToolChangedFiles(record: ActiveCopilotSession, toolCallId: string, changedFiles: ReadonlyArray<string>) {
+  if (changedFiles.length === 0) {
+    return;
+  }
+  const merged = mergeChangedFiles(record.toolChangedFilesByCallId.get(toolCallId), changedFiles);
+  record.toolChangedFilesByCallId.set(toolCallId, merged);
+}
+
+function rememberWorkspaceFileChange(record: ActiveCopilotSession, path: string | undefined) {
+  const normalizedPath = normalizeString(path);
+  if (!normalizedPath) {
+    return;
+  }
+  const targetToolCallId = record.activeToolCallIds.toReversed().find((toolCallId) => {
+    const itemType = record.toolItemTypesByCallId.get(toolCallId);
+    return itemType === "file_change" || itemType === "dynamic_tool_call";
+  });
+  if (!targetToolCallId) {
+    return;
+  }
+  if (record.toolItemTypesByCallId.get(targetToolCallId) === "dynamic_tool_call") {
+    record.toolItemTypesByCallId.set(targetToolCallId, "file_change");
+  }
+  rememberToolChangedFiles(record, targetToolCallId, [normalizedPath]);
+}
+
+function buildCanonicalFileChangeData(input: {
+  readonly toolCallId: string;
+  readonly status: "inProgress" | "completed" | "failed";
+  readonly changedFiles: ReadonlyArray<string>;
+  readonly source: unknown;
+}) {
+  return {
+    item: {
+      id: input.toolCallId,
+      type: "fileChange",
+      status: input.status,
+      changes: input.changedFiles.map((path) => ({ path })),
+    },
+    source: input.source,
+  };
 }
 
 function toolDetailFromEvent(data: {
@@ -544,6 +708,8 @@ function createSessionRecord(input: {
     pendingTurnUsage: undefined,
     toolTitlesByCallId: new Map(),
     toolItemTypesByCallId: new Map(),
+    toolChangedFilesByCallId: new Map(),
+    activeToolCallIds: [],
     pendingApprovalResolvers: input.pendingApprovalResolvers,
     pendingUserInputResolvers: input.pendingUserInputResolvers,
     unsubscribe: () => undefined,
@@ -940,6 +1106,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
         }
         case "tool.execution_start": {
           const itemType = itemTypeFromToolEvent(event);
+          const changedFiles = extractChangedFiles(event.data.arguments);
           return [
             {
               ...base({ itemId: event.data.toolCallId }),
@@ -951,7 +1118,15 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
                 ...(toolDetailFromEvent(event.data)
                   ? { detail: toolDetailFromEvent(event.data) }
                   : {}),
-                data: event.data,
+                data:
+                  itemType === "file_change"
+                    ? buildCanonicalFileChangeData({
+                        toolCallId: event.data.toolCallId,
+                        status: "inProgress",
+                        changedFiles,
+                        source: event.data,
+                      })
+                    : event.data,
               },
             },
           ];
@@ -981,20 +1156,33 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
         case "tool.execution_complete": {
           const keepRunning = shouldKeepToolExecutionRunning(event);
           const detail = toolResultDetailFromEvent(event);
+          const status = keepRunning ? "inProgress" : event.data.success ? "completed" : "failed";
           const itemType =
             terminalResultFromToolCompleteEvent(event) !== undefined
               ? "command_execution"
               : (record.toolItemTypesByCallId.get(event.data.toolCallId) ?? "dynamic_tool_call");
+          const changedFiles = mergeChangedFiles(
+            record.toolChangedFilesByCallId.get(event.data.toolCallId),
+            extractChangedFiles(event.data),
+          );
           return [
             {
               ...base({ itemId: event.data.toolCallId }),
               type: keepRunning ? "item.updated" : "item.completed",
               payload: {
                 itemType,
-                status: keepRunning ? "inProgress" : event.data.success ? "completed" : "failed",
+                status,
                 title: record.toolTitlesByCallId.get(event.data.toolCallId) ?? "Tool call",
                 ...(detail ? { detail } : {}),
-                data: event.data,
+                data:
+                  itemType === "file_change"
+                    ? buildCanonicalFileChangeData({
+                        toolCallId: event.data.toolCallId,
+                        status,
+                        changedFiles,
+                        source: event.data,
+                      })
+                    : event.data,
               },
             },
             ...(!keepRunning && trimToUndefined(event.data.result?.content)
@@ -1302,11 +1490,17 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
       if (event.type === "session.mode_changed") {
         record.interactionMode = toInteractionMode(event.data.newMode);
       }
+      if (event.type === "session.workspace_file_changed") {
+        rememberWorkspaceFileChange(record, event.data.path);
+      }
       if (event.type === "tool.execution_start" && trimToUndefined(event.data.toolName)) {
         record.toolTitlesByCallId.set(event.data.toolCallId, trimToUndefined(event.data.toolName)!);
       }
       if (event.type === "tool.execution_start") {
-        record.toolItemTypesByCallId.set(event.data.toolCallId, itemTypeFromToolEvent(event));
+        const itemType = itemTypeFromToolEvent(event);
+        record.toolItemTypesByCallId.set(event.data.toolCallId, itemType);
+        record.activeToolCallIds = [...record.activeToolCallIds.filter((id) => id !== event.data.toolCallId), event.data.toolCallId];
+        rememberToolChangedFiles(record, event.data.toolCallId, extractChangedFiles(event.data.arguments));
       }
 
       void writeNativeEvent(record.threadId, event);
@@ -1332,6 +1526,8 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
       if (event.type === "tool.execution_complete" && !shouldKeepToolExecutionRunning(event)) {
         record.toolTitlesByCallId.delete(event.data.toolCallId);
         record.toolItemTypesByCallId.delete(event.data.toolCallId);
+        record.toolChangedFilesByCallId.delete(event.data.toolCallId);
+        record.activeToolCallIds = record.activeToolCallIds.filter((id) => id !== event.data.toolCallId);
       }
       if (event.type === "assistant.turn_end") {
         markTurnAwaitingCompletion(record);

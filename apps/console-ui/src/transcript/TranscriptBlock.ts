@@ -254,18 +254,21 @@ export interface WorkingStateBlock {
   readonly type: "working-state";
   readonly startedAt: string;
   readonly now: string;
+  readonly label?: string;
 }
 
 export interface WaitingStateBlock {
   readonly type: "waiting-state";
   readonly startedAt: string;
   readonly now: string;
+  readonly label?: string;
 }
 
 export interface SendingStateBlock {
   readonly type: "sending-state";
   readonly startedAt: string;
   readonly now: string;
+  readonly label?: string;
 }
 
 export interface FinishedStateBlock {
@@ -1516,11 +1519,13 @@ export function blockToLines(block: TranscriptBlock): AnnotatedLine[] {
     case "waiting-state":
     case "working-state": {
       const elapsedLabel = formatElapsedDuration(Date.parse(block.now) - Date.parse(block.startedAt));
-      const prefix = block.type === "sending-state"
-        ? "Sending prompt for "
-        : block.type === "waiting-state"
-          ? "Waiting for agent for "
-        : "Working for ";
+      const prefix = block.label
+        ? `${block.label} for `
+        : block.type === "sending-state"
+          ? "Sending prompt for "
+          : block.type === "waiting-state"
+            ? "Waiting for agent for "
+          : "Working for ";
       const text = `${prefix}${elapsedLabel}`;
       return [
         { text: "", kind: "meta" },

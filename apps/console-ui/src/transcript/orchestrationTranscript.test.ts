@@ -2,7 +2,100 @@ import { CheckpointRef, EventId, MessageId, TurnId } from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 
 import { buildTestSnapshot } from "../testSupport/testSnapshot";
-import { threadToTranscriptBlocks } from "./orchestrationTranscript";
+import {
+  collapseTrailingFinishedStateRun,
+  threadToTranscriptBlocks,
+} from "./orchestrationTranscript";
+
+describe("collapseTrailingFinishedStateRun", () => {
+  it("keeps only the most specific trailing finished-state block", () => {
+    expect(collapseTrailingFinishedStateRun([
+      {
+        type: "user-input-request",
+        requestId: "req-tail-finished",
+        questions: [{
+          id: "scope",
+          header: "Scope",
+          question: "Which snapshot shape should we keep?",
+          options: [
+            { label: "Per vehicle", description: "Persist one snapshot per vehicle." },
+            { label: "Per config", description: "Reuse a shared config snapshot." },
+          ],
+        }],
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        finishedAt: "2026-03-11T09:00:05.000Z",
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:03:00.000Z",
+        finishedAt: "2026-03-11T09:00:05.000Z",
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:02:00.000Z",
+        finishedAt: "2026-03-11T09:00:05.000Z",
+      },
+    ])).toEqual([
+      {
+        type: "user-input-request",
+        requestId: "req-tail-finished",
+        questions: [{
+          id: "scope",
+          header: "Scope",
+          question: "Which snapshot shape should we keep?",
+          options: [
+            { label: "Per vehicle", description: "Persist one snapshot per vehicle." },
+            { label: "Per config", description: "Reuse a shared config snapshot." },
+          ],
+        }],
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:03:00.000Z",
+        finishedAt: "2026-03-11T09:00:05.000Z",
+      },
+    ]);
+  });
+
+  it("preserves distinct finished-state timestamps in the trailing run", () => {
+    expect(collapseTrailingFinishedStateRun([
+      {
+        type: "assistant-text",
+        text: "Before the first question.",
+        streaming: false,
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        finishedAt: "2026-03-11T09:00:05.000Z",
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:06.000Z",
+        finishedAt: "2026-03-11T09:00:10.000Z",
+      },
+    ])).toEqual([
+      {
+        type: "assistant-text",
+        text: "Before the first question.",
+        streaming: false,
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:00.000Z",
+        finishedAt: "2026-03-11T09:00:05.000Z",
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:06.000Z",
+        finishedAt: "2026-03-11T09:00:10.000Z",
+      },
+    ]);
+  });
+});
 
 describe("threadToTranscriptBlocks", () => {
   it("keeps activity ordering stable with sequence under bursty timestamps", () => {
@@ -1525,21 +1618,6 @@ describe("threadToTranscriptBlocks", () => {
         streaming: false,
       },
       {
-        type: "work-group",
-        title: "report_intent",
-        status: "done",
-        startedAt: "2026-03-11T09:00:02.000Z",
-        endedAt: "2026-03-11T09:00:02.000Z",
-        items: [
-          {
-            kind: "tool",
-            label: "report_intent",
-            status: "done",
-            detail: "intent=Asking user input",
-          },
-        ],
-      },
-      {
         type: "user-input-request",
         requestId: "req-finished-after-ask-user",
         questions: [
@@ -1661,21 +1739,6 @@ describe("threadToTranscriptBlocks", () => {
         text: "Assembling parameters for file listing",
       },
       {
-        type: "work-group",
-        title: "report_intent",
-        status: "done",
-        startedAt: "2026-03-11T09:00:03.000Z",
-        endedAt: "2026-03-11T09:00:03.000Z",
-        items: [
-          {
-            kind: "tool",
-            label: "report_intent",
-            status: "done",
-            detail: "intent=Listing files",
-          },
-        ],
-      },
-      {
         type: "user-input-request",
         requestId: "req-drifted-ordering",
         questions: [
@@ -1787,21 +1850,6 @@ describe("threadToTranscriptBlocks", () => {
         type: "assistant-text",
         text: "I need one more thing.",
         streaming: false,
-      },
-      {
-        type: "work-group",
-        title: "report_intent",
-        status: "done",
-        startedAt: "2026-03-11T09:00:03.000Z",
-        endedAt: "2026-03-11T09:00:03.000Z",
-        items: [
-          {
-            kind: "tool",
-            label: "report_intent",
-            status: "done",
-            detail: "intent=Prompting the user",
-          },
-        ],
       },
       {
         type: "user-input-request",
@@ -2038,6 +2086,11 @@ describe("threadToTranscriptBlocks", () => {
         streaming: false,
       },
       {
+        type: "finished-state",
+        startedAt: "2026-03-22T10:00:20.000Z",
+        finishedAt: "2026-03-22T10:00:21.000Z",
+      },
+      {
         type: "work-group",
         title: "Powershell",
         status: "done",
@@ -2053,11 +2106,6 @@ describe("threadToTranscriptBlocks", () => {
             exitCode: 0,
           },
         ],
-      },
-      {
-        type: "finished-state",
-        startedAt: "2026-03-22T10:00:20.000Z",
-        finishedAt: "2026-03-22T10:00:22.000Z",
       },
     ]);
   });
@@ -2727,22 +2775,6 @@ describe("threadToTranscriptBlocks", () => {
         finishedAt: "2026-03-12T09:00:03.000Z",
       },
       {
-        type: "work-group",
-        title: "report_intent",
-        status: "done",
-        startedAt: "2026-03-12T09:00:04.000Z",
-        endedAt: "2026-03-12T09:00:04.000Z",
-        now: "2026-03-12T09:00:10.000Z",
-        items: [
-          {
-            kind: "tool",
-            label: "report_intent",
-            status: "done",
-            detail: "intent=Asking follow-up question",
-          },
-        ],
-      },
-      {
         type: "user-message",
         text: "Red",
       },
@@ -2755,6 +2787,7 @@ describe("threadToTranscriptBlocks", () => {
         type: "working-state",
         startedAt: "2026-03-12T09:00:08.000Z",
         now: "2026-03-12T09:00:10.000Z",
+        label: "Asking follow-up question",
       },
     ]);
   });
@@ -3018,21 +3051,6 @@ describe("threadToTranscriptBlocks", () => {
 
     expect(derived).toEqual([
       {
-        type: "work-group",
-        title: "report_intent",
-        status: "done",
-        startedAt: "2026-03-12T09:00:02.000Z",
-        endedAt: "2026-03-12T09:00:02.000Z",
-        items: [
-          {
-            kind: "tool",
-            label: "report_intent",
-            status: "done",
-            detail: "intent=Asking user input",
-          },
-        ],
-      },
-      {
         type: "user-input-request",
         requestId: "req-ask-user-only",
         questions: [
@@ -3143,9 +3161,8 @@ describe("threadToTranscriptBlocks", () => {
       text: "Checking transcript ordering before streaming the answer.",
     });
     expect(derived.at(-1)).toEqual({
-      type: "finished-state",
-      startedAt: "2026-03-10T09:01:58.000Z",
-      finishedAt: "2026-03-12T09:00:02.000Z",
+      type: "reasoning-text",
+      text: "Checking transcript ordering before streaming the answer.",
     });
   });
 
@@ -3180,9 +3197,8 @@ describe("threadToTranscriptBlocks", () => {
       text: "Clarifying the car wash situation",
     });
     expect(derived.at(-1)).toEqual({
-      type: "finished-state",
-      startedAt: "2026-03-10T09:01:58.000Z",
-      finishedAt: "2026-03-12T09:00:02.000Z",
+      type: "reasoning-summary",
+      text: "Clarifying the car wash situation",
     });
   });
 
@@ -3248,21 +3264,6 @@ describe("threadToTranscriptBlocks", () => {
 
     expect(derived).toEqual([
       {
-        type: "work-group",
-        title: "report_intent",
-        status: "done",
-        startedAt: "2026-03-12T09:00:01.000Z",
-        endedAt: "2026-03-12T09:00:03.500Z",
-        items: [
-          {
-            kind: "tool",
-            label: "report_intent",
-            status: "done",
-            detail: "intent=Asking user input",
-          },
-        ],
-      },
-      {
         type: "assistant-text",
         text: "All set.",
         streaming: false,
@@ -3310,9 +3311,10 @@ describe("threadToTranscriptBlocks", () => {
         + "Before I execute the command, I'll include some commentary to clarify that I'm preparing to do substantial work.",
     });
     expect(derived.at(-1)).toEqual({
-      type: "finished-state",
-      startedAt: "2026-03-10T09:01:58.000Z",
-      finishedAt: "2026-03-12T09:00:03.000Z",
+      type: "reasoning-text",
+      text:
+        "I need to respond to the user's request to run a sleep command for two minutes. "
+        + "Before I execute the command, I'll include some commentary to clarify that I'm preparing to do substantial work.",
     });
   });
 

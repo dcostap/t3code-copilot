@@ -447,6 +447,137 @@ toolLifecycleLayer("CopilotAdapterLive tool lifecycle mapping", (it) => {
       }
     }),
   );
+
+});
+
+const fileChangeSession = new FakeCopilotSession("copilot-session-file-change");
+const fileChangeClient = new FakeCopilotClient(fileChangeSession);
+const fileChangeLayer = it.layer(
+  makeCopilotAdapterLive({
+    clientFactory: () => fileChangeClient,
+  }).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+fileChangeLayer("CopilotAdapterLive file-change normalization", (it) => {
+  it.effect("normalizes Copilot file-writing tools into canonical file-change items", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CopilotAdapter;
+      yield* adapter.startSession({
+        provider: "copilot",
+        threadId: asThreadId("thread-file-change"),
+        runtimeMode: "full-access",
+      });
+
+      yield* Stream.take(adapter.streamEvents, 4).pipe(Stream.runDrain);
+
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 6).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      fileChangeSession.emit({
+        id: "evt-file-turn-start",
+        timestamp: "2026-03-22T11:00:00.000Z",
+        parentId: null,
+        type: "assistant.turn_start",
+        data: {
+          turnId: "turn-file-1",
+        },
+      } satisfies SessionEvent);
+
+      fileChangeSession.emit({
+        id: "evt-file-tool-start",
+        timestamp: "2026-03-22T11:00:01.000Z",
+        parentId: "evt-file-turn-start",
+        type: "tool.execution_start",
+        data: {
+          toolCallId: "tool-file-1",
+          toolName: "apply_patch",
+          arguments: {
+            patch: "*** Begin Patch\n*** Add File: src/example.ts\n+export const value = 1;\n*** End Patch\n",
+          },
+        },
+      } satisfies SessionEvent);
+
+      fileChangeSession.emit({
+        id: "evt-workspace-file-change",
+        timestamp: "2026-03-22T11:00:02.000Z",
+        parentId: "evt-file-tool-start",
+        type: "session.workspace_file_changed",
+        data: {
+          path: "src/example.ts",
+          operation: "update",
+        },
+      } satisfies SessionEvent);
+
+      fileChangeSession.emit({
+        id: "evt-file-tool-complete",
+        timestamp: "2026-03-22T11:00:03.000Z",
+        parentId: "evt-file-tool-start",
+        type: "tool.execution_complete",
+        data: {
+          toolCallId: "tool-file-1",
+          success: true,
+          result: {
+            content: "Updated src/example.ts",
+            detailedContent: "Updated src/example.ts",
+          },
+        },
+      } satisfies SessionEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+
+      const startedEvent = events.find((event) => event.type === "item.started");
+      assert.equal(startedEvent?.type, "item.started");
+      if (startedEvent?.type === "item.started") {
+        assert.equal(startedEvent.payload.itemType, "file_change");
+        assert.deepStrictEqual(startedEvent.payload.data, {
+          item: {
+            id: "tool-file-1",
+            type: "fileChange",
+            status: "inProgress",
+            changes: [],
+          },
+          source: {
+            toolCallId: "tool-file-1",
+            toolName: "apply_patch",
+            arguments: {
+              patch: "*** Begin Patch\n*** Add File: src/example.ts\n+export const value = 1;\n*** End Patch\n",
+            },
+          },
+        });
+      }
+
+      const completedEvent = events.find((event) => event.type === "item.completed");
+      assert.equal(completedEvent?.type, "item.completed");
+      if (completedEvent?.type === "item.completed") {
+        assert.equal(completedEvent.payload.itemType, "file_change");
+        assert.deepStrictEqual(completedEvent.payload.data, {
+          item: {
+            id: "tool-file-1",
+            type: "fileChange",
+            status: "completed",
+            changes: [
+              {
+                path: "src/example.ts",
+              },
+            ],
+          },
+          source: {
+            toolCallId: "tool-file-1",
+            success: true,
+            result: {
+              content: "Updated src/example.ts",
+              detailedContent: "Updated src/example.ts",
+            },
+          },
+        });
+      }
+    }),
+  );
 });
 
 afterAll(() => {
@@ -458,4 +589,6 @@ afterAll(() => {
   void mcpClient.stop();
   void toolLifecycleSession.destroy();
   void toolLifecycleClient.stop();
+  void fileChangeSession.destroy();
+  void fileChangeClient.stop();
 });
