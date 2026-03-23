@@ -81,6 +81,7 @@ export interface ConsoleProjectLayoutsModel {
   readonly lastChosenProvider: ProviderKind;
   readonly lastChosenModelByProvider: Record<ProviderKind, string>;
   activateProject(projectId: OrchestrationProject["id"]): void;
+  clearActiveProject(): void;
   toggleProjectCollapsed(projectId: OrchestrationProject["id"]): void;
   reorderProjects(projectIds: ReadonlyArray<OrchestrationProject["id"]>): void;
   activateTab(projectId: OrchestrationProject["id"], tabId: string): void;
@@ -863,6 +864,10 @@ export function useConsoleProjectLayouts(input: {
     setState((existing) => existing.activeProjectId === projectId ? existing : { ...existing, activeProjectId: projectId });
   }, []);
 
+  const clearActiveProject = useCallback(() => {
+    setState((existing) => existing.activeProjectId === null ? existing : { ...existing, activeProjectId: null });
+  }, []);
+
   const toggleProjectCollapsed = useCallback((projectId: OrchestrationProject["id"]) => {
     setState((existing) => {
       const collapsed = existing.collapsedProjectIds.includes(projectId)
@@ -1228,6 +1233,7 @@ export function useConsoleProjectLayouts(input: {
     lastChosenProvider: state.lastChosenProvider,
     lastChosenModelByProvider: state.lastChosenModelByProvider,
     activateProject,
+    clearActiveProject,
     toggleProjectCollapsed,
     reorderProjects,
     activateTab,

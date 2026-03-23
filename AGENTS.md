@@ -22,6 +22,12 @@ The app should feel like a sharp local instrument: fast, focused, keyboard-first
 - If the frontend needs new behavior, we evolve contracts and runtime events cleanly instead of inventing frontend-only protocol or ad hoc client state.
 - We avoid duplicating logic across frontend surfaces when a shared primitive would do.
 
+## Fork sync constraints
+
+- Prefer console-ui changes and Copilot-specific adapter changes over edits to shared backend layers when solving provider-specific behavior differences.
+- Avoid modifying non-Copilot backend code unless there is no viable Copilot-local path.
+- Keep upstream-sensitive backend behavior as close to origin as possible so this fork stays easier to sync.
+
 ## Completion requirements
 
 - `bun lint` must pass before work is considered complete.
