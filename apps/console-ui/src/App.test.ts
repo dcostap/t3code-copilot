@@ -5,6 +5,7 @@ import {
   findDuplicateProjectForWorkspaceRoot,
   findReusableDraftPaneForThreadOpen,
   formatManageThreadTimestamp,
+  getSidebarThreadClassName,
   getSidebarThreadStatusClassName,
   getSidebarThreadGroups,
   getSidebarThreadTitleClassName,
@@ -114,6 +115,30 @@ describe("getSidebarThreadStatusClassName", () => {
       statusTone: "idle",
       isActive: true,
     })).toBe("project-thread__status project-thread__status--idle");
+  });
+});
+
+describe("getSidebarThreadClassName", () => {
+  it("only marks threads as stale once they are at least five days old", () => {
+    expect(getSidebarThreadClassName({
+      ageMs: (5 * 24 * 60 * 60 * 1000) - 1,
+      hasUnreadMarker: false,
+      isActive: false,
+    })).toBe("project-thread");
+
+    expect(getSidebarThreadClassName({
+      ageMs: 5 * 24 * 60 * 60 * 1000,
+      hasUnreadMarker: false,
+      isActive: false,
+    })).toBe("project-thread project-thread--stale");
+  });
+
+  it("keeps active and unread classes without the removed age buckets", () => {
+    expect(getSidebarThreadClassName({
+      ageMs: 2 * 60 * 60 * 1000,
+      hasUnreadMarker: true,
+      isActive: true,
+    })).toBe("project-thread project-thread--active project-thread--unread");
   });
 });
 

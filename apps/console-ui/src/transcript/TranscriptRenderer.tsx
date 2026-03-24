@@ -149,6 +149,7 @@ interface TranscriptRendererProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
   readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
   readonly cwd?: string | null;
+  readonly projectRoot?: string | null;
   readonly interactionMode?: "default" | "plan";
   readonly initialScrollOffsetFromBottom?: number | null;
   readonly promptFocusDisabled?: boolean;
@@ -827,6 +828,53 @@ class CodeBlockWidget extends WidgetType {
 
 function normalizeDiffPath(path: string) {
   return path.startsWith("a/") || path.startsWith("b/") ? path.slice(2) : path;
+}
+
+function normalizeProjectPathForComparison(path: string) {
+  return path.replace(/\//g, "\\").replace(/[\\]+$/, "").toLowerCase();
+}
+
+export function relativizeProjectPath(path: string, projectRoot?: string | null) {
+  const leadingWhitespace = path.match(/^\s*/)?.[0] ?? "";
+  const trailingWhitespace = path.match(/\s*$/)?.[0] ?? "";
+  const trimmed = path.trim();
+  const wrappingQuote = (
+    (trimmed.startsWith("\"") && trimmed.endsWith("\""))
+    || (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  )
+    ? trimmed[0]
+    : null;
+  const unquoted = wrappingQuote ? trimmed.slice(1, -1) : trimmed;
+  const normalizedPath = unquoted.replace(/\//g, "\\");
+  if (!/^[A-Za-z]:\\/.test(normalizedPath) && !normalizedPath.startsWith("\\\\")) {
+    return path;
+  }
+  if (!projectRoot) {
+    return path;
+  }
+
+  const normalizedRoot = projectRoot.replace(/\//g, "\\").replace(/[\\]+$/, "");
+  const pathKey = normalizeProjectPathForComparison(normalizedPath);
+  const rootKey = normalizeProjectPathForComparison(normalizedRoot);
+  if (pathKey === rootKey) {
+    const quotedRootPath = wrappingQuote ? `${wrappingQuote}.${wrappingQuote}` : ".";
+    return `${leadingWhitespace}${quotedRootPath}${trailingWhitespace}`;
+  }
+  if (!pathKey.startsWith(`${rootKey}\\`)) {
+    return path;
+  }
+
+  const relativePath = normalizedPath.slice(normalizedRoot.length + 1);
+  const quotedRelativePath = wrappingQuote ? `${wrappingQuote}${relativePath}${wrappingQuote}` : relativePath;
+  return `${leadingWhitespace}${quotedRelativePath}${trailingWhitespace}`;
+}
+
+export function formatCommandWidgetOutputLine(line: string, projectRoot?: string | null) {
+  const changedPrefix = "changed: ";
+  if (line.startsWith(changedPrefix)) {
+    return `${changedPrefix}${relativizeProjectPath(line.slice(changedPrefix.length), projectRoot)}`;
+  }
+  return relativizeProjectPath(line, projectRoot);
 }
 
 function resolveInlineDiffPath(file: FileDiffMetadata) {
@@ -1511,6 +1559,7 @@ function buildTranscriptDocument(
   expandedCommandSignatures: ReadonlySet<string>,
   collapsedFileChangeSignatures: ReadonlySet<string>,
   resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>,
+  projectRoot?: string | null,
   pendingUserInputHighlight?: {
     readonly requestId: string;
     readonly questionIndex: number;
@@ -1631,8 +1680,9 @@ function buildTranscriptDocument(
           widget: new CommandWidgetLine({
             signature: line.commandWidgetSignature,
             ...parsed,
+            command: relativizeProjectPath(parsed.command, projectRoot),
             ...(line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0
-              ? { outputLines: line.commandWidgetOutputLines }
+              ? { outputLines: line.commandWidgetOutputLines.map((entry) => formatCommandWidgetOutputLine(entry, projectRoot)) }
               : {}),
             ...(inlineDiffFiles && inlineDiffFiles.length > 0 ? { inlineDiffFiles } : {}),
             ...(effectiveInlineDiff && isExpandedCommand && (!inlineDiffFiles || inlineDiffFiles.length === 0)
@@ -2446,6 +2496,7 @@ function buildEditorTheme() {
         alignItems: "start",
         minWidth: "0",
         padding: "0 10px 0 4px",
+        borderRadius: "4px",
       },
       ".cm-inlineDiffBody": {
         display: "inline-grid",
@@ -2457,13 +2508,11 @@ function buildEditorTheme() {
         maxWidth: "100%",
         minWidth: "0",
       },
-      ".cm-inlineDiffRowAddition .cm-inlineDiffBody": {
+      ".cm-inlineDiffRowAddition": {
         backgroundColor: "rgba(20, 60, 38, 0.5)",
-        borderRadius: "4px",
       },
-      ".cm-inlineDiffRowDeletion .cm-inlineDiffBody": {
+      ".cm-inlineDiffRowDeletion": {
         backgroundColor: "rgba(66, 26, 29, 0.5)",
-        borderRadius: "4px",
       },
       ".cm-inlineDiffLineNumber": {
         color: "#72808d",
@@ -2486,7 +2535,10 @@ function buildEditorTheme() {
         color: "#9cf0b4",
       },
       ".cm-inlineDiffRowDeletion .cm-inlineDiffMarker, .cm-inlineDiffRowDeletion .cm-inlineDiffContentText": {
-        color: "rgba(255, 177, 177, 0.7)",
+        color: "rgba(255, 177, 177, 0.6)",
+      },
+      ".cm-inlineDiffRowAddition .cm-inlineDiffMarker, .cm-inlineDiffRowDeletion .cm-inlineDiffMarker": {
+        fontWeight: "700",
       },
       ".cm-inlineDiffRowGap .cm-inlineDiffMarker": {
         color: "#7a8692",
@@ -3256,6 +3308,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       blocks,
       composerAttachments = [],
       cwd,
+      projectRoot,
       interactionMode: _interactionMode = "default",
       initialScrollOffsetFromBottom = null,
       promptFocusDisabled = false,
@@ -3371,9 +3424,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           expandedCommandSignatures,
           collapsedFileChangeSignatures,
           resolvedInlineDiffBySignature,
+          projectRoot,
           pendingUserInputHighlight,
         ),
-      [blocks, collapsedFileChangeSignatures, expandedCommandSignatures, pendingUserInputHighlight, resolvedInlineDiffBySignature],
+      [blocks, collapsedFileChangeSignatures, expandedCommandSignatures, pendingUserInputHighlight, projectRoot, resolvedInlineDiffBySignature],
     );
     const compactPendingUserInputPrompt =
       pendingUserInputHighlight !== undefined && !shouldRenderPromptSeparator(docModel.historyLineCount);

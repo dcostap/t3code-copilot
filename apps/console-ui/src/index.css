@@ -1455,10 +1455,6 @@ body {
   }
 }
 
-.project-thread--aged .project-thread__title {
-  color: #9e958e;
-}
-
 .project-thread--stale .project-thread__title {
   color: #8b837c;
 }
@@ -1487,8 +1483,7 @@ body {
   text-transform: lowercase;
   white-space: nowrap;
   color: #8a827b;
-  opacity: var(--project-thread-status-opacity, 1);
-  transition: opacity 45ms ease, color 45ms ease;
+  transition: color 45ms ease;
 }
 
 .project-thread__status--working {
@@ -1512,15 +1507,6 @@ body {
 
 .project-thread__status--error {
   color: #8a827b;
-}
-
-.project-thread--statusOnHover .project-thread__status {
-  opacity: 0;
-}
-
-.project-thread--statusOnHover:hover .project-thread__status,
-.project-thread--statusOnHover:focus-visible .project-thread__status {
-  opacity: var(--project-thread-status-opacity, 0.38);
 }
 
 .project-tree__showMore {

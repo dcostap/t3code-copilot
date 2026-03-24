@@ -66,6 +66,7 @@ const UNREAD_THREAD_IDS_STORAGE_KEY = "t3code:unread-thread-ids:v1";
 const EMPTY_PROJECTS: ReadonlyArray<OrchestrationProject> = [];
 const SIDEBAR_THREAD_LIMIT = 7;
 const SIDEBAR_IDLE_HIDE_MS = 10 * 60 * 60 * 1000;
+const SIDEBAR_THREAD_STALE_MS = 5 * 24 * 60 * 60 * 1000;
 const PROJECT_CONTEXT_MENU_WIDTH = 360;
 const PROJECT_CONTEXT_MENU_HEIGHT = 256;
 interface AppPaletteCommand extends CommandPaletteCommand {
@@ -110,7 +111,6 @@ interface SidebarThreadEntry {
   readonly thread: OrchestrationThread;
   readonly status: ThreadStatusDescriptor;
   readonly tooltip: string;
-  readonly ageLabel: string;
   readonly sidebarLabel: string;
   readonly ageMs: number;
 }
@@ -598,32 +598,23 @@ export function getSidebarThreadStatusClassName(input: {
   ].filter((className): className is string => className !== null).join(" ");
 }
 
-function getThreadAgeLabel(thread: OrchestrationThread, nowIso: string) {
-  const nowMs = parseTimestampMs(nowIso);
-  const threadMs = getThreadSortValue(thread);
-  return formatSidebarAge(nowMs - threadMs);
+export function getSidebarThreadClassName(input: {
+  readonly ageMs: number;
+  readonly hasUnreadMarker: boolean;
+  readonly isActive: boolean;
+}) {
+  return [
+    "project-thread",
+    input.isActive ? "project-thread--active" : null,
+    input.hasUnreadMarker ? "project-thread--unread" : null,
+    input.ageMs >= SIDEBAR_THREAD_STALE_MS ? "project-thread--stale" : null,
+  ].filter((className): className is string => className !== null).join(" ");
 }
 
 function getThreadAgeMs(thread: OrchestrationThread, nowIso: string) {
   const nowMs = parseTimestampMs(nowIso);
   const threadMs = getThreadSortValue(thread);
   return Math.max(0, nowMs - threadMs);
-}
-
-function getThreadStatusOpacity(ageMs: number) {
-  if (ageMs >= 24 * 60 * 60 * 1000) {
-    return 0.28;
-  }
-  if (ageMs >= 3 * 60 * 60 * 1000) {
-    return 0.38;
-  }
-  if (ageMs >= 60 * 60 * 1000) {
-    return 0.56;
-  }
-  if (ageMs >= 10 * 60 * 1000) {
-    return 0.74;
-  }
-  return 0.9;
 }
 
 function isEditableTarget(target: EventTarget | null) {
@@ -2694,13 +2685,11 @@ export function App() {
                     pendingUserInput?.createdAt ?? null,
                   );
                   const ageMs = getThreadAgeMs(thread, nowIso);
-                  const ageLabel = getThreadAgeLabel(thread, nowIso);
                   return {
                     thread,
                     status,
                     tooltip: getThreadFirstPrompt(thread),
-                    ageLabel,
-                    sidebarLabel: status.tone === "working" ? status.label : ageLabel,
+                    sidebarLabel: status.label,
                     ageMs,
                   };
                 });
@@ -2780,6 +2769,11 @@ export function App() {
                             {group.entries.map(({ thread, status, tooltip, sidebarLabel, ageMs }) => {
                               const isActiveThread = thread.id === workspace.activeThreadId;
                               const hasUnreadMarker = unreadThreadIds.has(thread.id);
+                              const threadClassName = getSidebarThreadClassName({
+                                ageMs,
+                                hasUnreadMarker,
+                                isActive: isActiveThread,
+                              });
                               const titleClassName = getSidebarThreadTitleClassName({
                                 statusTone: status.tone,
                                 isActive: isActiveThread,
@@ -2792,7 +2786,7 @@ export function App() {
                                 <button
                                   key={thread.id}
                                   type="button"
-                                  className={`project-thread${isActiveThread ? " project-thread--active" : ""}${hasUnreadMarker ? " project-thread--unread" : ""}${ageMs >= 10 * 60 * 60 * 1000 ? " project-thread--stale" : ageMs >= 2 * 60 * 60 * 1000 ? " project-thread--aged" : ""}${status.tone === "idle" && ageMs >= 3 * 60 * 60 * 1000 ? " project-thread--statusOnHover" : ""}`}
+                                  className={threadClassName}
                                   title={tooltip}
                                   draggable
                                   onContextMenu={(event) => handleOpenThreadContextMenu(event, thread.id)}
@@ -2823,12 +2817,7 @@ export function App() {
                                         ) : null}
                                       </span>
                                     ) : (
-                                      <span
-                                        className={statusClassName}
-                                        style={status.tone === "idle"
-                                          ? ({ "--project-thread-status-opacity": getThreadStatusOpacity(ageMs) } as CSSProperties)
-                                          : undefined}
-                                      >
+                                      <span className={statusClassName}>
                                         {sidebarLabel}
                                       </span>
                                     )}
@@ -2925,6 +2914,7 @@ export function App() {
                             blocks={paneView.blocks}
                             composerAttachments={paneView.attachments}
                             cwd={paneView.cwd}
+                            projectRoot={paneView.project.workspaceRoot}
                             interactionMode={paneView.interactionMode}
                             promptFocusDisabled={paletteOpen || hasBlockingModal}
                             promptInputDisabled={hasBlockingModal}

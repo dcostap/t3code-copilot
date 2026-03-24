@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   findTranscriptSearchMatches,
+  formatCommandWidgetOutputLine,
   flattenBlocks,
   getNextTranscriptSearchMatchIndex,
   parseInlineDiffFiles,
   readConversationScrollOffsetFromBottom,
+  relativizeProjectPath,
   resolveInitialConversationScrollTop,
   resolveConversationScrollTopForOffsetFromBottom,
   shouldRedirectHistoryTypingToPrompt,
@@ -133,6 +135,34 @@ describe("parseInlineDiffFiles", () => {
       oldLineNumber: 10,
       text: "old line 10",
     });
+  });
+});
+
+describe("project path formatting", () => {
+  const projectRoot = "C:\\Projects\\webdev\\t3code-copilot";
+
+  it("shortens standalone in-project absolute paths", () => {
+    expect(relativizeProjectPath("C:\\Projects\\webdev\\t3code-copilot\\src\\file.ts", projectRoot))
+      .toBe("src\\file.ts");
+    expect(relativizeProjectPath("  \"C:\\Projects\\webdev\\t3code-copilot\\README.md\"  ", projectRoot))
+      .toBe("  \"README.md\"  ");
+  });
+
+  it("leaves command text and out-of-project paths untouched", () => {
+    expect(relativizeProjectPath("Get-Content -Path C:\\Projects\\webdev\\t3code-copilot\\README.md", projectRoot))
+      .toBe("Get-Content -Path C:\\Projects\\webdev\\t3code-copilot\\README.md");
+    expect(relativizeProjectPath("C:\\Other\\notes.txt", projectRoot)).toBe("C:\\Other\\notes.txt");
+  });
+
+  it("shortens changed output lines without touching other output", () => {
+    expect(formatCommandWidgetOutputLine(
+      "changed: C:\\Projects\\webdev\\t3code-copilot\\apps\\console-ui\\src\\App.tsx",
+      projectRoot,
+    )).toBe("changed: apps\\console-ui\\src\\App.tsx");
+    expect(formatCommandWidgetOutputLine(
+      "updated C:\\Projects\\webdev\\t3code-copilot\\apps\\console-ui\\src\\App.tsx",
+      projectRoot,
+    )).toBe("updated C:\\Projects\\webdev\\t3code-copilot\\apps\\console-ui\\src\\App.tsx");
   });
 });
 
