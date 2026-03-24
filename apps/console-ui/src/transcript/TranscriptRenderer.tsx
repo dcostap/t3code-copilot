@@ -1857,26 +1857,44 @@ function buildEditorTheme() {
         padding: "0 0.24em",
       },
       ".cm-codeToken.tok-inlineCode.tok-markdownLink": {
-        color: "#cfd5db",
+        color: "#d8e0e8",
       },
       ".cm-codeToken.tok-inlineCode.tok-linkUrl": {
-        color: "#cfd5db",
+        color: "#d8e0e8",
       },
       ".cm-codeToken.tok-inlineCode.tok-linkFile": {
-        color: "#cfd5db",
+        color: "#d8e0e8",
       },
       ".cm-inlineLink": {
         cursor: "pointer",
+        borderRadius: "2px",
+        transition:
+          "color 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 220ms cubic-bezier(0.22, 1, 0.36, 1), filter 220ms cubic-bezier(0.22, 1, 0.36, 1)",
       },
       ".cm-codeToken.tok-markdownLink": {
-        textDecoration: "underline",
-        textUnderlineOffset: "2px",
+        textDecoration: "none",
+        boxShadow:
+          "0 10px 0 0 rgba(182, 233, 248, 0), inset 0 -0.125em 0 rgba(129, 184, 244, 0.18)",
       },
       ".cm-codeToken.tok-linkUrl": {
-        color: "#7dc4ff",
+        color: "#9bd2ff",
       },
       ".cm-codeToken.tok-linkFile": {
-        color: "#8fd6ff",
+        color: "#9ae2f3",
+      },
+      ".cm-codeToken.cm-inlineLink:hover": {
+        boxShadow:
+          "0 1px 0 4px rgba(146, 208, 255, 0.12), inset 0 -1.6em 0 rgba(146, 208, 255, 0.16)",
+        filter: "brightness(1.08) saturate(1.08)",
+      },
+      ".cm-codeToken.tok-linkUrl.cm-inlineLink:hover": {
+        color: "#edf7ff",
+      },
+      ".cm-codeToken.tok-linkFile.cm-inlineLink:hover": {
+        color: "#edfdfa",
+      },
+      ".cm-codeToken.tok-inlineCode.cm-inlineLink:hover": {
+        backgroundColor: "rgba(214, 220, 226, 0.12)",
       },
       ".cm-codeToken.tok-markdownStrong": {
         color: "#eef3f8",
