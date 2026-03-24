@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  findTranscriptSearchMatches,
   flattenBlocks,
+  getNextTranscriptSearchMatchIndex,
+  parseInlineDiffFiles,
   readConversationScrollOffsetFromBottom,
   resolveInitialConversationScrollTop,
   resolveConversationScrollTopForOffsetFromBottom,
@@ -87,6 +90,49 @@ describe("flattenBlocks", () => {
       "blockGap",
       "workingLine",
     ]);
+  });
+});
+
+describe("parseInlineDiffFiles", () => {
+  it("inserts a gap row between non-contiguous hunks and preserves deleted line numbers", () => {
+    const [file] = parseInlineDiffFiles([
+      "diff --git a/src/example.ts b/src/example.ts",
+      "--- a/src/example.ts",
+      "+++ b/src/example.ts",
+      "@@ -1,2 +1,2 @@",
+      " line 1",
+      "-old line 2",
+      "+new line 2",
+      "@@ -10,1 +10,2 @@",
+      "-old line 10",
+      "+new line 10",
+      "+new line 11",
+    ].join("\n"));
+
+    expect(file).toBeDefined();
+    expect(file?.hunks.flatMap((hunk) => hunk.rows.map((row) => row.kind))).toEqual([
+      "context",
+      "deletion",
+      "addition",
+      "gap",
+      "deletion",
+      "addition",
+      "addition",
+    ]);
+    expect(file?.hunks[0]?.rows[1]).toMatchObject({
+      kind: "deletion",
+      oldLineNumber: 2,
+      text: "old line 2",
+    });
+    expect(file?.hunks[1]?.rows[0]).toMatchObject({
+      kind: "gap",
+      text: "",
+    });
+    expect(file?.hunks[1]?.rows[1]).toMatchObject({
+      kind: "deletion",
+      oldLineNumber: 10,
+      text: "old line 10",
+    });
   });
 });
 
@@ -214,5 +260,40 @@ describe("history shortcut routing", () => {
       promptInputDisabled: true,
       text: "hello",
     })).toBe(false);
+  });
+});
+
+describe("transcript search helpers", () => {
+  it("finds matches case-insensitively in transcript history only", () => {
+    expect(findTranscriptSearchMatches(
+      "Alpha beta\nbeta prompt",
+      "BETA",
+      "Alpha beta\nbeta".length,
+    )).toEqual([
+      { from: 6, to: 10 },
+      { from: 11, to: 15 },
+    ]);
+  });
+
+  it("returns no matches for an empty query", () => {
+    expect(findTranscriptSearchMatches("alpha beta", "", 10)).toEqual([]);
+  });
+
+  it("wraps when advancing through search matches", () => {
+    expect(getNextTranscriptSearchMatchIndex({
+      currentIndex: 1,
+      matchCount: 3,
+      direction: 1,
+    })).toBe(2);
+    expect(getNextTranscriptSearchMatchIndex({
+      currentIndex: 2,
+      matchCount: 3,
+      direction: 1,
+    })).toBe(0);
+    expect(getNextTranscriptSearchMatchIndex({
+      currentIndex: 0,
+      matchCount: 3,
+      direction: -1,
+    })).toBe(2);
   });
 });

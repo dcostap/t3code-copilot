@@ -24,7 +24,7 @@ import {
   StateField,
   Text,
 } from "@codemirror/state";
-import { Decoration, EditorView, WidgetType, keymap } from "@codemirror/view";
+import { Decoration, type DecorationSet, EditorView, WidgetType, keymap } from "@codemirror/view";
 
 import { createAnimatedLoadingTextElement } from "../AnimatedLoadingText";
 import type { ComposerImageAttachment } from "../composerAttachments";
@@ -96,7 +96,7 @@ interface CodeBlockWidgetLineData {
 }
 
 interface InlineDiffRowData {
-  readonly kind: "metadata" | "context" | "addition" | "deletion";
+  readonly kind: "metadata" | "context" | "addition" | "deletion" | "gap";
   readonly oldLineNumber?: number;
   readonly newLineNumber?: number;
   readonly text: string;
@@ -204,6 +204,8 @@ export interface TranscriptRendererHandle {
   focus(): void;
   focusPrompt(options?: FocusPromptOptions): void;
   focusHistory(): void;
+  hasFocusWithinPane(): boolean;
+  openSearch(): void;
   isHistoryActive(): boolean;
   hasHistorySelection(): boolean;
   selectAllHistory(): boolean;
@@ -226,6 +228,11 @@ type NativeSelectionLike =
       };
     }
   | null;
+
+interface TranscriptSearchMatch {
+  readonly from: number;
+  readonly to: number;
+}
 
 function resolveSelectionContainerNode(node: unknown): Node | null {
   if (!node || typeof node !== "object") {
@@ -273,7 +280,9 @@ const CURSOR_VIEWPORT_PADDING_LINES = 7;
 const syncAnnotation = Annotation.define<boolean>();
 const setPromptStartEffect = StateEffect.define<number>();
 const decorationsCompartment = new Compartment();
+const setSearchDecorationsEffect = StateEffect.define<DecorationSet>();
 const commandWidgetResizeObservers = new WeakMap<HTMLElement, ResizeObserver>();
+const SEARCH_MATCH_VIEWPORT_PADDING_PX = 36;
 
 const promptStartField = StateField.define<number>({
   create: () => 0,
@@ -286,6 +295,19 @@ const promptStartField = StateField.define<number>({
 
     return transaction.changes.mapPos(value, -1);
   },
+});
+
+const searchDecorationsField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, transaction) {
+    for (const effect of transaction.effects) {
+      if (effect.is(setSearchDecorationsEffect)) {
+        return effect.value;
+      }
+    }
+    return transaction.docChanged ? value.map(transaction.changes) : value;
+  },
+  provide: (field) => EditorView.decorations.from(field),
 });
 
 function formatAttachmentSize(sizeBytes: number) {
@@ -818,6 +840,8 @@ export function normalizeInlineDiffRowText(text: string) {
 function buildInlineDiffRows(file: FileDiffMetadata): InlineDiffFileData {
   const additions = file.hunks.reduce((total, hunk) => total + hunk.additionLines, 0);
   const deletions = file.hunks.reduce((total, hunk) => total + hunk.deletionLines, 0);
+  let previousOldLineNumber: number | null = null;
+  let previousNewLineNumber: number | null = null;
   const hunks: InlineDiffHunkData[] = file.hunks.map((hunk) => {
     const rows: InlineDiffRowData[] = [];
     let oldLineNumber = hunk.deletionStart;
@@ -857,6 +881,33 @@ function buildInlineDiffRows(file: FileDiffMetadata): InlineDiffFileData {
       }
     }
 
+    const firstVisibleRow = rows[0];
+    if (
+      firstVisibleRow
+      && (
+        (
+          previousOldLineNumber !== null
+          && firstVisibleRow.oldLineNumber !== undefined
+          && firstVisibleRow.oldLineNumber > previousOldLineNumber + 1
+        )
+        || (
+          previousNewLineNumber !== null
+          && firstVisibleRow.newLineNumber !== undefined
+          && firstVisibleRow.newLineNumber > previousNewLineNumber + 1
+        )
+      )
+    ) {
+      rows.unshift({
+        kind: "gap",
+        text: "",
+      });
+    }
+
+    if (rows.length > 0) {
+      previousOldLineNumber = oldLineNumber - 1;
+      previousNewLineNumber = newLineNumber - 1;
+    }
+
     return {
       header: hunk.hunkContext ? `${hunk.hunkSpecs ?? "@@"} ${hunk.hunkContext}` : (hunk.hunkSpecs ?? "@@"),
       rows,
@@ -874,7 +925,7 @@ function buildInlineDiffRows(file: FileDiffMetadata): InlineDiffFileData {
 
 const inlineDiffCache = new Map<string, ReadonlyArray<InlineDiffFileData>>();
 
-function parseInlineDiffFiles(
+export function parseInlineDiffFiles(
   unifiedDiff: string,
   changedFiles?: ReadonlyArray<string>,
 ): ReadonlyArray<InlineDiffFileData> {
@@ -1190,23 +1241,40 @@ class CommandWidgetLine extends WidgetType {
             for (const row of hunk.rows) {
               const rowElement = document.createElement("div");
               rowElement.className = `cm-inlineDiffRow cm-inlineDiffRow${row.kind[0]!.toUpperCase()}${row.kind.slice(1)}`;
-              rowElement.classList.add("cm-commandWidgetCopyRow");
-              rowElement.dataset.copyText = `${row.kind === "addition" ? "+" : row.kind === "deletion" ? "-" : " "}${row.text}`;
+              if (row.kind !== "gap") {
+                rowElement.classList.add("cm-commandWidgetCopyRow");
+                rowElement.dataset.copyText = `${row.kind === "addition" ? "+" : row.kind === "deletion" ? "-" : " "}${row.text}`;
+              }
 
-              const newLine = document.createElement("span");
-              newLine.className = "cm-inlineDiffLineNumber";
-              newLine.textContent = row.newLineNumber?.toString() ?? "";
+              const lineNumber = document.createElement("span");
+              lineNumber.className = "cm-inlineDiffLineNumber";
+              lineNumber.textContent = row.newLineNumber?.toString() ?? row.oldLineNumber?.toString() ?? "";
+
+              const body = document.createElement("span");
+              body.className = "cm-inlineDiffBody";
 
               const marker = document.createElement("span");
               marker.className = "cm-inlineDiffMarker";
               marker.textContent =
-                row.kind === "addition" ? "+" : row.kind === "deletion" ? "-" : row.kind === "context" ? " " : "@";
+                row.kind === "addition"
+                  ? "+"
+                  : row.kind === "deletion"
+                  ? "-"
+                  : row.kind === "gap"
+                  ? "⋮"
+                  : row.kind === "context"
+                  ? " "
+                  : "@";
 
               const content = document.createElement("span");
               content.className = "cm-inlineDiffContent";
-              content.textContent = row.text.length > 0 ? row.text : " ";
+              const contentText = document.createElement("span");
+              contentText.className = "cm-inlineDiffContentText";
+              contentText.textContent = row.text.length > 0 ? row.text : " ";
+              content.append(contentText);
 
-              rowElement.append(newLine, marker, content);
+              body.append(marker, content);
+              rowElement.append(lineNumber, body);
               fileRoot.append(rowElement);
             }
           }
@@ -1665,6 +1733,22 @@ function buildDecorations(
   return Decoration.set(ranges, true);
 }
 
+function buildSearchDecorations(
+  searchMatches: ReadonlyArray<TranscriptSearchMatch>,
+  activeSearchMatchIndex: number,
+) {
+  return Decoration.set(
+    searchMatches.map((match, index) =>
+      Decoration.mark({
+        class: index === activeSearchMatchIndex
+          ? "cm-transcriptSearchMatch cm-transcriptSearchMatch--active"
+          : "cm-transcriptSearchMatch",
+      }).range(match.from, match.to),
+    ),
+    true,
+  );
+}
+
 function buildDecorationSignature(docModel: TranscriptDocumentModel) {
   const lineSignature = docModel.lines
     .map((line) => `${line.from}:${line.kind}:${(line.extraClasses ?? []).join(",")}`)
@@ -1679,6 +1763,13 @@ function buildDecorationSignature(docModel: TranscriptDocumentModel) {
     .map((replacement) => `${replacement.from}:${replacement.to}:${replacement.signature}`)
     .join("|");
   return `${docModel.promptStart}::${lineSignature}::${markSignature}::${widgetSignature}::${replacementSignature}`;
+}
+
+function buildSearchDecorationSignature(
+  searchMatches: ReadonlyArray<TranscriptSearchMatch>,
+  activeSearchMatchIndex: number,
+) {
+  return `${searchMatches.map((match) => `${match.from}:${match.to}`).join("|")}::${activeSearchMatchIndex}`;
 }
 
 function computeMinimalDocChange(currentText: string, nextText: string) {
@@ -1811,7 +1902,7 @@ function buildEditorTheme() {
       },
       ".cm-line-reasoning": {
         color: "#69737d",
-        fontSize: "13px",
+        fontSize: "14px",
         fontStyle: "italic",
       },
       ".cm-line-table": {
@@ -2350,20 +2441,29 @@ function buildEditorTheme() {
       },
       ".cm-inlineDiffRow": {
         display: "grid",
-        gridTemplateColumns: "52px 12px minmax(0, 1fr)",
+        gridTemplateColumns: "52px minmax(0, 1fr)",
         columnGap: "8px",
         alignItems: "start",
         minWidth: "0",
         padding: "0 10px 0 4px",
       },
-      ".cm-inlineDiffRowContext": {
-        backgroundColor: "transparent",
+      ".cm-inlineDiffBody": {
+        display: "inline-grid",
+        gridTemplateColumns: "12px minmax(0, 1fr)",
+        columnGap: "8px",
+        alignItems: "start",
+        justifySelf: "start",
+        width: "fit-content",
+        maxWidth: "100%",
+        minWidth: "0",
       },
-      ".cm-inlineDiffRowAddition": {
+      ".cm-inlineDiffRowAddition .cm-inlineDiffBody": {
         backgroundColor: "rgba(20, 60, 38, 0.5)",
+        borderRadius: "4px",
       },
-      ".cm-inlineDiffRowDeletion": {
+      ".cm-inlineDiffRowDeletion .cm-inlineDiffBody": {
         backgroundColor: "rgba(66, 26, 29, 0.5)",
+        borderRadius: "4px",
       },
       ".cm-inlineDiffLineNumber": {
         color: "#72808d",
@@ -2375,15 +2475,21 @@ function buildEditorTheme() {
       },
       ".cm-inlineDiffContent": {
         minWidth: "0",
+      },
+      ".cm-inlineDiffContentText": {
+        display: "inline",
         whiteSpace: "pre-wrap",
         overflowWrap: "anywhere",
         userSelect: "text",
       },
-      ".cm-inlineDiffRowAddition .cm-inlineDiffMarker, .cm-inlineDiffRowAddition .cm-inlineDiffContent": {
+      ".cm-inlineDiffRowAddition .cm-inlineDiffMarker, .cm-inlineDiffRowAddition .cm-inlineDiffContentText": {
         color: "#9cf0b4",
       },
-      ".cm-inlineDiffRowDeletion .cm-inlineDiffMarker, .cm-inlineDiffRowDeletion .cm-inlineDiffContent": {
-        color: "#ffb1b1",
+      ".cm-inlineDiffRowDeletion .cm-inlineDiffMarker, .cm-inlineDiffRowDeletion .cm-inlineDiffContentText": {
+        color: "rgba(255, 177, 177, 0.7)",
+      },
+      ".cm-inlineDiffRowGap .cm-inlineDiffMarker": {
+        color: "#7a8692",
       },
       ".cm-inlineDiffFallback": {
         margin: "0",
@@ -2808,6 +2914,30 @@ function keepCursorWithinViewportPadding(view: EditorView) {
   }
 }
 
+function keepSearchMatchWithinViewport(
+  view: EditorView,
+  activeMatchElement: HTMLElement,
+  overlayHeightPx: number,
+) {
+  const scrollContainer = getConversationScrollContainer(view);
+  if (!scrollContainer) {
+    return;
+  }
+
+  const matchRect = activeMatchElement.getBoundingClientRect();
+  const scrollRect = scrollContainer.getBoundingClientRect();
+  const topPadding = overlayHeightPx + SEARCH_MATCH_VIEWPORT_PADDING_PX;
+  const bottomPadding = SEARCH_MATCH_VIEWPORT_PADDING_PX;
+  const minTop = scrollRect.top + topPadding;
+  const maxBottom = scrollRect.bottom - bottomPadding;
+
+  if (matchRect.top < minTop) {
+    scrollContainer.scrollTop += matchRect.top - minTop;
+  } else if (matchRect.bottom > maxBottom) {
+    scrollContainer.scrollTop += matchRect.bottom - maxBottom;
+  }
+}
+
 export function getHistorySelectionLimitForPromptStart(doc: Text, promptStart: number) {
   if (promptStart >= doc.length) {
     return doc.length;
@@ -2991,6 +3121,55 @@ export function shouldSelectAllPromptFromPromptKeydown(
     && event.key.toLowerCase() === "a";
 }
 
+export function findTranscriptSearchMatches(
+  text: string,
+  query: string,
+  searchTo: number,
+): ReadonlyArray<TranscriptSearchMatch> {
+  if (query.length === 0 || searchTo <= 0) {
+    return [];
+  }
+
+  const boundedText = text.slice(0, searchTo);
+  const haystack = boundedText.toLocaleLowerCase();
+  const needle = query.toLocaleLowerCase();
+  if (needle.length === 0) {
+    return [];
+  }
+
+  const matches: TranscriptSearchMatch[] = [];
+  let fromIndex = 0;
+  while (fromIndex < haystack.length) {
+    const matchIndex = haystack.indexOf(needle, fromIndex);
+    if (matchIndex === -1) {
+      break;
+    }
+    matches.push({
+      from: matchIndex,
+      to: matchIndex + needle.length,
+    });
+    fromIndex = matchIndex + Math.max(needle.length, 1);
+  }
+  return matches;
+}
+
+export function getNextTranscriptSearchMatchIndex(input: {
+  readonly currentIndex: number;
+  readonly matchCount: number;
+  readonly direction: 1 | -1;
+}) {
+  if (input.matchCount <= 0) {
+    return -1;
+  }
+  const currentIndex =
+    input.currentIndex >= 0 && input.currentIndex < input.matchCount
+      ? input.currentIndex
+      : input.direction === 1
+        ? -1
+        : 0;
+  return (currentIndex + input.direction + input.matchCount) % input.matchCount;
+}
+
 export function shouldUseNativePromptCaret(
   cssSupports:
     | ((property: string, value: string) => boolean)
@@ -3092,6 +3271,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     },
     ref,
   ) {
+    const surfaceRef = useRef<HTMLDivElement | null>(null);
     const editorRef = useRef<HTMLDivElement | null>(null);
     const viewRef = useRef<EditorView | null>(null);
     const syncingViewRef = useRef(false);
@@ -3115,6 +3295,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const expandedCommandSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const collapsedFileChangeSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const appliedDecorationSignatureRef = useRef("");
+    const appliedSearchDecorationSignatureRef = useRef("");
     const dragDepthRef = useRef(0);
     const [expandedCommandSignatures, setExpandedCommandSignatures] = useState<ReadonlySet<string>>(
       () => new Set(),
@@ -3127,6 +3308,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     >(() => new Map());
     const [isDraggingImages, setIsDraggingImages] = useState(false);
     const [draft, setDraft] = useState("");
+    const [searchVisible, setSearchVisible] = useState(false);
+    const [searchQuery, setSearchQuery] = useState("");
+    const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(-1);
     const useNativePromptCaret = useMemo(
       () =>
         shouldUseNativePromptCaret(
@@ -3138,6 +3322,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     );
     const promptCaretRef = useRef<HTMLDivElement | null>(null);
     const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+    const searchOverlayRef = useRef<HTMLDivElement | null>(null);
+    const searchInputRef = useRef<HTMLInputElement | null>(null);
+    const searchReturnRegionRef = useRef<TranscriptRegion>("prompt");
 
     useEffect(() => {
       draftRef.current = draft;
@@ -3190,6 +3377,23 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     );
     const compactPendingUserInputPrompt =
       pendingUserInputHighlight !== undefined && !shouldRenderPromptSeparator(docModel.historyLineCount);
+    const searchMatches = useMemo(
+      () =>
+        searchVisible
+          ? findTranscriptSearchMatches(docModel.text, searchQuery, docModel.promptStart)
+          : [],
+      [docModel.promptStart, docModel.text, searchQuery, searchVisible],
+    );
+    const resolvedActiveSearchMatchIndex =
+      searchMatches.length === 0
+        ? -1
+        : activeSearchMatchIndex >= 0 && activeSearchMatchIndex < searchMatches.length
+          ? activeSearchMatchIndex
+          : 0;
+    const activeSearchMatch =
+      resolvedActiveSearchMatchIndex >= 0
+        ? searchMatches[resolvedActiveSearchMatchIndex] ?? null
+        : null;
     const initialDocModelRef = useRef(docModel);
     const docModelRef = useRef(docModel);
 
@@ -3553,6 +3757,122 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       });
     }, [prepareHistoryInteraction, syncActiveRegionClass]);
 
+    const focusSearchInput = useCallback(() => {
+      requestAnimationFrame(() => {
+        const input = searchInputRef.current;
+        if (!input) {
+          return;
+        }
+        input.focus({ preventScroll: true });
+        input.select();
+      });
+    }, []);
+
+    const closeSearch = useCallback((options?: { readonly restoreFocus?: boolean }) => {
+      setSearchVisible(false);
+      if (options?.restoreFocus === false) {
+        return;
+      }
+      requestAnimationFrame(() => {
+        if (searchReturnRegionRef.current === "history") {
+          const view = viewRef.current;
+          if (view) {
+            focusHistoryRegion(view);
+            return;
+          }
+        }
+        focusPromptRegion({ reveal: false });
+      });
+    }, [focusHistoryRegion, focusPromptRegion]);
+
+    const openSearch = useCallback(() => {
+      if (!searchVisible) {
+        searchReturnRegionRef.current = activeRegionRef.current;
+      }
+      setSearchVisible(true);
+      focusSearchInput();
+    }, [focusSearchInput, searchVisible]);
+
+    const moveSearchMatch = useCallback((direction: 1 | -1) => {
+      setActiveSearchMatchIndex((currentIndex) =>
+        getNextTranscriptSearchMatchIndex({
+          currentIndex,
+          matchCount: searchMatches.length,
+          direction,
+        }),
+      );
+    }, [searchMatches.length]);
+
+    useEffect(() => {
+      if (!searchVisible) {
+        return;
+      }
+      focusSearchInput();
+    }, [focusSearchInput, searchVisible]);
+
+    useEffect(() => {
+      if (!searchVisible) {
+        return;
+      }
+      if (searchMatches.length === 0) {
+        if (activeSearchMatchIndex !== -1) {
+          setActiveSearchMatchIndex(-1);
+        }
+        return;
+      }
+      if (activeSearchMatchIndex < 0 || activeSearchMatchIndex >= searchMatches.length) {
+        setActiveSearchMatchIndex(0);
+      }
+    }, [activeSearchMatchIndex, searchMatches.length, searchVisible]);
+
+    useEffect(() => {
+      if (!searchVisible || !activeSearchMatch) {
+        return;
+      }
+      const view = viewRef.current;
+      if (!view) {
+        return;
+      }
+      requestAnimationFrame(() => {
+        view.dispatch({
+          effects: EditorView.scrollIntoView(activeSearchMatch.from, { y: "start" }),
+          annotations: syncAnnotation.of(true),
+        });
+        requestAnimationFrame(() => {
+          const activeMatchElement = editorRef.current?.querySelector(".cm-transcriptSearchMatch--active");
+          if (!(activeMatchElement instanceof HTMLElement)) {
+            return;
+          }
+          keepSearchMatchWithinViewport(
+            view,
+            activeMatchElement,
+            searchOverlayRef.current?.offsetHeight ?? 0,
+          );
+        });
+      });
+    }, [activeSearchMatch, searchVisible]);
+
+    const handleSearchInputChange = useCallback((event: ReactChangeEvent<HTMLInputElement>) => {
+      setSearchQuery(event.target.value);
+      setActiveSearchMatchIndex(event.target.value.length > 0 ? 0 : -1);
+    }, []);
+
+    const handleSearchInputKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        moveSearchMatch(event.shiftKey ? -1 : 1);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSearch();
+      }
+    }, [closeSearch, moveSearchMatch]);
+
+    const handleSearchControlMouseDown = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+    }, []);
+
     const redirectHistoryTypingToPrompt = useCallback(
       (view: EditorView, text: string) => {
         const currentSelection: StoredSelection = {
@@ -3627,6 +3947,16 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         focusHistoryRegion(view);
       },
+      hasFocusWithinPane() {
+        if (typeof document === "undefined") {
+          return false;
+        }
+        const activeElement = document.activeElement;
+        return activeElement instanceof Node && surfaceRef.current?.contains(activeElement) === true;
+      },
+      openSearch() {
+        openSearch();
+      },
       isHistoryActive() {
         return activeRegionRef.current === "history";
       },
@@ -3658,7 +3988,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         scrollConversationToBottom(view);
       },
-    }), [deletePromptText, focusHistoryRegion, focusPromptRegion, insertTextIntoDraft, selectAllHistoryText, submitDraft]);
+    }), [deletePromptText, focusHistoryRegion, focusPromptRegion, insertTextIntoDraft, openSearch, selectAllHistoryText, submitDraft]);
 
     useLayoutEffect(() => {
       if (!editorRef.current) {
@@ -3735,6 +4065,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               ),
             ),
           ),
+          searchDecorationsField,
           EditorView.updateListener.of((update) => {
             if (syncingViewRef.current) {
               return;
@@ -3896,6 +4227,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         applyInitialScrollPosition();
       });
       appliedDecorationSignatureRef.current = buildDecorationSignature(initialDocModel);
+      appliedSearchDecorationSignatureRef.current = buildSearchDecorationSignature([], -1);
 
       return () => {
         cancelled = true;
@@ -3981,6 +4313,29 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
     }, [docModel]);
 
+    useEffect(() => {
+      const view = viewRef.current;
+      if (!view) {
+        return;
+      }
+
+      const nextSearchDecorationSignature = buildSearchDecorationSignature(
+        searchMatches,
+        resolvedActiveSearchMatchIndex,
+      );
+      if (appliedSearchDecorationSignatureRef.current === nextSearchDecorationSignature) {
+        return;
+      }
+
+      view.dispatch({
+        effects: setSearchDecorationsEffect.of(
+          buildSearchDecorations(searchMatches, resolvedActiveSearchMatchIndex),
+        ),
+        annotations: syncAnnotation.of(true),
+      });
+      appliedSearchDecorationSignatureRef.current = nextSearchDecorationSignature;
+    }, [resolvedActiveSearchMatchIndex, searchMatches]);
+
     const focusPromptForAttachments = useCallback(() => {
       focusPromptRegion();
     }, [focusPromptRegion]);
@@ -4063,6 +4418,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
     return (
       <div
+        ref={surfaceRef}
         className={`transcript-surface${isDraggingImages ? " transcript-surface--drag-over" : ""}`}
         onPasteCapture={handlePasteCapture}
         onDragEnter={handleDragEnter}
@@ -4070,6 +4426,63 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+        {searchVisible ? (
+          <div
+            ref={searchOverlayRef}
+            className="transcript-search"
+            role="search"
+            aria-label="Find in transcript"
+          >
+            <input
+              ref={searchInputRef}
+              type="text"
+              className="transcript-search__input"
+              value={searchQuery}
+              onChange={handleSearchInputChange}
+              onKeyDown={handleSearchInputKeyDown}
+              placeholder="Find in pane"
+              spellCheck={false}
+            />
+            <span className="transcript-search__status" aria-live="polite">
+              {searchQuery.length === 0
+                ? "Find"
+                : searchMatches.length === 0
+                  ? "0 results"
+                  : `${resolvedActiveSearchMatchIndex + 1}/${searchMatches.length}`}
+            </span>
+            <div className="transcript-search__actions">
+              <button
+                type="button"
+                className="transcript-search__button"
+                onMouseDown={handleSearchControlMouseDown}
+                onClick={() => moveSearchMatch(-1)}
+                aria-label="Previous match"
+                disabled={searchMatches.length === 0}
+              >
+                ↑
+              </button>
+              <button
+                type="button"
+                className="transcript-search__button"
+                onMouseDown={handleSearchControlMouseDown}
+                onClick={() => moveSearchMatch(1)}
+                aria-label="Next match"
+                disabled={searchMatches.length === 0}
+              >
+                ↓
+              </button>
+              <button
+                type="button"
+                className="transcript-search__button"
+                onMouseDown={handleSearchControlMouseDown}
+                onClick={() => closeSearch()}
+                aria-label="Close find"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        ) : null}
         <div className="transcript-history">
           <div className="transcript-history__editor" ref={editorRef} />
         </div>

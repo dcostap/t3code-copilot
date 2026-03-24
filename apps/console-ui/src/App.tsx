@@ -67,7 +67,7 @@ const EMPTY_PROJECTS: ReadonlyArray<OrchestrationProject> = [];
 const SIDEBAR_THREAD_LIMIT = 7;
 const SIDEBAR_IDLE_HIDE_MS = 10 * 60 * 60 * 1000;
 const PROJECT_CONTEXT_MENU_WIDTH = 360;
-const PROJECT_CONTEXT_MENU_HEIGHT = 220;
+const PROJECT_CONTEXT_MENU_HEIGHT = 256;
 interface AppPaletteCommand extends CommandPaletteCommand {
   run(): Promise<void> | void;
 }
@@ -102,6 +102,17 @@ interface PaneScrollState {
 interface ThreadStatusDescriptor {
   readonly tone: "working" | "waiting" | "idle" | "error";
   readonly label: string;
+  readonly animatedLabel?: string;
+  readonly timingLabel?: string;
+}
+
+interface SidebarThreadEntry {
+  readonly thread: OrchestrationThread;
+  readonly status: ThreadStatusDescriptor;
+  readonly tooltip: string;
+  readonly ageLabel: string;
+  readonly sidebarLabel: string;
+  readonly ageMs: number;
 }
 
 interface ProjectContextMenuState {
@@ -235,6 +246,12 @@ export function isPaletteToggleShortcut(
   event: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "metaKey" | "altKey">,
 ) {
   return event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "a";
+}
+
+export function shouldOpenPaneSearchShortcut(
+  event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey">,
+) {
+  return !event.altKey && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f";
 }
 
 export function shouldBlockGlobalPromptTypingForSelection(input: {
@@ -389,6 +406,58 @@ export function findReusableDraftPaneForThreadOpen(input: {
   return null;
 }
 
+export function getSidebarThreadGroups<ThreadEntry extends { readonly thread: Pick<OrchestrationThread, "id"> }>(input: {
+  readonly layout: Pick<ConsoleProjectLayout, "tabs" | "panesById">;
+  readonly threadEntries: ReadonlyArray<ThreadEntry>;
+}) {
+  if (input.layout.tabs.length <= 1) {
+    return [{
+      key: "all",
+      label: null,
+      entries: input.threadEntries,
+    }] as const;
+  }
+
+  const tabIdByThreadId = new Map<OrchestrationThread["id"], string>();
+  for (const tab of input.layout.tabs) {
+    for (const paneId of tab.paneIds) {
+      const pane = input.layout.panesById[paneId];
+      if (pane?.kind === "thread" && !tabIdByThreadId.has(pane.threadId)) {
+        tabIdByThreadId.set(pane.threadId, tab.id);
+      }
+    }
+  }
+
+  const groupedEntries: Array<{
+    readonly key: string;
+    readonly label: string | null;
+    readonly entries: ReadonlyArray<ThreadEntry>;
+  }> = input.layout.tabs
+    .map((tab, index) => ({
+      key: tab.id,
+      label: `Tab ${index + 1}`,
+      entries: input.threadEntries.filter((entry) => tabIdByThreadId.get(entry.thread.id) === tab.id),
+    }))
+    .filter((group) => group.entries.length > 0);
+
+  const ungroupedEntries = input.threadEntries.filter((entry) => !tabIdByThreadId.has(entry.thread.id));
+  if (ungroupedEntries.length > 0) {
+    groupedEntries.push({
+      key: "ungrouped",
+      label: null,
+      entries: ungroupedEntries,
+    });
+  }
+
+  return groupedEntries.length > 0
+    ? groupedEntries
+    : [{
+      key: "all",
+      label: null,
+      entries: input.threadEntries,
+    }];
+}
+
 function resolveProjectContextMenuPosition(clientX: number, clientY: number) {
   const viewportWidth = typeof window === "undefined" ? PROJECT_CONTEXT_MENU_WIDTH : window.innerWidth;
   const viewportHeight = typeof window === "undefined" ? PROJECT_CONTEXT_MENU_HEIGHT : window.innerHeight;
@@ -484,9 +553,12 @@ export function getThreadStatus(
       thread.latestTurn?.startedAt ?? thread.latestTurn?.requestedAt ?? thread.updatedAt,
     );
     const label = deriveRunningThreadIntentLabel(thread) ?? "Working";
+    const timingLabel = formatElapsedCompact(nowMs - startedAt);
     return {
       tone: "working",
-      label: `${label} ${formatElapsedCompact(nowMs - startedAt)}`,
+      label: `${label} ${timingLabel}`,
+      animatedLabel: label,
+      timingLabel,
     };
   }
 
@@ -501,6 +573,29 @@ export function getThreadStatus(
   }
 
   return { tone: "idle", label: "idle" };
+}
+
+export function getSidebarThreadTitleClassName(input: {
+  readonly statusTone: ThreadStatusDescriptor["tone"];
+  readonly isActive: boolean;
+}) {
+  return [
+    "project-thread__title",
+    input.statusTone === "working" ? "project-thread__title--loading" : null,
+    input.statusTone === "working" && input.isActive ? "project-thread__title--loadingActive" : null,
+  ].filter((className): className is string => className !== null).join(" ");
+}
+
+export function getSidebarThreadStatusClassName(input: {
+  readonly statusTone: ThreadStatusDescriptor["tone"];
+  readonly isActive: boolean;
+}) {
+  return [
+    "project-thread__status",
+    `project-thread__status--${input.statusTone}`,
+    input.statusTone === "working" ? "project-thread__status--loading" : null,
+    input.statusTone === "working" && input.isActive ? "project-thread__status--loadingActive" : null,
+  ].filter((className): className is string => className !== null).join(" ");
 }
 
 function getThreadAgeLabel(thread: OrchestrationThread, nowIso: string) {
@@ -1412,19 +1507,25 @@ export function App() {
     }, 1400);
   }, []);
 
+  const handleCreateDraftTabForProject = useCallback((projectId: OrchestrationProject["id"]) => {
+    workspace.activateProject(projectId);
+    const created = workspace.createDraftTab({ projectId });
+    if (!created) {
+      return null;
+    }
+    setSubmitError(null);
+    focusPanePrompt(created.paneId);
+    return created;
+  }, [focusPanePrompt, workspace]);
+
   const handleCreateDraftTab = useCallback(() => {
     const projectId = workspace.activeProject?.id ?? workspace.projectViews[0]?.project.id ?? null;
     if (!projectId) {
       setSubmitError("No project is available.");
       return;
     }
-    const created = workspace.createDraftTab({ projectId });
-    if (!created) {
-      return;
-    }
-    setSubmitError(null);
-    focusPanePrompt(created.paneId);
-  }, [focusPanePrompt, workspace]);
+    void handleCreateDraftTabForProject(projectId);
+  }, [handleCreateDraftTabForProject, workspace.activeProject, workspace.projectViews]);
 
   const handleSplitActivePane = useCallback(() => {
     if (!workspace.activeProject || !workspace.activePaneId) {
@@ -1572,6 +1673,11 @@ export function App() {
     setProjectContextMenu(null);
     setProjectArchiveConfirmId(projectId);
   }, []);
+
+  const handleCreateProjectThreadFromContextMenu = useCallback((projectId: OrchestrationProject["id"]) => {
+    setProjectContextMenu(null);
+    void handleCreateDraftTabForProject(projectId);
+  }, [handleCreateDraftTabForProject]);
 
   const handleCloseProjectArchiveConfirm = useCallback(() => {
     setProjectArchiveConfirmId(null);
@@ -2355,6 +2461,16 @@ export function App() {
         return;
       }
 
+      const activePaneHandle = workspace.activePaneId ? paneRefs.current[workspace.activePaneId] : null;
+      if (workspace.activePaneId && shouldOpenPaneSearchShortcut(event)) {
+        if (isEditableTarget(event.target) && !activePaneHandle?.hasFocusWithinPane()) {
+          return;
+        }
+        event.preventDefault();
+        activePaneHandle?.openSearch();
+        return;
+      }
+
       if (!workspace.activePaneId || isEditableTarget(event.target)) {
         return;
       }
@@ -2368,7 +2484,6 @@ export function App() {
         return;
       }
 
-      const activePaneHandle = paneRefs.current[workspace.activePaneId];
       if (shouldScopeGlobalSelectAllToHistory({
         key: event.key,
         ctrlKey: event.ctrlKey,
@@ -2570,7 +2685,7 @@ export function App() {
                 const threads = orderedThreadsByProjectId.get(projectView.project.id) ?? [];
                 const isActiveProject = projectView.project.id === workspace.activeProject?.id;
                 const expandedSidebarThreads = expandedSidebarProjectIds.has(projectView.project.id);
-                const threadEntries = threads.map((thread) => {
+                const threadEntries: SidebarThreadEntry[] = threads.map((thread) => {
                   const pendingUserInput = getPendingUserInputs(thread.id)[0] ?? null;
                   const status = getThreadStatus(
                     thread,
@@ -2594,6 +2709,10 @@ export function App() {
                   : threadEntries
                       .filter((entry) => !(entry.status.tone === "idle" && entry.ageMs > SIDEBAR_IDLE_HIDE_MS))
                       .slice(0, SIDEBAR_THREAD_LIMIT);
+                const visibleThreadGroups = getSidebarThreadGroups({
+                  layout: projectView.layout,
+                  threadEntries: visibleThreadEntries,
+                });
                 const hiddenThreadCount = threadEntries.length - visibleThreadEntries.length;
 
                 return (
@@ -2651,41 +2770,74 @@ export function App() {
                       <div className="project-tree__threads">
                         {threads.length === 0 ? (
                           <div className="project-tree__empty">No threads yet.</div>
-                          ) : visibleThreadEntries.map(({ thread, status, tooltip, sidebarLabel, ageMs }) => (
-                            <button
-                              key={thread.id}
-                              type="button"
-                              className={`project-thread${thread.id === workspace.activeThreadId ? " project-thread--active" : ""}${ageMs >= 10 * 60 * 60 * 1000 ? " project-thread--stale" : ageMs >= 2 * 60 * 60 * 1000 ? " project-thread--aged" : ""}${status.tone === "idle" && ageMs >= 3 * 60 * 60 * 1000 ? " project-thread--statusOnHover" : ""}`}
-                              title={tooltip}
-                              draggable
-                              onContextMenu={(event) => handleOpenThreadContextMenu(event, thread.id)}
-                              onDragStart={() => setDraggedThreadId(thread.id)}
-                              onDragEnd={() => setDraggedThreadId(null)}
-                              onClick={() => handleOpenThread(thread.id)}
-                            >
-                              {status.tone === "working" ? (
-                                <AnimatedLoadingText
-                                  text={thread.title}
-                                  className="project-thread__title project-thread__title--loading"
-                                />
-                              ) : (
-                                <span className="project-thread__title">{thread.title}</span>
-                              )}
-                              <span className="project-thread__meta">
-                                {unreadThreadIds.has(thread.id) ? (
-                                  <span className="project-thread__unreadDot" aria-hidden="true" />
-                                ) : null}
-                                <span
-                                  className={`project-thread__status project-thread__status--${status.tone}`}
-                                  style={status.tone === "idle"
-                                    ? ({ "--project-thread-status-opacity": getThreadStatusOpacity(ageMs) } as CSSProperties)
-                                    : undefined}
+                        ) : visibleThreadGroups.map((group) => (
+                          <div key={group.key} className="project-thread-group">
+                            {group.label ? (
+                              <div className="project-thread-group__label" aria-hidden="true">
+                                <span>{group.label}</span>
+                              </div>
+                            ) : null}
+                            {group.entries.map(({ thread, status, tooltip, sidebarLabel, ageMs }) => {
+                              const isActiveThread = thread.id === workspace.activeThreadId;
+                              const hasUnreadMarker = unreadThreadIds.has(thread.id);
+                              const titleClassName = getSidebarThreadTitleClassName({
+                                statusTone: status.tone,
+                                isActive: isActiveThread,
+                              });
+                              const statusClassName = getSidebarThreadStatusClassName({
+                                statusTone: status.tone,
+                                isActive: isActiveThread,
+                              });
+                              return (
+                                <button
+                                  key={thread.id}
+                                  type="button"
+                                  className={`project-thread${isActiveThread ? " project-thread--active" : ""}${hasUnreadMarker ? " project-thread--unread" : ""}${ageMs >= 10 * 60 * 60 * 1000 ? " project-thread--stale" : ageMs >= 2 * 60 * 60 * 1000 ? " project-thread--aged" : ""}${status.tone === "idle" && ageMs >= 3 * 60 * 60 * 1000 ? " project-thread--statusOnHover" : ""}`}
+                                  title={tooltip}
+                                  draggable
+                                  onContextMenu={(event) => handleOpenThreadContextMenu(event, thread.id)}
+                                  onDragStart={() => setDraggedThreadId(thread.id)}
+                                  onDragEnd={() => setDraggedThreadId(null)}
+                                  onClick={() => handleOpenThread(thread.id)}
                                 >
-                                  {sidebarLabel}
-                                </span>
-                              </span>
-                            </button>
-                          ))
+                                  {status.tone === "working" ? (
+                                    <AnimatedLoadingText text={thread.title} className={titleClassName} />
+                                  ) : (
+                                    <span className={titleClassName}>{thread.title}</span>
+                                  )}
+                                  <span className="project-thread__meta">
+                                    {hasUnreadMarker ? (
+                                      <span className="project-thread__unreadDot" aria-hidden="true" />
+                                    ) : null}
+                                    {status.tone === "working" ? (
+                                      <span className="project-thread__workingSpinner" aria-hidden="true" />
+                                    ) : null}
+                                    {status.tone === "working" ? (
+                                      <span className={statusClassName}>
+                                        <AnimatedLoadingText
+                                          text={`${status.animatedLabel ?? sidebarLabel} `}
+                                          className="project-thread__statusAnimatedLabel"
+                                        />
+                                        {status.timingLabel ? (
+                                          <span className="project-thread__statusTiming">{status.timingLabel}</span>
+                                        ) : null}
+                                      </span>
+                                    ) : (
+                                      <span
+                                        className={statusClassName}
+                                        style={status.tone === "idle"
+                                          ? ({ "--project-thread-status-opacity": getThreadStatusOpacity(ageMs) } as CSSProperties)
+                                          : undefined}
+                                      >
+                                        {sidebarLabel}
+                                      </span>
+                                    )}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ))
                         }
                         {!expandedSidebarThreads && hiddenThreadCount > 0 ? (
                           <button
@@ -2877,6 +3029,13 @@ export function App() {
               </div>
             </div>
             <div className="project-context-menu__actions">
+              <button
+                type="button"
+                className="project-context-menu__action"
+                onClick={() => handleCreateProjectThreadFromContextMenu(projectContextMenuProject.id)}
+              >
+                New thread
+              </button>
               <button
                 type="button"
                 className="project-context-menu__action"

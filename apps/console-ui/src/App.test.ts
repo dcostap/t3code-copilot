@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { EventId } from "@t3tools/contracts";
+import { EventId, ThreadId } from "@t3tools/contracts";
 
 import {
   findDuplicateProjectForWorkspaceRoot,
   findReusableDraftPaneForThreadOpen,
   formatManageThreadTimestamp,
+  getSidebarThreadStatusClassName,
+  getSidebarThreadGroups,
+  getSidebarThreadTitleClassName,
   getThreadStatus,
   isPaletteToggleShortcut,
   normalizeProjectWorkspaceRootForComparison,
@@ -14,6 +17,7 @@ import {
   resolveProjectSelectionAfterArchive,
   resolveManagedThreadRowSelection,
   shouldBlockGlobalPromptTypingForSelection,
+  shouldOpenPaneSearchShortcut,
   shouldScopeGlobalSelectAllToHistory,
   summarizeThreadSelection,
   shouldRetainPendingPromptSend,
@@ -67,6 +71,52 @@ describe("shouldRetainPendingPromptSend", () => {
   });
 });
 
+describe("getSidebarThreadTitleClassName", () => {
+  it("adds the loading classes for working threads", () => {
+    expect(getSidebarThreadTitleClassName({
+      statusTone: "working",
+      isActive: false,
+    })).toBe("project-thread__title project-thread__title--loading");
+  });
+
+  it("adds the active loading class for the active working thread", () => {
+    expect(getSidebarThreadTitleClassName({
+      statusTone: "working",
+      isActive: true,
+    })).toBe("project-thread__title project-thread__title--loading project-thread__title--loadingActive");
+  });
+
+  it("keeps idle threads on the static title class", () => {
+    expect(getSidebarThreadTitleClassName({
+      statusTone: "idle",
+      isActive: true,
+    })).toBe("project-thread__title");
+  });
+});
+
+describe("getSidebarThreadStatusClassName", () => {
+  it("adds the loading classes for working thread status labels", () => {
+    expect(getSidebarThreadStatusClassName({
+      statusTone: "working",
+      isActive: false,
+    })).toBe("project-thread__status project-thread__status--working project-thread__status--loading");
+  });
+
+  it("adds the active loading class for the active working thread status label", () => {
+    expect(getSidebarThreadStatusClassName({
+      statusTone: "working",
+      isActive: true,
+    })).toBe("project-thread__status project-thread__status--working project-thread__status--loading project-thread__status--loadingActive");
+  });
+
+  it("keeps idle status labels on the static classes", () => {
+    expect(getSidebarThreadStatusClassName({
+      statusTone: "idle",
+      isActive: true,
+    })).toBe("project-thread__status project-thread__status--idle");
+  });
+});
+
 describe("shouldSuppressTabFocusNavigation", () => {
   it("suppresses plain tab navigation", () => {
     expect(shouldSuppressTabFocusNavigation({
@@ -105,6 +155,35 @@ describe("isPaletteToggleShortcut", () => {
       shiftKey: false,
       metaKey: false,
       altKey: false,
+    })).toBe(false);
+  });
+});
+
+describe("shouldOpenPaneSearchShortcut", () => {
+  it("matches ctrl+f", () => {
+    expect(shouldOpenPaneSearchShortcut({
+      key: "f",
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+    })).toBe(true);
+  });
+
+  it("matches cmd+f", () => {
+    expect(shouldOpenPaneSearchShortcut({
+      key: "F",
+      ctrlKey: false,
+      metaKey: true,
+      altKey: false,
+    })).toBe(true);
+  });
+
+  it("ignores alt-modified find shortcuts", () => {
+    expect(shouldOpenPaneSearchShortcut({
+      key: "f",
+      ctrlKey: true,
+      metaKey: false,
+      altKey: true,
     })).toBe(false);
   });
 });
@@ -281,6 +360,36 @@ describe("getThreadStatus", () => {
     )).toEqual({
       tone: "waiting",
       label: "Asking user 10m",
+    });
+  });
+
+  it("splits the working status into an animated label and a static timing suffix", () => {
+    const thread = buildTestSnapshot().threads[0]!;
+
+    expect(getThreadStatus(
+      {
+        ...thread,
+        latestTurn: {
+          ...thread.latestTurn!,
+          state: "running",
+          requestedAt: "2026-03-20T12:00:00.000Z",
+          startedAt: "2026-03-20T12:00:05.000Z",
+          completedAt: null,
+        },
+        session: {
+          ...thread.session!,
+          status: "running",
+          activeTurnId: thread.latestTurn!.turnId,
+          updatedAt: "2026-03-20T12:05:00.000Z",
+        },
+      },
+      "2026-03-20T12:16:00.000Z",
+      true,
+    )).toEqual({
+      tone: "working",
+      label: "Working 15m",
+      animatedLabel: "Working",
+      timingLabel: "15m",
     });
   });
 });
@@ -563,5 +672,84 @@ describe("findReusableDraftPaneForThreadOpen", () => {
       attachmentsByPaneId: {},
       pendingDraftPaneIds: new Set(),
     })).toBeNull();
+  });
+});
+
+describe("getSidebarThreadGroups", () => {
+  it("keeps the existing thread order within each tab group", () => {
+    const threadId1 = ThreadId.makeUnsafe("thread:1");
+    const threadId2 = ThreadId.makeUnsafe("thread:2");
+    const threadId3 = ThreadId.makeUnsafe("thread:3");
+    const groups = getSidebarThreadGroups({
+      layout: {
+        tabs: [
+          {
+            id: "tab:1",
+            paneIds: ["pane:1"],
+            activePaneId: "pane:1",
+            createdAt: "2026-03-21T00:00:00.000Z",
+          },
+          {
+            id: "tab:2",
+            paneIds: ["pane:2"],
+            activePaneId: "pane:2",
+            createdAt: "2026-03-21T00:00:01.000Z",
+          },
+        ],
+        panesById: {
+          "pane:1": { id: "pane:1", kind: "thread", threadId: threadId2 },
+          "pane:2": { id: "pane:2", kind: "thread", threadId: threadId3 },
+        },
+      },
+      threadEntries: [
+        { thread: { id: threadId3 } },
+        { thread: { id: threadId2 } },
+        { thread: { id: threadId1 } },
+      ],
+    });
+
+    expect(groups).toEqual([
+      {
+        key: "tab:1",
+        label: "Tab 1",
+        entries: [{ thread: { id: threadId2 } }],
+      },
+      {
+        key: "tab:2",
+        label: "Tab 2",
+        entries: [{ thread: { id: threadId3 } }],
+      },
+      {
+        key: "ungrouped",
+        label: null,
+        entries: [{ thread: { id: threadId1 } }],
+      },
+    ]);
+  });
+
+  it("skips tab labels when the project has a single tab", () => {
+    const threadId1 = ThreadId.makeUnsafe("thread:1");
+    const groups = getSidebarThreadGroups({
+      layout: {
+        tabs: [{
+          id: "tab:1",
+          paneIds: ["pane:1"],
+          activePaneId: "pane:1",
+          createdAt: "2026-03-21T00:00:00.000Z",
+        }],
+        panesById: {
+          "pane:1": { id: "pane:1", kind: "thread", threadId: threadId1 },
+        },
+      },
+      threadEntries: [{ thread: { id: threadId1 } }],
+    });
+
+    expect(groups).toEqual([
+      {
+        key: "all",
+        label: null,
+        entries: [{ thread: { id: threadId1 } }],
+      },
+    ]);
   });
 });

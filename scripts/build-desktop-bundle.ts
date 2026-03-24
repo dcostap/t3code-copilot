@@ -75,7 +75,8 @@ const buildDesktopBundle = Effect.fn("buildDesktopBundle")(function* (input: {
 
 const cli = Command.make("build-desktop-bundle", {
   surface: Flag.choice("surface", DesktopSurface).pipe(
-    Flag.withDescription("Desktop renderer surface to bundle."),
+    Flag.withDescription("Desktop renderer surface to bundle. Defaults to console."),
+    Flag.withDefault("console"),
   ),
   verbose: Flag.boolean("verbose").pipe(
     Flag.withDescription("Stream subprocess stdout."),

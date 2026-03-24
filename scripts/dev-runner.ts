@@ -381,13 +381,10 @@ const resolveOptionalBooleanOverride = (
 
 export function runDevRunnerWithInput(input: DevRunnerCliInput) {
   return Effect.gen(function* () {
-    if (input.mode === "dev:desktop" && Option.isNone(input.surface)) {
-      return yield* new DevRunnerError({
-        message: "Desktop development requires --surface=web or --surface=console.",
-      });
-    }
-
-    const desktopSurface = Option.getOrUndefined(input.surface);
+    const desktopSurface: DesktopSurface | undefined =
+      input.mode === "dev:desktop"
+        ? Option.getOrElse(input.surface, () => "console" as const)
+        : Option.getOrUndefined(input.surface);
 
     const { portOffset, devInstance } = yield* OffsetConfig.asEffect().pipe(
       Effect.mapError(
@@ -504,7 +501,7 @@ const devRunnerCli = Command.make("dev-runner", {
     Argument.withDescription("Development mode to run."),
   ),
   surface: Flag.choice("surface", DESKTOP_SURFACES).pipe(
-    Flag.withDescription("Desktop renderer surface. Required for dev:desktop."),
+    Flag.withDescription("Desktop renderer surface. Defaults to console for dev:desktop."),
     Flag.optional,
   ),
   stateDir: Flag.string("state-dir").pipe(

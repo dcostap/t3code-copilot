@@ -1614,28 +1614,28 @@ export function collapseTrailingFinishedStateRun(
     return [...blocks];
   }
 
-  const dedupedTrailingBlocks: FinishedStateBlock[] = [];
-  const indexByFinishedAt = new Map<string, number>();
+  let selectedBlock: FinishedStateBlock | null = null;
 
   for (const block of trailingBlocks) {
     if (!isFinishedStateBlock(block)) {
       continue;
     }
 
-    const existingIndex = indexByFinishedAt.get(block.finishedAt);
-    if (existingIndex === undefined) {
-      indexByFinishedAt.set(block.finishedAt, dedupedTrailingBlocks.length);
-      dedupedTrailingBlocks.push(block);
-      continue;
-    }
-
-    const existing = dedupedTrailingBlocks[existingIndex]!;
-    if (block.startedAt.localeCompare(existing.startedAt) > 0) {
-      dedupedTrailingBlocks[existingIndex] = block;
+    if (
+      !selectedBlock
+      || block.finishedAt.localeCompare(selectedBlock.finishedAt) > 0
+      || (
+        block.finishedAt === selectedBlock.finishedAt
+        && block.startedAt.localeCompare(selectedBlock.startedAt) < 0
+      )
+    ) {
+      selectedBlock = block;
     }
   }
 
-  return [...blocks.slice(0, trailingStart), ...dedupedTrailingBlocks];
+  return selectedBlock
+    ? [...blocks.slice(0, trailingStart), selectedBlock]
+    : [...blocks];
 }
 
 function isAssistantMessageEntry(entry: TimelineEntry) {
@@ -2184,10 +2184,8 @@ export function threadToTranscriptBlocks(
     blocks.splice(0, blocks.length, ...finalizedBlocks);
   }
 
-  if (pendingUserInputOpen) {
-    const collapsedBlocks = collapseTrailingFinishedStateRun(blocks);
-    blocks.splice(0, blocks.length, ...collapsedBlocks);
-  }
+  const collapsedBlocks = collapseTrailingFinishedStateRun(blocks);
+  blocks.splice(0, blocks.length, ...collapsedBlocks);
 
   if (!pendingUserInputOpen && (thread.latestTurn?.state === "running" || thread.session?.status === "running")) {
     const waitingStartedAt = findRunningTurnPhaseStartedAt(thread);

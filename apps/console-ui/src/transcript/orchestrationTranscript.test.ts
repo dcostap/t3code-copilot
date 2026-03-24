@@ -8,7 +8,7 @@ import {
 } from "./orchestrationTranscript";
 
 describe("collapseTrailingFinishedStateRun", () => {
-  it("keeps only the most specific trailing finished-state block", () => {
+  it("keeps the widest trailing finished-state for a shared end boundary", () => {
     expect(collapseTrailingFinishedStateRun([
       {
         type: "user-input-request",
@@ -30,12 +30,12 @@ describe("collapseTrailingFinishedStateRun", () => {
       },
       {
         type: "finished-state",
-        startedAt: "2026-03-11T09:03:00.000Z",
+        startedAt: "2026-03-11T09:00:03.000Z",
         finishedAt: "2026-03-11T09:00:05.000Z",
       },
       {
         type: "finished-state",
-        startedAt: "2026-03-11T09:02:00.000Z",
+        startedAt: "2026-03-11T09:00:02.000Z",
         finishedAt: "2026-03-11T09:00:05.000Z",
       },
     ])).toEqual([
@@ -54,13 +54,13 @@ describe("collapseTrailingFinishedStateRun", () => {
       },
       {
         type: "finished-state",
-        startedAt: "2026-03-11T09:03:00.000Z",
+        startedAt: "2026-03-11T09:00:00.000Z",
         finishedAt: "2026-03-11T09:00:05.000Z",
       },
     ]);
   });
 
-  it("preserves distinct finished-state timestamps in the trailing run", () => {
+  it("keeps only the latest trailing finished-state boundary", () => {
     expect(collapseTrailingFinishedStateRun([
       {
         type: "assistant-text",
@@ -77,16 +77,16 @@ describe("collapseTrailingFinishedStateRun", () => {
         startedAt: "2026-03-11T09:00:06.000Z",
         finishedAt: "2026-03-11T09:00:10.000Z",
       },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:08.000Z",
+        finishedAt: "2026-03-11T09:00:10.000Z",
+      },
     ])).toEqual([
       {
         type: "assistant-text",
         text: "Before the first question.",
         streaming: false,
-      },
-      {
-        type: "finished-state",
-        startedAt: "2026-03-11T09:00:00.000Z",
-        finishedAt: "2026-03-11T09:00:05.000Z",
       },
       {
         type: "finished-state",
