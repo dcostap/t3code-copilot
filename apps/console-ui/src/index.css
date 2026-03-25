@@ -1,7 +1,7 @@
 :root {
   color-scheme: dark;
   font-family: "Cascadia Code", "Cascadia Mono", "Iosevka Term", "JetBrains Mono", Consolas, monospace;
-  font-size: 16px;
+  font-size: 14px;
   background-color: #202020;
   color: #cfd4d9;
 }
@@ -1170,7 +1170,7 @@ body {
   gap: 12px;
   border: none;
   background: transparent;
-  color: #ddd6cf;
+  color: #f0f0f0;
   cursor: pointer;
   padding: 0;
   text-align: left;
@@ -1316,7 +1316,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #c9c2bc;
+  color: #cdd2db;
   transition: color 45ms ease;
 }
 
@@ -1465,16 +1465,16 @@ body {
 
 .project-thread:hover .project-thread__title:not(.project-thread__title--loading),
 .project-thread:focus-visible .project-thread__title:not(.project-thread__title--loading) {
-  color: #d8d0c9;
+  color: #ffffff;
 }
 
 .project-thread--active .project-thread__title:not(.project-thread__title--loading) {
-  color: #ddd6cf;
+  color: #fcfbf9;
 }
 
 .project-thread--active:hover .project-thread__title:not(.project-thread__title--loading),
 .project-thread--active:focus-visible .project-thread__title:not(.project-thread__title--loading) {
-  color: #ece6df;
+  color: #ffffff;
 }
 
 .project-thread__status {

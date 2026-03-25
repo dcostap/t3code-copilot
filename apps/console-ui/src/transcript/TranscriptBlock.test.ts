@@ -514,6 +514,14 @@ describe("blockToLines", () => {
     });
 
     expect(lines.every((line) => line.kind === "table")).toBe(true);
+    expect(lines[0]?.tableData).toEqual({
+      headers: ["Name", "Role", "Status"],
+      rows: [
+        ["Alice", "Developer", "Active"],
+        ["Bob", "Designer", "Inactive"],
+      ],
+      alignments: ["left", "left", "left"],
+    });
     expect(lines.some((line) => line.text.includes("Name") && line.text.includes("Role"))).toBe(true);
     expect(lines.some((line) => line.text.includes("Alice") && line.text.includes("Active"))).toBe(true);
     expect(lines.some((line) => line.text.includes("Bob") && line.text.includes("Inactive"))).toBe(true);

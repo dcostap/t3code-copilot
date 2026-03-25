@@ -5,6 +5,7 @@ import {
   formatCommandWidgetOutputLine,
   flattenBlocks,
   getNextTranscriptSearchMatchIndex,
+  layoutMarkdownTable,
   parseInlineDiffFiles,
   readConversationScrollOffsetFromBottom,
   relativizeProjectPath,
@@ -93,6 +94,26 @@ describe("flattenBlocks", () => {
       "workingLine",
     ]);
   });
+
+  it("does not insert a block gap between a reasoning summary and following reasoning text", () => {
+    const blocks: TranscriptBlock[] = [
+      {
+        type: "reasoning-summary",
+        text: "Summarizing missing prompts",
+      },
+      {
+        type: "reasoning-text",
+        text: "Checking the existing flows before adding anything.",
+      },
+    ];
+
+    const { lines } = flattenBlocks(blocks);
+
+    expect(lines.map((line) => line.kind)).toEqual([
+      "reasoningSummary",
+      "reasoning",
+    ]);
+  });
 });
 
 describe("parseInlineDiffFiles", () => {
@@ -163,6 +184,22 @@ describe("project path formatting", () => {
       "updated C:\\Projects\\webdev\\t3code-copilot\\apps\\console-ui\\src\\App.tsx",
       projectRoot,
     )).toBe("updated C:\\Projects\\webdev\\t3code-copilot\\apps\\console-ui\\src\\App.tsx");
+  });
+});
+
+describe("layoutMarkdownTable", () => {
+  it("wraps cell content into a responsive unicode table widget layout", () => {
+    const lines = layoutMarkdownTable({
+      headers: ["File", "Status"],
+      rows: [["very-long-component-name.tsx", "done"]],
+      alignments: ["left", "right"],
+    }, 28);
+
+    expect(lines[0]?.text.startsWith("┌")).toBe(true);
+    expect(lines.at(-1)?.text.startsWith("└")).toBe(true);
+    expect(lines.filter((line) => line.kind === "body").length).toBeGreaterThan(1);
+    expect(lines.some((line) => line.text.includes("very-long"))).toBe(true);
+    expect(lines.some((line) => line.text.includes("done │"))).toBe(true);
   });
 });
 

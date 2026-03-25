@@ -30,9 +30,12 @@ import { createAnimatedLoadingTextElement } from "../AnimatedLoadingText";
 import type { ComposerImageAttachment } from "../composerAttachments";
 import {
   blockToLines,
+  renderInlineMarkdown,
   type AnnotatedLine,
   type InlineDiffLookup,
   type LineKind,
+  type MarkdownTableAlignment,
+  type MarkdownTableData,
   type TranscriptBlock,
   type TranscriptImageAttachment,
 } from "./TranscriptBlock";
@@ -93,6 +96,17 @@ interface CodeBlockWidgetLineData {
     readonly to: number;
     readonly className: string;
   }>;
+}
+
+interface MarkdownTableDisplayCell {
+  readonly text: string;
+  readonly highlightSpans?: NonNullable<AnnotatedLine["highlightSpans"]>;
+}
+
+interface MarkdownTableDisplayLine {
+  readonly kind: "border" | "header" | "body";
+  readonly text: string;
+  readonly cells?: ReadonlyArray<MarkdownTableDisplayCell>;
 }
 
 interface InlineDiffRowData {
@@ -707,6 +721,434 @@ class AnimatedLoadingTextLine extends WidgetType {
     suffix.className = "cm-workingLineAnimatedSuffix";
     suffix.textContent = this.suffixText;
     root.append(suffix);
+    return root;
+  }
+}
+
+function measureMarkdownTableTextWidth(text: string) {
+  return Array.from(text).length;
+}
+
+function measureMarkdownTableTextWidthInRange(text: string, start: number, end: number) {
+  let width = 0;
+  for (let index = start; index < end;) {
+    const codePoint = text.codePointAt(index);
+    if (codePoint === undefined) {
+      break;
+    }
+    width += 1;
+    index += codePoint > 0xFFFF ? 2 : 1;
+  }
+  return width;
+}
+
+function advanceMarkdownTableIndexByWidth(text: string, start: number, width: number) {
+  if (width <= 0) {
+    return start;
+  }
+  let index = start;
+  let consumed = 0;
+  while (index < text.length) {
+    const codePoint = text.codePointAt(index);
+    if (codePoint === undefined || consumed >= width) {
+      break;
+    }
+    consumed += 1;
+    index += codePoint > 0xFFFF ? 2 : 1;
+  }
+  return index;
+}
+
+function padMarkdownTableCell(
+  text: string,
+  width: number,
+  alignment: MarkdownTableAlignment,
+) {
+  const visibleWidth = measureMarkdownTableTextWidth(text);
+  const remaining = Math.max(0, width - visibleWidth);
+  const leftPadding = alignment === "right"
+    ? remaining
+    : alignment === "center"
+      ? Math.floor(remaining / 2)
+      : 0;
+  const rightPadding = remaining - leftPadding;
+  return {
+    text: `${" ".repeat(leftPadding)}${text}${" ".repeat(rightPadding)}`,
+    leftPadding,
+  };
+}
+
+function projectMarkdownTableHighlightSpans(
+  spans: NonNullable<AnnotatedLine["highlightSpans"]> | undefined,
+  start: number,
+  end: number,
+  offset: number,
+) {
+  if (!spans || spans.length === 0) {
+    return undefined;
+  }
+  const projected = spans.flatMap((span) => {
+    if (span.to <= start || span.from >= end) {
+      return [];
+    }
+    return [{
+      ...span,
+      from: Math.max(start, span.from) - start + offset,
+      to: Math.min(end, span.to) - start + offset,
+    }];
+  });
+  return projected.length > 0 ? projected : undefined;
+}
+
+function wrapMarkdownTableCell(
+  renderedCell: Pick<AnnotatedLine, "text" | "highlightSpans">,
+  width: number,
+) {
+  if (width <= 0) {
+    return [{
+      text: renderedCell.text,
+      ...(renderedCell.highlightSpans ? { highlightSpans: renderedCell.highlightSpans } : {}),
+    }];
+  }
+
+  const wrappedLines: Array<MarkdownTableDisplayCell> = [];
+  const paragraphStarts = [0];
+  for (let index = 0; index < renderedCell.text.length; index += 1) {
+    if (renderedCell.text[index] === "\n") {
+      paragraphStarts.push(index + 1);
+    }
+  }
+
+  paragraphStarts.forEach((paragraphStart, paragraphIndex) => {
+    const paragraphEnd = paragraphIndex + 1 < paragraphStarts.length
+      ? (paragraphStarts[paragraphIndex + 1] ?? renderedCell.text.length) - 1
+      : renderedCell.text.length;
+    if (paragraphStart > paragraphEnd) {
+      wrappedLines.push({ text: "" });
+      return;
+    }
+
+    let cursor = paragraphStart;
+    while (cursor < paragraphEnd) {
+      const normalizedStart = renderedCell.text.slice(cursor, paragraphEnd).search(/\S/);
+      if (normalizedStart === -1) {
+        break;
+      }
+      cursor += normalizedStart;
+      if (measureMarkdownTableTextWidthInRange(renderedCell.text, cursor, paragraphEnd) <= width) {
+        const text = renderedCell.text.slice(cursor, paragraphEnd);
+        const highlightSpans = projectMarkdownTableHighlightSpans(renderedCell.highlightSpans, cursor, paragraphEnd, 0);
+        wrappedLines.push({
+          text,
+          ...(highlightSpans ? { highlightSpans } : {}),
+        });
+        break;
+      }
+
+      const candidateEnd = advanceMarkdownTableIndexByWidth(renderedCell.text, cursor, width + 1);
+      const hardEnd = advanceMarkdownTableIndexByWidth(renderedCell.text, cursor, width);
+      const candidateText = renderedCell.text.slice(cursor, candidateEnd);
+      const lastSpaceIndex = candidateText.lastIndexOf(" ");
+      const lineEnd = lastSpaceIndex > 0 ? cursor + lastSpaceIndex : hardEnd;
+      const trimmedEnd = renderedCell.text.slice(cursor, lineEnd).trimEnd().length + cursor;
+      const safeEnd = Math.max(cursor, trimmedEnd);
+      const highlightSpans = projectMarkdownTableHighlightSpans(renderedCell.highlightSpans, cursor, safeEnd, 0);
+      wrappedLines.push({
+        text: renderedCell.text.slice(cursor, safeEnd),
+        ...(highlightSpans ? { highlightSpans } : {}),
+      });
+      cursor = lastSpaceIndex > 0 ? lineEnd + 1 : hardEnd;
+    }
+
+    if (cursor >= paragraphEnd && paragraphEnd === paragraphStart) {
+      wrappedLines.push({ text: "" });
+    }
+  });
+
+  return wrappedLines.length > 0 ? wrappedLines : [{ text: "" }];
+}
+
+function padMarkdownTableDisplayCell(
+  cell: MarkdownTableDisplayCell,
+  width: number,
+  alignment: MarkdownTableAlignment,
+) {
+  const padded = padMarkdownTableCell(cell.text, width, alignment);
+  return {
+    text: padded.text,
+    ...(cell.highlightSpans
+      ? {
+          highlightSpans: cell.highlightSpans.map((span) => ({
+            ...span,
+            from: span.from + padded.leftPadding,
+            to: span.to + padded.leftPadding,
+          })),
+        }
+      : {}),
+  } satisfies MarkdownTableDisplayCell;
+}
+
+function buildMarkdownTableCellText(cell: MarkdownTableDisplayCell) {
+  return cell.text;
+}
+
+function buildMarkdownTableRowText(cells: ReadonlyArray<MarkdownTableDisplayCell>) {
+  return `│ ${cells.map((cell) => buildMarkdownTableCellText(cell)).join(" │ ")} │`;
+}
+
+function wrapMarkdownTableSourceCell(text: string, width: number) {
+  const renderedCell = renderInlineMarkdown(text);
+  return wrapMarkdownTableCell(renderedCell, width);
+}
+
+function appendMarkdownTableCellContent(
+  document: Document,
+  container: HTMLElement,
+  cell: MarkdownTableDisplayCell,
+  cwd?: string | null,
+) {
+  const highlightSpans = (cell.highlightSpans ?? []).toSorted((left, right) => left.from - right.from);
+  let cursor = 0;
+
+  const appendText = (text: string) => {
+    if (text.length > 0) {
+      container.append(document.createTextNode(text));
+    }
+  };
+
+  highlightSpans.forEach((span) => {
+    appendText(cell.text.slice(cursor, span.from));
+    const token = document.createElement("span");
+    token.className = `cm-codeToken ${span.className}${span.link ? " cm-inlineLink" : ""}`;
+    token.textContent = cell.text.slice(span.from, span.to);
+    if (span.link) {
+      token.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      token.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void openTranscriptLink(span.link!, cwd);
+      });
+    }
+    container.append(token);
+    cursor = span.to;
+  });
+
+  appendText(cell.text.slice(cursor));
+}
+
+function shrinkMarkdownTableWidths(
+  widths: number[],
+  minWidths: ReadonlyArray<number>,
+  maxWidth: number,
+) {
+  const next = [...widths];
+  while (next.reduce((total, width) => total + width, 0) > maxWidth) {
+    let candidateIndex = -1;
+    let candidateSlack = -1;
+    next.forEach((width, index) => {
+      const slack = width - (minWidths[index] ?? width);
+      if (slack > candidateSlack) {
+        candidateSlack = slack;
+        candidateIndex = index;
+      }
+    });
+    if (candidateIndex < 0 || candidateSlack <= 0) {
+      break;
+    }
+    const nextWidth = next[candidateIndex];
+    if (nextWidth === undefined) {
+      break;
+    }
+    next[candidateIndex] = nextWidth - 1;
+  }
+  return next;
+}
+
+function buildMarkdownTableBorder(
+  widths: ReadonlyArray<number>,
+  left: string,
+  middle: string,
+  right: string,
+): MarkdownTableDisplayLine {
+  return {
+    kind: "border",
+    text: `${left}${widths.map((width) => "─".repeat(width + 2)).join(middle)}${right}`,
+  };
+}
+
+function buildMarkdownTableRowLines(input: {
+  readonly cells: ReadonlyArray<string>;
+  readonly widths: ReadonlyArray<number>;
+  readonly alignments: ReadonlyArray<MarkdownTableAlignment>;
+  readonly kind: "header" | "body";
+}) {
+  const wrappedCells = input.cells.map((cell, index) =>
+    wrapMarkdownTableSourceCell(cell, input.widths[index] ?? measureMarkdownTableTextWidth(cell)));
+  const rowHeight = Math.max(...wrappedCells.map((lines) => lines.length), 1);
+
+  return Array.from({ length: rowHeight }, (_, lineIndex) => {
+    const cells = wrappedCells.map((lines, columnIndex) =>
+      padMarkdownTableDisplayCell(
+        lines[lineIndex] ?? { text: "" },
+        input.widths[columnIndex] ?? 0,
+        input.alignments[columnIndex] ?? "left",
+      ));
+    return {
+      kind: input.kind,
+      text: buildMarkdownTableRowText(cells),
+      cells,
+    } satisfies MarkdownTableDisplayLine;
+  });
+}
+
+export function layoutMarkdownTable(
+  table: MarkdownTableData,
+  maxTotalWidth: number,
+): ReadonlyArray<MarkdownTableDisplayLine> {
+  const columnCount = table.headers.length;
+  if (columnCount === 0) {
+    return [];
+  }
+
+  const borderWidth = (columnCount * 3) + 1;
+  const availableContentWidth = Math.max(columnCount * 3, maxTotalWidth - borderWidth);
+  const naturalWidths = table.headers.map((header, columnIndex) =>
+    Math.max(
+      measureMarkdownTableTextWidth(header),
+      ...table.rows.map((row) => measureMarkdownTableTextWidth(row[columnIndex] ?? "")),
+    ));
+  const minWidths = naturalWidths.map((width) => Math.max(3, Math.min(width, 8)));
+  const widths = naturalWidths.reduce((total, width) => total + width, 0) > availableContentWidth
+    ? shrinkMarkdownTableWidths(naturalWidths, minWidths, availableContentWidth)
+    : naturalWidths;
+
+  const lines: MarkdownTableDisplayLine[] = [
+    buildMarkdownTableBorder(widths, "┌", "┬", "┐"),
+    ...buildMarkdownTableRowLines({
+      cells: table.headers,
+      widths,
+      alignments: table.alignments,
+      kind: "header",
+    }),
+    buildMarkdownTableBorder(widths, "├", "┼", "┤"),
+  ];
+
+  table.rows.forEach((row, index) => {
+    lines.push(...buildMarkdownTableRowLines({
+      cells: row,
+      widths,
+      alignments: table.alignments,
+      kind: "body",
+    }));
+    lines.push(buildMarkdownTableBorder(
+      widths,
+      index === table.rows.length - 1 ? "└" : "├",
+      index === table.rows.length - 1 ? "┴" : "┼",
+      index === table.rows.length - 1 ? "┘" : "┤",
+    ));
+  });
+
+  if (table.rows.length === 0) {
+    lines.push(buildMarkdownTableBorder(widths, "└", "┴", "┘"));
+  }
+
+  return lines;
+}
+
+class MarkdownTableWidget extends WidgetType {
+  constructor(
+    private readonly content: {
+      readonly signature: string;
+      readonly table: MarkdownTableData;
+      readonly cwd?: string | null;
+    },
+  ) {
+    super();
+  }
+
+  override eq(other: MarkdownTableWidget) {
+    return JSON.stringify(this.content) === JSON.stringify(other.content);
+  }
+
+  override destroy(dom: HTMLElement) {
+    const observer = commandWidgetResizeObservers.get(dom);
+    observer?.disconnect();
+    commandWidgetResizeObservers.delete(dom);
+  }
+
+  override toDOM(view: EditorView) {
+    const root = view.dom.ownerDocument.createElement("div");
+    root.className = "cm-markdownTableSurface";
+    root.dataset.tableSignature = this.content.signature;
+
+    const linesContainer = view.dom.ownerDocument.createElement("div");
+    linesContainer.className = "cm-markdownTableLines";
+    root.append(linesContainer);
+
+    let renderedSignature = "";
+    const renderLines = () => {
+      const availableWidth = Math.max(root.clientWidth, view.dom.clientWidth, 320);
+      const characterWidth = Math.max(view.defaultCharacterWidth, 6);
+      const maxTotalWidth = Math.max(24, Math.floor(availableWidth / characterWidth) - 1);
+      const displayLines = layoutMarkdownTable(this.content.table, maxTotalWidth);
+      const nextSignature = JSON.stringify(displayLines);
+      if (nextSignature === renderedSignature) {
+        return;
+      }
+      renderedSignature = nextSignature;
+      linesContainer.replaceChildren(...displayLines.map((line) => {
+        const element = view.dom.ownerDocument.createElement("div");
+        element.className = `cm-markdownTableLine cm-markdownTableLine--${line.kind}`;
+        if (!line.cells || line.kind === "border") {
+          element.textContent = line.text;
+          return element;
+        }
+        const cells = line.cells;
+        const appendBorder = (text: string) => {
+          const span = view.dom.ownerDocument.createElement("span");
+          span.className = "cm-markdownTableBorderGlyph";
+          span.textContent = text;
+          element.append(span);
+        };
+        appendBorder("│ ");
+        cells.forEach((cell, index) => {
+          const cellSpan = view.dom.ownerDocument.createElement("span");
+          cellSpan.className = [
+            "cm-markdownTableCell",
+            line.kind === "header" ? "cm-markdownTableCell--header" : "cm-markdownTableCell--body",
+          ].join(" ");
+          appendMarkdownTableCellContent(view.dom.ownerDocument, cellSpan, cell, this.content.cwd);
+          element.append(cellSpan);
+          appendBorder(index === cells.length - 1 ? " │" : " │ ");
+        });
+        return element;
+      }));
+    };
+
+    const scheduleRender = () => {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => {
+          if (root.isConnected) {
+            renderLines();
+          }
+        });
+        return;
+      }
+      queueMicrotask(renderLines);
+    };
+
+    scheduleRender();
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => {
+        renderLines();
+      });
+      observer.observe(root);
+      commandWidgetResizeObservers.set(root, observer);
+    }
+
     return root;
   }
 }
@@ -1446,6 +1888,54 @@ function buildCodeBlockReplacements(
   return replacements;
 }
 
+function buildMarkdownTableReplacements(
+  allLines: ReadonlyArray<AnnotatedLine>,
+  positioned: ReadonlyArray<PositionedLine>,
+  cwd?: string | null,
+) {
+  const replacements: PositionedReplacement[] = [];
+
+  for (let index = 0; index < allLines.length; index += 1) {
+    const tableData = allLines[index]?.tableData;
+    if (!tableData || allLines[index]?.kind !== "table") {
+      continue;
+    }
+
+    let closingIndex = index;
+    while (closingIndex + 1 < allLines.length && allLines[closingIndex + 1]?.kind === "table") {
+      closingIndex += 1;
+    }
+
+    const startLine = positioned[index];
+    const endLine = positioned[closingIndex];
+    if (!startLine || !endLine) {
+      continue;
+    }
+
+    const signature = `${startLine.from}:${endLine.to}:${JSON.stringify(tableData)}`;
+    const widgetContent = cwd === undefined
+      ? {
+          signature,
+          table: tableData,
+        }
+      : {
+          signature,
+          table: tableData,
+          cwd,
+        };
+    replacements.push({
+      from: startLine.from,
+      to: endLine.to,
+      widget: new MarkdownTableWidget(widgetContent),
+      signature,
+    });
+
+    index = closingIndex;
+  }
+
+  return replacements;
+}
+
 function isBlockBoundarySpacerLine(line: AnnotatedLine) {
   if (line.kind === "divider") {
     return true;
@@ -1477,6 +1967,21 @@ function trimBlockBoundarySpacerLines(lines: ReadonlyArray<AnnotatedLine>) {
   return lines.slice(start, end);
 }
 
+function shouldInsertBlockGap(
+  previousBlock: TranscriptBlock | null,
+  nextBlock: TranscriptBlock,
+) {
+  if (!previousBlock) {
+    return false;
+  }
+
+  if (previousBlock.type === "reasoning-summary" && nextBlock.type === "reasoning-text") {
+    return false;
+  }
+
+  return true;
+}
+
 export function flattenBlocks(
   blocks: ReadonlyArray<TranscriptBlock>,
   pendingUserInputHighlight?: {
@@ -1490,11 +1995,11 @@ export function flattenBlocks(
     number,
     { widget: WidgetType; side: -1 | 1; signature: string }
   >();
-  let seenVisibleBlock = false;
+  let previousVisibleBlock: TranscriptBlock | null = null;
 
   for (const block of blocks) {
     const rawBlockLines = trimBlockBoundarySpacerLines(blockToLines(block));
-    if (seenVisibleBlock && rawBlockLines.length > 0) {
+    if (rawBlockLines.length > 0 && shouldInsertBlockGap(previousVisibleBlock, block)) {
       allLines.push({ text: "", kind: "blockGap" });
     }
     const blockLines = rawBlockLines.map((line) => {
@@ -1524,7 +2029,7 @@ export function flattenBlocks(
     const startLineIndex = allLines.length;
     allLines.push(...blockLines);
     if (blockLines.length > 0) {
-      seenVisibleBlock = true;
+      previousVisibleBlock = block;
     }
 
     if (block.type === "user-message" && block.attachments && block.attachments.length > 0) {
@@ -1559,6 +2064,7 @@ function buildTranscriptDocument(
   expandedCommandSignatures: ReadonlySet<string>,
   collapsedFileChangeSignatures: ReadonlySet<string>,
   resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>,
+  cwd?: string | null,
   projectRoot?: string | null,
   pendingUserInputHighlight?: {
     readonly requestId: string;
@@ -1731,6 +2237,7 @@ function buildTranscriptDocument(
   });
 
   replacements.push(...buildCodeBlockReplacements(allLines, positioned));
+  replacements.push(...buildMarkdownTableReplacements(allLines, positioned, cwd));
 
   return {
     text,
@@ -1872,6 +2379,7 @@ function buildEditorTheme() {
         display: "flex",
         flexDirection: "column",
         flex: "1 1 auto",
+        fontFamily: "inherit",
         overflowX: "hidden",
         overflowY: "visible",
         width: "100%",
@@ -1935,7 +2443,7 @@ function buildEditorTheme() {
         paddingTop: "1.8rem",
       },
       ".cm-line-meta": { color: "#5f676f" },
-      ".cm-line-body": { color: "#cfd4d9" },
+      ".cm-line-body": { color: "#d5dbe1" },
       ".cm-line-reasoningSeparator": {
         position: "relative",
         minHeight: "8px",
@@ -1944,14 +2452,14 @@ function buildEditorTheme() {
         display: "none",
       },
       ".cm-line-reasoningSummary": {
-        color: "#69737d",
+        color: "#84919f",
         fontSize: "14px",
         fontStyle: "italic",
         paddingTop: "2px",
         paddingBottom: "4px",
       },
       ".cm-line-reasoning": {
-        color: "#69737d",
+        color: "#84919f",
         fontSize: "14px",
         fontStyle: "italic",
       },
@@ -1995,7 +2503,6 @@ function buildEditorTheme() {
         color: "#c7cdd3",
         backgroundColor: "rgba(214, 220, 226, 0.08)",
         borderRadius: "4px",
-        padding: "0 0.24em",
       },
       ".cm-codeToken.tok-inlineCode.tok-markdownLink": {
         color: "#d8e0e8",
@@ -2588,8 +3095,8 @@ function buildEditorTheme() {
         width: "100%",
         maxWidth: "100%",
         minWidth: "0",
-        margin: "6px 0",
-        padding: "14px 16px",
+        margin: "0",
+        padding: "20px 16px",
         borderRadius: "12px",
         backgroundColor: "rgba(22, 29, 36, 0.9)",
         overflow: "hidden",
@@ -2703,6 +3210,48 @@ function buildEditorTheme() {
         "100%": {
           transform: "translateY(0) scale(1)",
         },
+      },
+      ".cm-markdownTableSurface": {
+        boxSizing: "border-box",
+        width: "100%",
+        maxWidth: "100%",
+        minWidth: "0",
+        padding: "6px 0 4px",
+        borderRadius: "10px",
+        backgroundColor: "transparent",
+        overflowX: "auto",
+      },
+      ".cm-markdownTableLines": {
+        minWidth: "0",
+      },
+      ".cm-markdownTableLine": {
+        whiteSpace: "pre",
+        fontSize: "13px",
+        lineHeight: "1.2",
+        letterSpacing: "0",
+      },
+      ".cm-markdownTableBorderGlyph": {
+        color: "#6f7b87",
+        fontWeight: "400",
+      },
+      ".cm-markdownTableCell": {
+        display: "inline",
+      },
+      ".cm-markdownTableCell--header": {
+        color: "#e5ebf1",
+        fontWeight: "600",
+      },
+      ".cm-markdownTableCell--body": {
+        color: "#c8d0d8",
+      },
+      ".cm-markdownTableLine--border": {
+        color: "#6f7b87",
+      },
+      ".cm-markdownTableLine--header": {
+        color: "#d6dee6",
+      },
+      ".cm-markdownTableLine--body": {
+        color: "#c8d0d8",
       },
       ".cm-line-commandOutput": { color: "#7a828b" },
     },
@@ -3424,10 +3973,11 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           expandedCommandSignatures,
           collapsedFileChangeSignatures,
           resolvedInlineDiffBySignature,
+          cwd,
           projectRoot,
           pendingUserInputHighlight,
         ),
-      [blocks, collapsedFileChangeSignatures, expandedCommandSignatures, pendingUserInputHighlight, projectRoot, resolvedInlineDiffBySignature],
+      [blocks, collapsedFileChangeSignatures, cwd, expandedCommandSignatures, pendingUserInputHighlight, projectRoot, resolvedInlineDiffBySignature],
     );
     const compactPendingUserInputPrompt =
       pendingUserInputHighlight !== undefined && !shouldRenderPromptSeparator(docModel.historyLineCount);

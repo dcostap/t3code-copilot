@@ -39,3 +39,20 @@ The app should feel like a sharp local instrument: fast, focused, keyboard-first
 - Prefer tests that validate semantic behavior, data flow, and stable contracts.
 - Do not write or keep brittle tests that fail on non-contractual presentation changes.
 - For terminal/transcript UI, test structure, kinds, metadata, state transitions, prompt gating, and selection/copy behavior rather than exact spacing, decorative separators, box-drawing output, class ordering, or internal widget signature formatting unless those details are the contract.
+
+## Transcript widget guidelines
+
+- For transcript/history widgets rendered via `WidgetType` and `Decoration.replace(..., block: true)`, do not use external layout `margin` on the widget root.
+- Put spacing inside the widget with padding, or represent spacing as explicit transcript spacer lines/gaps in the document model.
+- Avoid root-level layout transforms on replacement widgets. Child-only transforms on internal controls are acceptable when they do not affect the widget boundary box.
+- Keep widget root geometry aligned with the visible occupied area so pointer hit-testing and text selection stay accurate near widget boundaries.
+- If a replacement widget needs custom pointer geometry, use `WidgetType.coordsAt(...)` rather than patching selection behavior elsewhere.
+- Prefer fixing spacing in the transcript/block pipeline over papering over it in CSS.
+- Be especially careful with widgets placed near selectable plain text, because boundary geometry bugs show up there first.
+
+### Practical rule of thumb
+
+- `padding`: safe
+- explicit transcript spacer line: safe
+- root `margin`: risky
+- root layout transform: risky

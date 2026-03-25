@@ -56,6 +56,14 @@ export type LineKind =
   | "commandExec"
   | "commandOutput";
 
+export type MarkdownTableAlignment = "left" | "center" | "right";
+
+export interface MarkdownTableData {
+  readonly headers: ReadonlyArray<string>;
+  readonly rows: ReadonlyArray<ReadonlyArray<string>>;
+  readonly alignments: ReadonlyArray<MarkdownTableAlignment>;
+}
+
 export interface AnnotatedLine {
   readonly text: string;
   readonly kind: LineKind;
@@ -65,6 +73,7 @@ export interface AnnotatedLine {
   readonly inlineUnifiedDiff?: string;
   readonly inlineDiffLookup?: InlineDiffLookup;
   readonly inlineDiffChangedFiles?: ReadonlyArray<string>;
+  readonly tableData?: MarkdownTableData;
   readonly highlightSpans?: ReadonlyArray<{
     readonly from: number;
     readonly to: number;
@@ -335,13 +344,31 @@ function splitMarkdownTableRow(line: string): string[] | null {
   return cells;
 }
 
-function isMarkdownTableDividerLine(line: string, expectedColumns: number): boolean {
+function parseMarkdownTableDividerAlignments(
+  line: string,
+  expectedColumns: number,
+): ReadonlyArray<MarkdownTableAlignment> | null {
   const cells = splitMarkdownTableRow(line);
   if (!cells || cells.length !== expectedColumns) {
-    return false;
+    return null;
   }
 
-  return cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, "")));
+  const alignments = cells.map((cell) => {
+    const normalized = cell.replace(/\s+/g, "");
+    if (!/^:?-{3,}:?$/.test(normalized)) {
+      return null;
+    }
+    if (normalized.startsWith(":") && normalized.endsWith(":")) {
+      return "center";
+    }
+    if (normalized.endsWith(":")) {
+      return "right";
+    }
+    return "left";
+  });
+  return alignments.every((alignment) => alignment !== null)
+    ? alignments
+    : null;
 }
 
 function buildTableBorder(
@@ -353,11 +380,36 @@ function buildTableBorder(
   return `${left}${widths.map((width) => "─".repeat(width + 2)).join(middle)}${right}`;
 }
 
-function formatTableRow(cells: ReadonlyArray<string>, widths: ReadonlyArray<number>) {
-  return `│ ${cells.map((cell, index) => cell.padEnd(widths[index] ?? cell.length, " ")).join(" │ ")} │`;
+function formatTableCell(
+  cell: string,
+  width: number,
+  alignment: MarkdownTableAlignment,
+) {
+  if (alignment === "right") {
+    return cell.padStart(width, " ");
+  }
+  if (alignment === "center") {
+    const remaining = Math.max(0, width - cell.length);
+    const leftPadding = Math.floor(remaining / 2);
+    const rightPadding = remaining - leftPadding;
+    return `${" ".repeat(leftPadding)}${cell}${" ".repeat(rightPadding)}`;
+  }
+  return cell.padEnd(width, " ");
 }
 
-function tableBlockToLines(rows: ReadonlyArray<ReadonlyArray<string>>): AnnotatedLine[] {
+function formatTableRow(
+  cells: ReadonlyArray<string>,
+  widths: ReadonlyArray<number>,
+  alignments: ReadonlyArray<MarkdownTableAlignment>,
+) {
+  return `│ ${cells.map((cell, index) =>
+    formatTableCell(cell, widths[index] ?? cell.length, alignments[index] ?? "left")).join(" │ ")} │`;
+}
+
+function tableBlockToLines(
+  rows: ReadonlyArray<ReadonlyArray<string>>,
+  alignments: ReadonlyArray<MarkdownTableAlignment>,
+): AnnotatedLine[] {
   const headerRow = rows[0];
   if (!headerRow) {
     return [];
@@ -372,14 +424,23 @@ function tableBlockToLines(rows: ReadonlyArray<ReadonlyArray<string>>): Annotate
 
   const header = headerRow;
   const bodyRows = rows.slice(1);
+  const tableData: MarkdownTableData = {
+    headers: header,
+    rows: bodyRows,
+    alignments,
+  };
   const lines: AnnotatedLine[] = [
-    { text: buildTableBorder(widths, "┌", "┬", "┐"), kind: "table" },
-    { text: formatTableRow(header, widths), kind: "table" },
+    {
+      text: buildTableBorder(widths, "┌", "┬", "┐"),
+      kind: "table",
+      tableData,
+    },
+    { text: formatTableRow(header, widths, alignments), kind: "table" },
     { text: buildTableBorder(widths, "├", "┼", "┤"), kind: "table" },
   ];
 
   bodyRows.forEach((row, index) => {
-    lines.push({ text: formatTableRow(row, widths), kind: "table" });
+    lines.push({ text: formatTableRow(row, widths, alignments), kind: "table" });
     lines.push({
       text: buildTableBorder(
         widths,
@@ -679,7 +740,7 @@ function offsetInlineHighlightSpan(
       };
 }
 
-function renderInlineMarkdown(text: string): Pick<AnnotatedLine, "text" | "highlightSpans"> {
+export function renderInlineMarkdown(text: string): Pick<AnnotatedLine, "text" | "highlightSpans"> {
   const highlightSpans: Array<{
     from: number;
     to: number;
@@ -875,10 +936,14 @@ function renderMarkdownTextToLines(text: string, fallbackKind: LineKind): Annota
     }
 
     const headerCells = splitMarkdownTableRow(sourceLines[index] ?? "");
+    const dividerAlignments = parseMarkdownTableDividerAlignments(
+      sourceLines[index + 1] ?? "",
+      headerCells?.length ?? 0,
+    );
     if (
       headerCells
       && index + 1 < sourceLines.length
-      && isMarkdownTableDividerLine(sourceLines[index + 1] ?? "", headerCells.length)
+      && dividerAlignments
     ) {
       const rows: string[][] = [headerCells];
       let lookahead = index + 2;
@@ -891,7 +956,7 @@ function renderMarkdownTextToLines(text: string, fallbackKind: LineKind): Annota
         lookahead += 1;
       }
 
-      rendered.push(...tableBlockToLines(rows));
+      rendered.push(...tableBlockToLines(rows, dividerAlignments));
       index = lookahead - 1;
       continue;
     }
