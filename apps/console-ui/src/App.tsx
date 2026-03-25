@@ -11,7 +11,6 @@ import {
   type CSSProperties,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -40,7 +39,6 @@ import {
   filterCommandPaletteCommands,
   type CommandPaletteCommand,
 } from "./commandPaletteCommands";
-import type { CommandPaletteScopeBounds } from "./CommandPalette";
 import {
   IMAGE_ATTACHMENT_SIZE_LIMIT_LABEL,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -274,29 +272,6 @@ interface ManagedThreadRowSelectionResult<ThreadId extends string> {
   readonly selectedRowIds: ReadonlySet<ThreadId>;
   readonly activeRowId: ThreadId;
   readonly nextAnchorThreadId: ThreadId;
-}
-
-function arePaletteScopeBoundsEqual(
-  left: CommandPaletteScopeBounds | null,
-  right: CommandPaletteScopeBounds | null,
-) {
-  return left?.top === right?.top
-    && left?.left === right?.left
-    && left?.width === right?.width
-    && left?.height === right?.height;
-}
-
-function measurePaletteScopeBounds(element: HTMLElement | null): CommandPaletteScopeBounds | null {
-  if (!element) {
-    return null;
-  }
-  const rect = element.getBoundingClientRect();
-  return {
-    top: Math.max(0, Math.round(rect.top)),
-    left: Math.max(0, Math.round(rect.left)),
-    width: Math.max(0, Math.round(rect.width)),
-    height: Math.max(0, Math.round(rect.height)),
-  };
 }
 
 function isDesktopBridgeAvailable() {
@@ -1109,7 +1084,7 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
-  const [paletteScopeBounds, setPaletteScopeBounds] = useState<CommandPaletteScopeBounds | null>(null);
+  const [paletteContextPaneId, setPaletteContextPaneId] = useState<string | null>(null);
   const [pendingPromptSendStartedAtByThreadId, setPendingPromptSendStartedAtByThreadId] = useState<Record<string, string>>({});
   const [composerAttachmentsByPaneId, setComposerAttachmentsByPaneId] = useState<Record<string, ReadonlyArray<ComposerImageAttachment>>>({});
   const [composerDraftByPaneId, setComposerDraftByPaneId] = useState<Record<string, string>>(() => readPersistedPaneDrafts());
@@ -1751,24 +1726,26 @@ export function App() {
     () => paneViews.find((paneView) => paneView.isActive) ?? null,
     [paneViews],
   );
+  const palettePaneView = useMemo(
+    () => (paletteContextPaneId ? paneViews.find((paneView) => paneView.pane.id === paletteContextPaneId) ?? null : activePaneView),
+    [activePaneView, paletteContextPaneId, paneViews],
+  );
 
   const openPalette = useCallback(() => {
-    setPaletteScopeBounds(
-      activePaneView?.thread
-        ? measurePaletteScopeBounds(paneElementRefs.current[activePaneView.pane.id] ?? null)
-        : null,
-    );
+    setPaletteContextPaneId(activePaneView?.pane.id ?? null);
     setPaletteOpen(true);
     setPaletteQuery("");
     setSelectedCommandIndex(0);
   }, [activePaneView]);
 
   const closePalette = useCallback(() => {
+    const restorePaneId = paletteContextPaneId ?? workspace.activePaneId;
     setPaletteOpen(false);
     setPaletteQuery("");
     setSelectedCommandIndex(0);
-    focusPanePrompt(workspace.activePaneId);
-  }, [focusPanePrompt, workspace.activePaneId]);
+    setPaletteContextPaneId(null);
+    focusPanePrompt(restorePaneId);
+  }, [focusPanePrompt, paletteContextPaneId, workspace.activePaneId]);
 
   const highlightPane = useCallback((paneId: string) => {
     setHighlightedPaneId(paneId);
@@ -1796,19 +1773,6 @@ export function App() {
     }
     void handleCreateDraftTabForProject(projectId);
   }, [handleCreateDraftTabForProject, workspace.activeProject, workspace.projectViews]);
-
-  const handleSplitActivePane = useCallback(() => {
-    if (!workspace.activeProject || !workspace.activePaneId) {
-      return;
-    }
-    const created = workspace.splitPane({
-      projectId: workspace.activeProject.id,
-      paneId: workspace.activePaneId,
-    });
-    if (created) {
-      focusPanePrompt(created.paneId);
-    }
-  }, [focusPanePrompt, workspace]);
 
   const handleSidebarThreadDragStart = useCallback((event: ReactDragEvent<HTMLButtonElement>, threadId: ThreadId) => {
     event.dataTransfer.effectAllowed = "move";
@@ -1850,13 +1814,6 @@ export function App() {
       highlightPane(created.paneId);
     }
   }, [consoleData.threads, draggedThreadId, focusPanePrompt, highlightPane, workspace]);
-
-  const handleCloseTab = useCallback(() => {
-    if (!workspace.activeProject || !workspace.activeTab) {
-      return;
-    }
-    workspace.closeTab(workspace.activeProject.id, workspace.activeTab.id);
-  }, [workspace]);
 
   const handleOpenThread = useCallback((threadId: ThreadId) => {
     const thread = consoleData.threads.find((candidate) => candidate.id === threadId) ?? null;
@@ -2533,46 +2490,63 @@ export function App() {
         id: "tab:new",
         label: "[Tab] New",
         keywords: ["tab", "new", "draft"],
-        run: handleCreateDraftTab,
+        run: () => {
+          if (palettePaneView) {
+            void handleCreateDraftTabForProject(palettePaneView.project.id);
+            return;
+          }
+          handleCreateDraftTab();
+        },
       });
     }
 
-    if (workspace.activeProject && workspace.activePaneId) {
+    if (palettePaneView) {
       commands.push({
-        id: "pane:split",
+        id: `pane:split:${palettePaneView.pane.id}`,
         label: "[Pane] Split active",
         keywords: ["pane", "split", "draft"],
-        run: handleSplitActivePane,
+        run: () => {
+          const created = workspace.splitPane({
+            projectId: palettePaneView.project.id,
+            paneId: palettePaneView.pane.id,
+          });
+          if (created) {
+            focusPanePrompt(created.paneId);
+          }
+        },
       });
       commands.push({
-        id: "pane:close",
+        id: `pane:close:${palettePaneView.pane.id}`,
         label: "[Pane] Close active",
         keywords: ["pane", "close"],
-        run: () => workspace.closePane(workspace.activeProject!.id, workspace.activePaneId!),
+        run: () => workspace.closePane(palettePaneView.project.id, palettePaneView.pane.id),
       });
     }
 
-    if (workspace.activeProject && workspace.activeTab && workspace.activeLayout?.tabs.length && workspace.activeLayout.tabs.length > 1) {
+    if (
+      palettePaneView
+      && (workspace.projectViews.find((projectView) => projectView.project.id === palettePaneView.project.id)?.layout.tabs.length ?? 0) > 1
+    ) {
       commands.push({
-        id: "tab:close",
+        id: `tab:close:${palettePaneView.tabId}`,
         label: "[Tab] Close active",
         keywords: ["tab", "close"],
-        run: handleCloseTab,
+        run: () => workspace.closeTab(palettePaneView.project.id, palettePaneView.tabId),
       });
     }
 
-    if (activePaneView?.setup) {
+    if (palettePaneView?.setup) {
       for (const provider of ["codex", "copilot"] satisfies ProviderKind[]) {
         commands.push({
           id: `draft-provider:${provider}`,
           label:
-            activePaneView.setup.selectedProvider === provider
+            palettePaneView.setup.selectedProvider === provider
               ? `[Draft] Provider · ${provider} · current`
               : `[Draft] Provider · ${provider}`,
           keywords: ["draft", "provider", provider],
           run: () => {
             workspace.updateDraftPane({
-              paneId: activePaneView.pane.id,
+              paneId: palettePaneView.pane.id,
               updater: (setup) => ({
                 ...setup,
                 selectedProvider: provider,
@@ -2582,18 +2556,18 @@ export function App() {
           },
         });
       }
-      for (const modelOption of MODEL_OPTIONS_BY_PROVIDER[activePaneView.setup.selectedProvider]) {
+      for (const modelOption of MODEL_OPTIONS_BY_PROVIDER[palettePaneView.setup.selectedProvider]) {
         commands.push({
-          id: `draft-model:${activePaneView.pane.id}:${modelOption.slug}`,
+          id: `draft-model:${palettePaneView.pane.id}:${modelOption.slug}`,
           label:
-            activePaneView.setup.selectedModel === modelOption.slug
+            palettePaneView.setup.selectedModel === modelOption.slug
               ? `[Model] Current · ${modelOption.name}`
               : `[Model] Set · ${modelOption.name}`,
           contextText: modelOption.slug,
-          keywords: ["model", "draft", activePaneView.setup.selectedProvider, modelOption.name, modelOption.slug],
+          keywords: ["model", "draft", palettePaneView.setup.selectedProvider, modelOption.name, modelOption.slug],
           run: () => {
             workspace.updateDraftPane({
-              paneId: activePaneView.pane.id,
+              paneId: palettePaneView.pane.id,
               updater: (setup) => ({ ...setup, selectedModel: modelOption.slug }),
             });
           },
@@ -2601,8 +2575,8 @@ export function App() {
       }
     }
 
-    if (activePaneView?.thread && canDispatchBackendCommands) {
-      const activeThread = activePaneView.thread;
+    if (palettePaneView?.thread && canDispatchBackendCommands) {
+      const activeThread = palettePaneView.thread;
       const activeProvider = activeThread.provider;
       const activeReasoningEffort = activeThread.modelOptions?.[activeProvider]?.reasoningEffort ?? null;
       const activeReasoningOptions = REASONING_EFFORT_OPTIONS_BY_PROVIDER[activeProvider];
@@ -2679,15 +2653,14 @@ export function App() {
 
     return commands;
   }, [
-    activePaneView,
+    palettePaneView,
     consoleData.connectionState,
     consoleData.isInterruptingTurn,
     consoleData.isStoppingSession,
     focusPanePrompt,
-    handleCloseTab,
     handleCreateDraftTab,
+    handleCreateDraftTabForProject,
     handleOpenThread,
-    handleSplitActivePane,
     interruptTurn,
     isThreadTurnRunning,
     orderedThreadsByProjectId,
@@ -2706,34 +2679,6 @@ export function App() {
   useEffect(() => {
     setSelectedCommandIndex((current) => Math.min(current, Math.max(filteredCommands.length - 1, 0)));
   }, [filteredCommands.length]);
-
-  useLayoutEffect(() => {
-    if (!paletteOpen || !activePaneView?.thread) {
-      setPaletteScopeBounds((current) => current === null ? current : null);
-      return;
-    }
-
-    const paneId = activePaneView.pane.id;
-    const updateBounds = () => {
-      const nextBounds = measurePaletteScopeBounds(paneElementRefs.current[paneId] ?? null);
-      setPaletteScopeBounds((current) => arePaletteScopeBoundsEqual(current, nextBounds) ? current : nextBounds);
-    };
-
-    updateBounds();
-    const element = paneElementRefs.current[paneId];
-    const resizeObserver = typeof ResizeObserver !== "undefined" && element
-      ? new ResizeObserver(updateBounds)
-      : null;
-    if (resizeObserver && element) {
-      resizeObserver.observe(element);
-    }
-    window.addEventListener("resize", updateBounds);
-
-    return () => {
-      resizeObserver?.disconnect();
-      window.removeEventListener("resize", updateBounds);
-    };
-  }, [activePaneView?.pane.id, activePaneView?.thread, paletteOpen]);
 
   const runPaletteCommand = useCallback(async (command: AppPaletteCommand) => {
     closePalette();
@@ -3414,7 +3359,6 @@ export function App() {
         query={paletteQuery}
         commands={filteredCommands}
         selectedIndex={selectedCommandIndex}
-        scopeBounds={paletteScopeBounds}
         onClose={closePalette}
         onQueryChange={setPaletteQuery}
         onSelectedIndexChange={setSelectedCommandIndex}
