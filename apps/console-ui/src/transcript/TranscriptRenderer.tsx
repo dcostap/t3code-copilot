@@ -164,6 +164,7 @@ interface TranscriptRendererProps {
   readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
   readonly cwd?: string | null;
   readonly projectRoot?: string | null;
+  readonly paneActive?: boolean;
   readonly interactionMode?: "default" | "plan";
   readonly initialScrollOffsetFromBottom?: number | null;
   readonly promptFocusDisabled?: boolean;
@@ -3605,9 +3606,6 @@ function measurePromptCaretBox(
   if (typeof document === "undefined" || typeof window === "undefined") {
     return null;
   }
-  if (document.activeElement !== textarea) {
-    return null;
-  }
 
   const caretOffset = Math.max(0, Math.min(selection.headOffset, textarea.value.length));
   const computedStyle = window.getComputedStyle(textarea);
@@ -3783,6 +3781,39 @@ export function shouldUseNativePromptCaret(
   );
 }
 
+export function shouldShowCustomPromptCaret(input: {
+  readonly paneHasFocus: boolean;
+  readonly paneActive: boolean;
+  readonly activeRegion: TranscriptRegion;
+  readonly promptHasFocus: boolean;
+  readonly promptInputDisabled: boolean;
+  readonly useNativePromptCaret: boolean;
+  readonly focusedEditableOwnsTyping: boolean;
+}) {
+  const promptCaretOwnedByPane = input.paneHasFocus || (input.paneActive && input.activeRegion === "history");
+  if (!promptCaretOwnedByPane || input.promptInputDisabled || input.focusedEditableOwnsTyping) {
+    return false;
+  }
+
+  if (input.promptHasFocus && input.useNativePromptCaret) {
+    return false;
+  }
+
+  return true;
+}
+
+export function shouldSuppressCustomPromptCaretForFocusedElement(input: {
+  readonly isEditable: boolean;
+  readonly isPromptElement: boolean;
+  readonly isHistoryElement: boolean;
+}) {
+  if (input.isPromptElement || input.isHistoryElement) {
+    return false;
+  }
+
+  return input.isEditable;
+}
+
 export function shouldRedirectPlainTextPasteToPrompt(input: {
   readonly targetIsPrompt: boolean;
   readonly hasFiles: boolean;
@@ -3858,6 +3889,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       composerAttachments = [],
       cwd,
       projectRoot,
+      paneActive = false,
       interactionMode: _interactionMode = "default",
       initialScrollOffsetFromBottom = null,
       promptFocusDisabled = false,
@@ -4033,13 +4065,50 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       caret.textContent = box.text;
     }, []);
 
+    const isFocusedEditableWithinPane = useCallback((
+      activeElement: Element | null,
+      textarea: HTMLTextAreaElement,
+    ) => {
+      if (!(activeElement instanceof HTMLElement)) {
+        return false;
+      }
+
+      return shouldSuppressCustomPromptCaretForFocusedElement({
+        isEditable:
+          activeElement instanceof HTMLInputElement
+          || activeElement instanceof HTMLTextAreaElement
+          || activeElement.isContentEditable,
+        isPromptElement: activeElement === textarea,
+        isHistoryElement: editorRef.current?.contains(activeElement) === true,
+      });
+    }, []);
+
     const syncPromptCaretBox = useCallback((textarea = promptTextareaRef.current) => {
-      if (useNativePromptCaret || !textarea || promptInputDisabledRef.current) {
+      if (!textarea) {
         applyPromptCaretBox(null);
         return;
       }
+
+      const activeElement = typeof document === "undefined" ? null : document.activeElement;
+      const paneHasFocus = activeElement instanceof Node && surfaceRef.current?.contains(activeElement) === true;
+      const promptHasFocus = activeElement === textarea;
+      const focusedEditableOwnsTyping = isFocusedEditableWithinPane(activeElement, textarea);
+
+      if (!shouldShowCustomPromptCaret({
+        paneHasFocus,
+        paneActive,
+        activeRegion: activeRegionRef.current,
+        promptHasFocus,
+        promptInputDisabled: promptInputDisabledRef.current,
+        useNativePromptCaret,
+        focusedEditableOwnsTyping,
+      })) {
+        applyPromptCaretBox(null);
+        return;
+      }
+
       applyPromptCaretBox(measurePromptCaretBox(textarea, promptSelectionRef.current));
-    }, [applyPromptCaretBox, useNativePromptCaret]);
+    }, [applyPromptCaretBox, isFocusedEditableWithinPane, paneActive, useNativePromptCaret]);
 
     const syncPromptSelection = useCallback((textarea = promptTextareaRef.current) => {
       const fallbackOffset = draftRef.current.length;
@@ -4048,6 +4117,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       setPromptSelectionValue(anchorOffset, headOffset);
       syncPromptCaretBox(textarea);
     }, [setPromptSelectionValue, syncPromptCaretBox]);
+
+    useEffect(() => {
+      syncPromptCaretBox();
+    }, [paneActive, syncPromptCaretBox]);
 
     const clearHistorySelection = useCallback(() => {
       if (typeof window === "undefined") {
@@ -4282,6 +4355,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       focusPromptInput();
     }, [preparePromptInteraction, focusPromptInput]);
 
+    const handleSurfaceFocusChange = useCallback(() => {
+      requestAnimationFrame(() => {
+        syncPromptCaretBox();
+      });
+    }, [syncPromptCaretBox]);
+
     const requestInlineDiff = useCallback((signature: string, lookup: InlineDiffLookup) => {
       const resolver = resolveInlineDiffRef.current;
       if (!resolver) {
@@ -4348,6 +4427,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       prepareHistoryInteraction();
       activeRegionRef.current = "history";
       syncActiveRegionClass(view);
+      syncPromptCaretBox();
       const historySelection = resolveHistorySelection(view.state, historySelectionRef.current);
       historySelectionRef.current = historySelection;
       view.dispatch({
@@ -4359,7 +4439,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       requestAnimationFrame(() => {
         keepCursorWithinViewportPadding(view);
       });
-    }, [prepareHistoryInteraction, syncActiveRegionClass]);
+    }, [prepareHistoryInteraction, syncActiveRegionClass, syncPromptCaretBox]);
 
     const focusSearchInput = useCallback(() => {
       requestAnimationFrame(() => {
@@ -4526,8 +4606,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         storeSelectionForRegion(view.state, activeRegionRef.current, currentSelection);
         activeRegionRef.current = nextRegion;
         syncActiveRegionClass(view);
+        syncPromptCaretBox();
       },
-      [storeSelectionForRegion, syncActiveRegionClass],
+      [storeSelectionForRegion, syncActiveRegionClass, syncPromptCaretBox],
     );
 
     const resolveCommandWidgetSignatureFromMouseEvent = useCallback(
@@ -4692,6 +4773,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               prepareHistoryInteraction();
               activeRegionRef.current = "history";
               syncActiveRegionClass(view);
+              syncPromptCaretBox();
               const nextSelection = resolveHistorySelection(view.state, historySelectionRef.current);
               view.dispatch({
                 selection: EditorSelection.range(nextSelection.anchor, nextSelection.head),
@@ -5024,6 +5106,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       <div
         ref={surfaceRef}
         className={`transcript-surface${isDraggingImages ? " transcript-surface--drag-over" : ""}`}
+        onBlurCapture={handleSurfaceFocusChange}
+        onFocusCapture={handleSurfaceFocusChange}
         onPasteCapture={handlePasteCapture}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
@@ -5155,14 +5239,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                   onScroll={handlePromptInputScroll}
                   onSelect={handlePromptInputSelectionChange}
                 />
-                {useNativePromptCaret ? null : (
-                  <div
-                    ref={promptCaretRef}
-                    aria-hidden="true"
-                    className="transcript-prompt__customCaret"
-                    hidden
-                  />
-                )}
+                <div
+                  ref={promptCaretRef}
+                  aria-hidden="true"
+                  className="transcript-prompt__customCaret"
+                  hidden
+                />
               </div>
             </div>
           </div>

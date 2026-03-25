@@ -13,6 +13,8 @@ import {
   resolveConversationScrollTopForOffsetFromBottom,
   shouldRedirectHistoryTypingToPrompt,
   shouldRedirectPlainTextPasteToPrompt,
+  shouldShowCustomPromptCaret,
+  shouldSuppressCustomPromptCaretForFocusedElement,
   shouldSelectAllHistoryFromHistoryKeydown,
   shouldSelectAllPromptFromPromptKeydown,
   shouldUseNativePromptCaret,
@@ -306,6 +308,70 @@ describe("history shortcut routing", () => {
     expect(shouldUseNativePromptCaret((property, value) => (
       property === "caret-shape" && value === "block"
     ))).toBe(false);
+  });
+
+  it("keeps the custom prompt caret visible while pane focus stays in history", () => {
+    expect(shouldShowCustomPromptCaret({
+      paneHasFocus: true,
+      paneActive: true,
+      activeRegion: "history",
+      promptHasFocus: false,
+      promptInputDisabled: false,
+      useNativePromptCaret: true,
+      focusedEditableOwnsTyping: false,
+    })).toBe(true);
+  });
+
+  it("hides the custom prompt caret when the native prompt caret can own a focused textarea", () => {
+    expect(shouldShowCustomPromptCaret({
+      paneHasFocus: true,
+      paneActive: true,
+      activeRegion: "prompt",
+      promptHasFocus: true,
+      promptInputDisabled: false,
+      useNativePromptCaret: true,
+      focusedEditableOwnsTyping: false,
+    })).toBe(false);
+  });
+
+  it("hides the custom prompt caret when another editable control in the pane owns typing", () => {
+    expect(shouldShowCustomPromptCaret({
+      paneHasFocus: false,
+      paneActive: true,
+      activeRegion: "history",
+      promptHasFocus: false,
+      promptInputDisabled: false,
+      useNativePromptCaret: false,
+      focusedEditableOwnsTyping: true,
+    })).toBe(false);
+  });
+
+  it("keeps the custom prompt caret visible for the active pane history even without DOM focus", () => {
+    expect(shouldShowCustomPromptCaret({
+      paneHasFocus: false,
+      paneActive: true,
+      activeRegion: "history",
+      promptHasFocus: false,
+      promptInputDisabled: false,
+      useNativePromptCaret: true,
+      focusedEditableOwnsTyping: false,
+    })).toBe(true);
+  });
+
+  it("does not suppress the custom prompt caret when transcript history has focus", () => {
+    expect(shouldSuppressCustomPromptCaretForFocusedElement({
+      isEditable: true,
+      isPromptElement: false,
+      isHistoryElement: true,
+    })).toBe(false);
+  });
+
+  it("suppresses the custom prompt caret when another editable control has focus", () => {
+    expect(shouldSuppressCustomPromptCaretForFocusedElement({
+      isEditable: true,
+      isPromptElement: false,
+      isHistoryElement: false,
+    })).toBe(true);
   });
 
   it("redirects plain-text paste to the prompt only when the prompt is not already the target", () => {

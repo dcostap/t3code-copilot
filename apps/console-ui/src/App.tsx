@@ -3087,6 +3087,7 @@ export function App() {
                             composerAttachments={paneView.attachments}
                             cwd={paneView.cwd}
                             projectRoot={paneView.project.workspaceRoot}
+                            paneActive={paneView.isActive}
                             interactionMode={paneView.interactionMode}
                             promptFocusDisabled={paletteOpen || hasBlockingModal}
                             promptInputDisabled={hasBlockingModal}
