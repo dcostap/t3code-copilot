@@ -543,6 +543,10 @@ body {
   white-space: pre;
 }
 
+.transcript-prompt__customCaret[hidden] {
+  display: none;
+}
+
 .transcript-prompt__input {
   width: 100%;
   min-height: calc(2 * 1.3em);

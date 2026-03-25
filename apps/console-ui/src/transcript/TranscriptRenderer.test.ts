@@ -300,13 +300,10 @@ describe("history shortcut routing", () => {
     })).toBe(false);
   });
 
-  it("prefers the native prompt caret when block shape and manual animation are supported", () => {
+  it("keeps the native prompt caret path disabled even when the browser reports support", () => {
     expect(shouldUseNativePromptCaret((property, value) => (
       (property === "caret-shape" && value === "block")
       || (property === "caret-animation" && value === "manual")
-    ))).toBe(true);
-    expect(shouldUseNativePromptCaret((property, value) => (
-      property === "caret-shape" && value === "block"
     ))).toBe(false);
   });
 
@@ -356,6 +353,18 @@ describe("history shortcut routing", () => {
       useNativePromptCaret: true,
       focusedEditableOwnsTyping: false,
     })).toBe(true);
+  });
+
+  it("hides the custom prompt caret once a pane is no longer active even if focus has not moved yet", () => {
+    expect(shouldShowCustomPromptCaret({
+      paneHasFocus: true,
+      paneActive: false,
+      activeRegion: "prompt",
+      promptHasFocus: true,
+      promptInputDisabled: false,
+      useNativePromptCaret: false,
+      focusedEditableOwnsTyping: false,
+    })).toBe(false);
   });
 
   it("does not suppress the custom prompt caret when transcript history has focus", () => {

@@ -3775,10 +3775,8 @@ export function shouldUseNativePromptCaret(
     | null
     | undefined,
 ) {
-  return Boolean(
-    cssSupports?.("caret-shape", "block")
-    && cssSupports("caret-animation", "manual"),
-  );
+  void cssSupports;
+  return false;
 }
 
 export function shouldShowCustomPromptCaret(input: {
@@ -3790,7 +3788,9 @@ export function shouldShowCustomPromptCaret(input: {
   readonly useNativePromptCaret: boolean;
   readonly focusedEditableOwnsTyping: boolean;
 }) {
-  const promptCaretOwnedByPane = input.paneHasFocus || (input.paneActive && input.activeRegion === "history");
+  const promptCaretOwnedByPane =
+    input.paneActive
+    && (input.paneHasFocus || input.activeRegion === "history");
   if (!promptCaretOwnedByPane || input.promptInputDisabled || input.focusedEditableOwnsTyping) {
     return false;
   }
@@ -3954,6 +3954,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         ),
       [],
     );
+    const paneActiveRef = useRef(paneActive);
     const promptCaretRef = useRef<HTMLDivElement | null>(null);
     const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const searchOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -4054,6 +4055,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
       if (!box) {
         caret.hidden = true;
+        caret.style.top = "";
+        caret.style.left = "";
+        caret.style.width = "";
+        caret.style.height = "";
         caret.textContent = "";
         return;
       }
@@ -4096,7 +4101,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
       if (!shouldShowCustomPromptCaret({
         paneHasFocus,
-        paneActive,
+        paneActive: paneActiveRef.current,
         activeRegion: activeRegionRef.current,
         promptHasFocus,
         promptInputDisabled: promptInputDisabledRef.current,
@@ -4108,8 +4113,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
 
       applyPromptCaretBox(measurePromptCaretBox(textarea, promptSelectionRef.current));
-    }, [applyPromptCaretBox, isFocusedEditableWithinPane, paneActive, useNativePromptCaret]);
-
+    }, [applyPromptCaretBox, isFocusedEditableWithinPane, useNativePromptCaret]);
     const syncPromptSelection = useCallback((textarea = promptTextareaRef.current) => {
       const fallbackOffset = draftRef.current.length;
       const anchorOffset = textarea?.selectionStart ?? fallbackOffset;
@@ -4119,7 +4123,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     }, [setPromptSelectionValue, syncPromptCaretBox]);
 
     useEffect(() => {
-      syncPromptCaretBox();
+      paneActiveRef.current = paneActive;
+      const textarea = promptTextareaRef.current;
+      if (!paneActive && textarea && document.activeElement === textarea) {
+        textarea.blur();
+      }
+      syncPromptCaretBox(textarea);
     }, [paneActive, syncPromptCaretBox]);
 
     const clearHistorySelection = useCallback(() => {
@@ -4932,6 +4941,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       redirectHistoryTypingToPrompt,
       resolveCommandWidgetSignatureFromMouseEvent,
       selectAllHistoryText,
+      syncPromptCaretBox,
       syncActiveRegionClass,
       storeSelectionForRegion,
       updateActiveRegionFromPointer,

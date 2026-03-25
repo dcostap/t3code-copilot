@@ -1856,6 +1856,13 @@ export function App() {
     workspace,
   ]);
 
+  const handleActivatePaneView = useCallback((paneView: Pick<PaneView, "project" | "tabId" | "pane">) => {
+    if (workspace.activePaneId === paneView.pane.id) {
+      return;
+    }
+    workspace.activatePane(paneView.project.id, paneView.tabId, paneView.pane.id);
+  }, [workspace]);
+
   const resetExpandedSidebarProject = useCallback((projectId: OrchestrationProject["id"]) => {
     setExpandedSidebarProjectIds((existing) => {
       if (!existing.has(projectId)) {
@@ -3190,7 +3197,16 @@ export function App() {
                           isDragOver: dragOverPaneId === paneView.pane.id,
                           isHighlighted: highlightedPaneId === paneView.pane.id,
                         })}
-                        onClick={() => workspace.activatePane(paneView.project.id, paneView.tabId, paneView.pane.id)}
+                        onMouseDownCapture={(event) => {
+                          if (event.button !== 0) {
+                            return;
+                          }
+                          handleActivatePaneView(paneView);
+                        }}
+                        onFocusCapture={() => {
+                          handleActivatePaneView(paneView);
+                        }}
+                        onClick={() => handleActivatePaneView(paneView)}
                         onDragOver={(event: ReactDragEvent<HTMLElement>) => {
                           if (!dropAllowed) {
                             return;
