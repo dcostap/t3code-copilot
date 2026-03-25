@@ -8,6 +8,7 @@ import {
   findReusableDraftPaneForThreadOpen,
   formatManageThreadTimestamp,
   getConversationPaneClassName,
+  getSidebarProjectSectionClassName,
   getSidebarThreadClassName,
   getSidebarThreadStatusClassName,
   getSidebarThreadGroups,
@@ -20,6 +21,7 @@ import {
   parsePersistedArchivedProjectIds,
   parsePersistedUnreadThreadIds,
   reconcileUnreadThreadIds,
+  reorderProjectIds,
   resolveProjectSelectionAfterArchive,
   resolveManagedThreadRowSelection,
   shouldBlockGlobalPromptTypingForSelection,
@@ -144,6 +146,35 @@ describe("getSidebarThreadClassName", () => {
       hasUnreadMarker: true,
       isActive: true,
     })).toBe("project-thread project-thread--active project-thread--unread");
+  });
+});
+
+describe("getSidebarProjectSectionClassName", () => {
+  it("adds active, dragging, and drop-target states independently", () => {
+    expect(getSidebarProjectSectionClassName({
+      isActive: true,
+      isDragging: true,
+      isDragOver: false,
+    })).toBe("project-tree__section project-tree__section--active project-tree__section--dragging");
+
+    expect(getSidebarProjectSectionClassName({
+      isActive: false,
+      isDragging: false,
+      isDragOver: true,
+    })).toBe("project-tree__section project-tree__section--dragOver");
+  });
+});
+
+describe("reorderProjectIds", () => {
+  it("moves the dragged project to the hovered target index", () => {
+    expect(reorderProjectIds(["a", "b", "c", "d"], "d", "b")).toEqual(["a", "d", "b", "c"]);
+    expect(reorderProjectIds(["a", "b", "c", "d"], "b", "c")).toEqual(["a", "c", "b", "d"]);
+    expect(reorderProjectIds(["a", "b", "c", "d"], "b", "d")).toEqual(["a", "c", "d", "b"]);
+  });
+
+  it("keeps the current order when the target is unchanged or missing", () => {
+    expect(reorderProjectIds(["a", "b", "c"], "b", "b")).toEqual(["a", "b", "c"]);
+    expect(reorderProjectIds(["a", "b", "c"], "b", "z")).toEqual(["a", "b", "c"]);
   });
 });
 

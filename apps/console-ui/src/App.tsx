@@ -19,6 +19,19 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import {
+  DndContext,
+  type DragEndEvent,
+  PointerSensor,
+  closestCorners,
+  pointerWithin,
+  type CollisionDetection,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-kit/modifiers";
+import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 import { AnimatedLoadingText } from "./AnimatedLoadingText";
 import { deriveRunningThreadIntentLabel } from "./agentIntent";
@@ -73,6 +86,114 @@ const PROJECT_CONTEXT_MENU_HEIGHT = 256;
 const THREAD_DRAG_DATA_TYPE = "application/x-t3tools-console-thread";
 interface AppPaletteCommand extends CommandPaletteCommand {
   run(): Promise<void> | void;
+}
+
+function SidebarChevronIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m9 18 6-6-6-6" />
+    </svg>
+  );
+}
+
+function SidebarFolderIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20 19a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3.172a2 2 0 0 1 1.414.586l1.828 1.828A2 2 0 0 0 13.828 9H18a2 2 0 0 1 2 2z" />
+      <path d="M4 11h16" />
+    </svg>
+  );
+}
+
+function SidebarNewThreadIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  );
+}
+
+function SidebarRearrangeIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M7 7h10" />
+      <path d="M7 12h10" />
+      <path d="M7 17h10" />
+    </svg>
+  );
+}
+
+type SidebarProjectDragHandleProps = Pick<
+  ReturnType<typeof useSortable>,
+  "attributes" | "listeners" | "setActivatorNodeRef"
+>;
+
+function SortableSidebarProjectSection({
+  projectId,
+  isActive,
+  children,
+}: {
+  projectId: OrchestrationProject["id"];
+  isActive: boolean;
+  children: (handleProps: SidebarProjectDragHandleProps) => React.ReactNode;
+}) {
+  const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, transition, isDragging, isOver } =
+    useSortable({ id: projectId });
+
+  return (
+    <section
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Translate.toString(transform),
+        transition,
+        zIndex: isDragging ? 1 : undefined,
+      }}
+      className={getSidebarProjectSectionClassName({
+        isActive,
+        isDragging,
+        isDragOver: isOver && !isDragging,
+      })}
+    >
+      {children({ attributes, listeners, setActivatorNodeRef })}
+    </section>
+  );
 }
 
 interface PaneView {
@@ -613,6 +734,43 @@ export function getSidebarThreadClassName(input: {
   ].filter((className): className is string => className !== null).join(" ");
 }
 
+export function getSidebarProjectSectionClassName(input: {
+  readonly isActive: boolean;
+  readonly isDragging: boolean;
+  readonly isDragOver: boolean;
+}) {
+  return [
+    "project-tree__section",
+    input.isActive ? "project-tree__section--active" : null,
+    input.isDragging ? "project-tree__section--dragging" : null,
+    input.isDragOver ? "project-tree__section--dragOver" : null,
+  ].filter((className): className is string => className !== null).join(" ");
+}
+
+export function reorderProjectIds<ProjectId extends string>(
+  projectIds: ReadonlyArray<ProjectId>,
+  draggedProjectId: ProjectId,
+  targetProjectId: ProjectId,
+) {
+  if (draggedProjectId === targetProjectId) {
+    return [...projectIds];
+  }
+
+  const draggedIndex = projectIds.indexOf(draggedProjectId);
+  const targetIndex = projectIds.indexOf(targetProjectId);
+  if (draggedIndex === -1 || targetIndex === -1) {
+    return [...projectIds];
+  }
+
+  const nextProjectIds = [...projectIds];
+  const [draggedProject] = nextProjectIds.splice(draggedIndex, 1);
+  if (!draggedProject) {
+    return [...projectIds];
+  }
+  nextProjectIds.splice(targetIndex, 0, draggedProject);
+  return nextProjectIds;
+}
+
 export function canDropDraggedThreadIntoProject<
   ThreadId extends string,
   ProjectId extends string,
@@ -955,7 +1113,6 @@ export function App() {
   const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<Record<string, Record<string, string>>>({});
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] = useState<Record<string, number>>({});
   const [pendingDraftPaneIds, setPendingDraftPaneIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [draggedThreadId, setDraggedThreadId] = useState<string | null>(null);
   const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null);
   const [dragOverSplitZone, setDragOverSplitZone] = useState(false);
@@ -1107,6 +1264,32 @@ export function App() {
     () => workspace.projectViews.filter((projectView) => !archivedProjectIds.has(projectView.project.id)),
     [archivedProjectIds, workspace.projectViews],
   );
+  const projectDnDSensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 6 },
+    }),
+  );
+  const projectCollisionDetection = useCallback<CollisionDetection>((args) => {
+    const pointerCollisions = pointerWithin(args);
+    if (pointerCollisions.length > 0) {
+      return pointerCollisions;
+    }
+    return closestCorners(args);
+  }, []);
+  const handleSidebarProjectDragEnd = useCallback((event: DragEndEvent) => {
+    const activeId = typeof event.active.id === "string" ? event.active.id : null;
+    const overId = typeof event.over?.id === "string" ? event.over.id : null;
+    if (!activeId || !overId || activeId === overId) {
+      return;
+    }
+    const projectIds = workspace.projectViews.map((projectView) => projectView.project.id);
+    const activeProjectId = projectIds.find((projectId) => projectId === activeId);
+    const overProjectId = projectIds.find((projectId) => projectId === overId);
+    if (!activeProjectId || !overProjectId) {
+      return;
+    }
+    workspace.reorderProjects(reorderProjectIds(projectIds, activeProjectId, overProjectId));
+  }, [workspace]);
   const managedThreadSelection = useMemo(
     () => summarizeThreadSelection(managedProjectThreads.map((thread) => thread.id), selectedManagedThreadIds),
     [managedProjectThreads, selectedManagedThreadIds],
@@ -2735,9 +2918,6 @@ export function App() {
   const projectContextMenuProject = projectContextMenu
     ? projects.find((project) => project.id === projectContextMenu.projectId) ?? null
     : null;
-  const projectContextMenuThreadCount = projectContextMenuProject
-    ? (orderedThreadsByProjectId.get(projectContextMenuProject.id) ?? []).length
-    : 0;
   const threadContextMenuThread = threadContextMenu
     ? consoleData.threads.find((thread) => thread.id === threadContextMenu.threadId && thread.deletedAt === null) ?? null
     : null;
@@ -2817,13 +2997,29 @@ export function App() {
         <div className="project-workspace">
           <aside className="project-sidebar">
             <div className="project-sidebar__topAction">
-              <button type="button" className="project-sidebar__addProject" onClick={handleOpenProjectModal} aria-label="Add project">
+              <span className="project-sidebar__topActionLabel">Projects</span>
+              <button
+                type="button"
+                className="project-sidebar__addProject"
+                onClick={handleOpenProjectModal}
+                aria-label="Add project"
+                title="Add project"
+              >
                 <span className="project-sidebar__addProjectGlyph" aria-hidden="true">+</span>
-                <span className="project-sidebar__addProjectLabel">Add project...</span>
               </button>
             </div>
             <div className="project-tree" role="tree" aria-label="Projects">
-              {visibleSidebarProjectViews.map((projectView) => {
+              <DndContext
+                sensors={projectDnDSensors}
+                collisionDetection={projectCollisionDetection}
+                modifiers={[restrictToVerticalAxis, restrictToFirstScrollableAncestor]}
+                onDragEnd={handleSidebarProjectDragEnd}
+              >
+                <SortableContext
+                  items={visibleSidebarProjectViews.map((projectView) => projectView.project.id)}
+                  strategy={verticalListSortingStrategy}
+                >
+                  {visibleSidebarProjectViews.map((projectView) => {
                 const threads = orderedThreadsByProjectId.get(projectView.project.id) ?? [];
                 const isActiveProject = projectView.project.id === workspace.activeProject?.id;
                 const expandedSidebarThreads = expandedSidebarProjectIds.has(projectView.project.id);
@@ -2853,58 +3049,72 @@ export function App() {
                   layout: projectView.layout,
                   threadEntries: visibleThreadEntries,
                 });
-                const hiddenThreadCount = threadEntries.length - visibleThreadEntries.length;
+                  const hiddenThreadCount = threadEntries.length - visibleThreadEntries.length;
 
                 return (
-                  <section
+                  <SortableSidebarProjectSection
                     key={projectView.project.id}
-                    className={`project-tree__section${isActiveProject ? " project-tree__section--active" : ""}`}
-                    draggable
-                    onDragStart={() => setDraggedProjectId(projectView.project.id)}
-                    onDragOver={(event) => {
-                      if (!draggedProjectId || draggedProjectId === projectView.project.id) {
-                        return;
-                      }
-                      event.preventDefault();
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      if (!draggedProjectId || draggedProjectId === projectView.project.id) {
-                        return;
-                      }
-                      const reordered = workspace.projectViews.map((view) => view.project.id).filter((id) => id !== draggedProjectId);
-                      const targetIndex = reordered.indexOf(projectView.project.id);
-                      reordered.splice(targetIndex, 0, draggedProjectId as OrchestrationProject["id"]);
-                      workspace.reorderProjects(reordered);
-                      setDraggedProjectId(null);
-                    }}
-                    onDragEnd={() => setDraggedProjectId(null)}
+                    projectId={projectView.project.id}
+                    isActive={isActiveProject}
                   >
+                    {({ attributes, listeners, setActivatorNodeRef }) => (
+                      <>
                     <div
                       className="project-tree__header"
                       onContextMenu={(event) => handleOpenProjectContextMenu(event, projectView.project.id)}
                     >
-                        <button
-                          type="button"
-                          className="project-tree__toggle"
-                          onClick={() => handleToggleSidebarProject(projectView.project.id, projectView.collapsed)}
-                          aria-label={projectView.collapsed ? "Expand project" : "Collapse project"}
-                        >
-                          {projectView.collapsed ? "+" : "−"}
+                      <button
+                        type="button"
+                        className={`project-tree__toggle${projectView.collapsed ? "" : " project-tree__toggle--expanded"}`}
+                        onClick={() => handleToggleSidebarProject(projectView.project.id, projectView.collapsed)}
+                        aria-label={projectView.collapsed ? "Expand project" : "Collapse project"}
+                      >
+                        <SidebarChevronIcon className="project-tree__toggleGlyph" />
                       </button>
+                      <button
+                        type="button"
+                        className="project-tree__projectButton"
+                        onClick={() => {
+                          handleSelectSidebarProject(
+                            projectView.project.id,
+                            projectView.collapsed,
+                            projectView.layout.tabs.find((tab) => tab.id === projectView.layout.activeTabId)?.activePaneId ?? null,
+                          );
+                        }}
+                      >
+                        <SidebarFolderIcon className="project-tree__projectIcon" />
+                        <span className="project-tree__projectTitle">{projectView.project.title}</span>
+                      </button>
+                      <div className="project-tree__actions">
                         <button
                           type="button"
-                          className="project-tree__projectButton"
-                          onClick={() => {
-                            handleSelectSidebarProject(
-                              projectView.project.id,
-                              projectView.collapsed,
-                              projectView.layout.tabs.find((tab) => tab.id === projectView.layout.activeTabId)?.activePaneId ?? null,
-                            );
+                          ref={setActivatorNodeRef}
+                          className="project-tree__action project-tree__action--drag"
+                          aria-label={`Rearrange ${projectView.project.title}`}
+                          title="Rearrange project"
+                          {...attributes}
+                          {...listeners}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
                           }}
                         >
-                          <span className="project-tree__projectTitle">{projectView.project.title}</span>
-                      </button>
+                          <SidebarRearrangeIcon className="project-tree__actionIcon" />
+                        </button>
+                        <button
+                          type="button"
+                          className="project-tree__action"
+                          aria-label={`Create new thread in ${projectView.project.title}`}
+                          title="New thread"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            void handleCreateDraftTabForProject(projectView.project.id);
+                          }}
+                        >
+                          <SidebarNewThreadIcon className="project-tree__actionIcon" />
+                        </button>
+                      </div>
                     </div>
                     {!projectView.collapsed ? (
                       <div className="project-tree__threads">
@@ -2945,34 +3155,38 @@ export function App() {
                                   onDragEnd={handleSidebarThreadDragEnd}
                                   onClick={() => handleOpenThread(thread.id)}
                                 >
-                                  {status.tone === "working" ? (
-                                    <AnimatedLoadingText text={thread.title} className={titleClassName} />
-                                  ) : (
-                                    <span className={titleClassName}>{thread.title}</span>
-                                  )}
-                                  <span className="project-thread__meta">
-                                    {hasUnreadMarker ? (
-                                      <span className="project-thread__unreadDot" aria-hidden="true" />
-                                    ) : null}
+                                  <span className="project-thread__body">
+                                    <span className="project-thread__leading">
+                                      {hasUnreadMarker ? (
+                                        <span className="project-thread__unreadDot" aria-hidden="true" />
+                                      ) : null}
+                                      {status.tone === "working" ? (
+                                        <span className="project-thread__workingSpinner" aria-hidden="true" />
+                                      ) : null}
+                                      {status.tone === "working" ? (
+                                        <span className={statusClassName}>
+                                          <AnimatedLoadingText
+                                            text={status.animatedLabel ?? sidebarLabel}
+                                            className="project-thread__statusAnimatedLabel"
+                                          />
+                                        </span>
+                                      ) : (
+                                        <span className={statusClassName}>
+                                          {sidebarLabel}
+                                        </span>
+                                      )}
+                                    </span>
                                     {status.tone === "working" ? (
-                                      <span className="project-thread__workingSpinner" aria-hidden="true" />
-                                    ) : null}
-                                    {status.tone === "working" ? (
-                                      <span className={statusClassName}>
-                                        <AnimatedLoadingText
-                                          text={`${status.animatedLabel ?? sidebarLabel} `}
-                                          className="project-thread__statusAnimatedLabel"
-                                        />
-                                        {status.timingLabel ? (
-                                          <span className="project-thread__statusTiming">{status.timingLabel}</span>
-                                        ) : null}
-                                      </span>
+                                      <AnimatedLoadingText text={thread.title} className={titleClassName} />
                                     ) : (
-                                      <span className={statusClassName}>
-                                        {sidebarLabel}
-                                      </span>
+                                      <span className={titleClassName}>{thread.title}</span>
                                     )}
                                   </span>
+                                  {status.timingLabel ? (
+                                    <span className="project-thread__meta">
+                                      <span className="project-thread__statusTiming">{status.timingLabel}</span>
+                                    </span>
+                                  ) : null}
                                 </button>
                               );
                             })}
@@ -2992,9 +3206,13 @@ export function App() {
                         ) : null}
                       </div>
                     ) : null}
-                  </section>
+                      </>
+                    )}
+                  </SortableSidebarProjectSection>
                 );
-              })}
+                  })}
+                </SortableContext>
+              </DndContext>
             </div>
           </aside>
           <main className="project-main">
@@ -3217,13 +3435,9 @@ export function App() {
             onContextMenu={(event) => event.preventDefault()}
           >
             <div className="project-context-menu__info">
-              <div className="project-context-menu__eyebrow">Project</div>
               <div className="project-context-menu__title">{projectContextMenuProject.title}</div>
               <div className="project-context-menu__path" title={projectContextMenuProject.workspaceRoot}>
                 {projectContextMenuProject.workspaceRoot}
-              </div>
-              <div className="project-context-menu__meta">
-                <span>{projectContextMenuThreadCount} thread{projectContextMenuThreadCount === 1 ? "" : "s"}</span>
               </div>
             </div>
             <div className="project-context-menu__actions">
@@ -3269,22 +3483,6 @@ export function App() {
             onMouseDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
           >
-            <div className="project-context-menu__info">
-              <div className="project-context-menu__eyebrow">Thread</div>
-              <div className="project-context-menu__title">{threadContextMenuThread.title}</div>
-              <div className="project-context-menu__path">
-                {projects.find((project) => project.id === threadContextMenuThread.projectId)?.title ?? "Unknown project"}
-              </div>
-              <div className="project-context-menu__meta">
-                <span>{getThreadStatus(
-                  threadContextMenuThread,
-                  nowIso,
-                  isThreadTurnRunning(threadContextMenuThread.id),
-                  getPendingUserInputs(threadContextMenuThread.id)[0]?.createdAt ?? null,
-                ).label}</span>
-                <span>{threadContextMenuThread.provider}</span>
-              </div>
-            </div>
             <div className="project-context-menu__actions">
               <button
                 type="button"
