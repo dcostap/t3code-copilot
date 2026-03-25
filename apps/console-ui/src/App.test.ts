@@ -2,14 +2,19 @@ import { describe, expect, it } from "vitest";
 import { EventId, ThreadId } from "@t3tools/contracts";
 
 import {
+  canDropDraggedThreadIntoProject,
+  canDropDraggedThreadIntoSplitZone,
   findDuplicateProjectForWorkspaceRoot,
   findReusableDraftPaneForThreadOpen,
   formatManageThreadTimestamp,
+  getConversationPaneClassName,
   getSidebarThreadClassName,
   getSidebarThreadStatusClassName,
   getSidebarThreadGroups,
   getSidebarThreadTitleClassName,
   getThreadStatus,
+  getThreadSplitDropZoneClassName,
+  isDraggedThreadSplitZoneLimitReached,
   isPaletteToggleShortcut,
   normalizeProjectWorkspaceRootForComparison,
   parsePersistedArchivedProjectIds,
@@ -139,6 +144,104 @@ describe("getSidebarThreadClassName", () => {
       hasUnreadMarker: true,
       isActive: true,
     })).toBe("project-thread project-thread--active project-thread--unread");
+  });
+});
+
+describe("canDropDraggedThreadIntoProject", () => {
+  it("allows dropping only when the dragged thread belongs to the target project", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0]!;
+
+    expect(canDropDraggedThreadIntoProject({
+      draggedThreadId: thread.id,
+      targetProjectId: thread.projectId,
+      threads: snapshot.threads,
+    })).toBe(true);
+
+    expect(canDropDraggedThreadIntoProject({
+      draggedThreadId: thread.id,
+      targetProjectId: "project:other" as typeof thread.projectId,
+      threads: snapshot.threads,
+    })).toBe(false);
+  });
+});
+
+describe("canDropDraggedThreadIntoSplitZone", () => {
+  it("requires a matching project and spare pane capacity", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0]!;
+
+    expect(canDropDraggedThreadIntoSplitZone({
+      draggedThreadId: thread.id,
+      targetProjectId: thread.projectId,
+      activeTabPaneCount: 2,
+      threads: snapshot.threads,
+    })).toBe(true);
+
+    expect(canDropDraggedThreadIntoSplitZone({
+      draggedThreadId: thread.id,
+      targetProjectId: thread.projectId,
+      activeTabPaneCount: 6,
+      threads: snapshot.threads,
+    })).toBe(false);
+  });
+});
+
+describe("isDraggedThreadSplitZoneLimitReached", () => {
+  it("reports the split limit only for matching-project drags", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0]!;
+
+    expect(isDraggedThreadSplitZoneLimitReached({
+      draggedThreadId: thread.id,
+      targetProjectId: thread.projectId,
+      activeTabPaneCount: 6,
+      threads: snapshot.threads,
+    })).toBe(true);
+
+    expect(isDraggedThreadSplitZoneLimitReached({
+      draggedThreadId: thread.id,
+      targetProjectId: "project:other" as typeof thread.projectId,
+      activeTabPaneCount: 6,
+      threads: snapshot.threads,
+    })).toBe(false);
+  });
+});
+
+describe("getConversationPaneClassName", () => {
+  it("adds the drop target, drag-over, and highlight classes when applicable", () => {
+    expect(getConversationPaneClassName({
+      isActive: true,
+      isDropEligible: true,
+      isDragOver: true,
+      isHighlighted: true,
+    })).toBe(
+      "conversation-pane conversation-pane--active conversation-pane--drop-target conversation-pane--drag-over conversation-pane--highlight",
+    );
+  });
+});
+
+describe("getThreadSplitDropZoneClassName", () => {
+  it("builds the expected class list for an active split drop target", () => {
+    expect(getThreadSplitDropZoneClassName({
+      isDragActive: true,
+      isDropEligible: true,
+      isDragOver: true,
+      isLimitReached: false,
+    })).toBe(
+      "project-split-dropzone project-split-dropzone--drag-active project-split-dropzone--eligible project-split-dropzone--drag-over",
+    );
+  });
+
+  it("marks the split zone as limit reached when no more panes fit", () => {
+    expect(getThreadSplitDropZoneClassName({
+      isDragActive: true,
+      isDropEligible: false,
+      isDragOver: false,
+      isLimitReached: true,
+    })).toBe(
+      "project-split-dropzone project-split-dropzone--drag-active project-split-dropzone--limit-reached",
+    );
   });
 });
 

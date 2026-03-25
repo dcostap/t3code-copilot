@@ -67,8 +67,10 @@ const EMPTY_PROJECTS: ReadonlyArray<OrchestrationProject> = [];
 const SIDEBAR_THREAD_LIMIT = 7;
 const SIDEBAR_IDLE_HIDE_MS = 10 * 60 * 60 * 1000;
 const SIDEBAR_THREAD_STALE_MS = 5 * 24 * 60 * 60 * 1000;
+const MAX_TAB_PANES = 6;
 const PROJECT_CONTEXT_MENU_WIDTH = 360;
 const PROJECT_CONTEXT_MENU_HEIGHT = 256;
+const THREAD_DRAG_DATA_TYPE = "application/x-t3tools-console-thread";
 interface AppPaletteCommand extends CommandPaletteCommand {
   run(): Promise<void> | void;
 }
@@ -611,6 +613,87 @@ export function getSidebarThreadClassName(input: {
   ].filter((className): className is string => className !== null).join(" ");
 }
 
+export function canDropDraggedThreadIntoProject<
+  ThreadId extends string,
+  ProjectId extends string,
+>(input: {
+  readonly draggedThreadId: ThreadId | null;
+  readonly targetProjectId: ProjectId | null;
+  readonly threads: ReadonlyArray<{ readonly id: ThreadId; readonly projectId: ProjectId }>;
+}) {
+  if (!input.draggedThreadId || !input.targetProjectId) {
+    return false;
+  }
+  return input.threads.some(
+    (thread) => thread.id === input.draggedThreadId && thread.projectId === input.targetProjectId,
+  );
+}
+
+export function canDropDraggedThreadIntoSplitZone<
+  ThreadId extends string,
+  ProjectId extends string,
+>(input: {
+  readonly draggedThreadId: ThreadId | null;
+  readonly targetProjectId: ProjectId | null;
+  readonly activeTabPaneCount: number | null;
+  readonly threads: ReadonlyArray<{ readonly id: ThreadId; readonly projectId: ProjectId }>;
+}) {
+  return canDropDraggedThreadIntoProject({
+    draggedThreadId: input.draggedThreadId,
+    targetProjectId: input.targetProjectId,
+    threads: input.threads,
+  }) && input.activeTabPaneCount !== null
+    && input.activeTabPaneCount > 0
+    && input.activeTabPaneCount < MAX_TAB_PANES;
+}
+
+export function isDraggedThreadSplitZoneLimitReached<
+  ThreadId extends string,
+  ProjectId extends string,
+>(input: {
+  readonly draggedThreadId: ThreadId | null;
+  readonly targetProjectId: ProjectId | null;
+  readonly activeTabPaneCount: number | null;
+  readonly threads: ReadonlyArray<{ readonly id: ThreadId; readonly projectId: ProjectId }>;
+}) {
+  return canDropDraggedThreadIntoProject({
+    draggedThreadId: input.draggedThreadId,
+    targetProjectId: input.targetProjectId,
+    threads: input.threads,
+  }) && input.activeTabPaneCount !== null
+    && input.activeTabPaneCount >= MAX_TAB_PANES;
+}
+
+export function getConversationPaneClassName(input: {
+  readonly isActive: boolean;
+  readonly isDropEligible: boolean;
+  readonly isDragOver: boolean;
+  readonly isHighlighted: boolean;
+}) {
+  return [
+    "conversation-pane",
+    input.isActive ? "conversation-pane--active" : null,
+    input.isDropEligible ? "conversation-pane--drop-target" : null,
+    input.isDragOver ? "conversation-pane--drag-over" : null,
+    input.isHighlighted ? "conversation-pane--highlight" : null,
+  ].filter((className): className is string => className !== null).join(" ");
+}
+
+export function getThreadSplitDropZoneClassName(input: {
+  readonly isDragActive: boolean;
+  readonly isDropEligible: boolean;
+  readonly isDragOver: boolean;
+  readonly isLimitReached: boolean;
+}) {
+  return [
+    "project-split-dropzone",
+    input.isDragActive ? "project-split-dropzone--drag-active" : null,
+    input.isDropEligible ? "project-split-dropzone--eligible" : null,
+    input.isDragOver ? "project-split-dropzone--drag-over" : null,
+    input.isLimitReached ? "project-split-dropzone--limit-reached" : null,
+  ].filter((className): className is string => className !== null).join(" ");
+}
+
 function getThreadAgeMs(thread: OrchestrationThread, nowIso: string) {
   const nowMs = parseTimestampMs(nowIso);
   const threadMs = getThreadSortValue(thread);
@@ -875,6 +958,7 @@ export function App() {
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [draggedThreadId, setDraggedThreadId] = useState<string | null>(null);
   const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null);
+  const [dragOverSplitZone, setDragOverSplitZone] = useState(false);
   const [highlightedPaneId, setHighlightedPaneId] = useState<string | null>(null);
   const [expandedSidebarProjectIds, setExpandedSidebarProjectIds] = useState<ReadonlySet<string>>(() => new Set());
   const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenuState | null>(null);
@@ -1079,6 +1163,14 @@ export function App() {
       }
     }
   }, [liveDraftPaneIds, livePaneIds]);
+
+  useEffect(() => {
+    if (draggedThreadId) {
+      return;
+    }
+    setDragOverPaneId(null);
+    setDragOverSplitZone(false);
+  }, [draggedThreadId]);
 
   useEffect(() => {
     if (!projectContextMenu) {
@@ -1530,6 +1622,47 @@ export function App() {
       focusPanePrompt(created.paneId);
     }
   }, [focusPanePrompt, workspace]);
+
+  const handleSidebarThreadDragStart = useCallback((event: ReactDragEvent<HTMLButtonElement>, threadId: ThreadId) => {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(THREAD_DRAG_DATA_TYPE, threadId);
+    event.dataTransfer.setData("text/plain", threadId);
+    setDragOverPaneId(null);
+    setDragOverSplitZone(false);
+    setDraggedThreadId(threadId);
+  }, []);
+
+  const handleSidebarThreadDragEnd = useCallback(() => {
+    setDraggedThreadId(null);
+    setDragOverPaneId(null);
+    setDragOverSplitZone(false);
+  }, []);
+
+  const handleDropThreadIntoSplitZone = useCallback(() => {
+    if (!workspace.activeProject || !workspace.activePaneId || !draggedThreadId) {
+      return;
+    }
+    const thread = consoleData.threads.find((candidate) => candidate.id === draggedThreadId) ?? null;
+    if (!thread || thread.projectId !== workspace.activeProject.id) {
+      return;
+    }
+    const created = workspace.splitPane({
+      projectId: workspace.activeProject.id,
+      paneId: workspace.activePaneId,
+    });
+    if (!created) {
+      return;
+    }
+    const didMount = workspace.mountThreadInPane({
+      projectId: workspace.activeProject.id,
+      paneId: created.paneId,
+      threadId: draggedThreadId as ThreadId,
+    });
+    if (didMount) {
+      focusPanePrompt(created.paneId);
+      highlightPane(created.paneId);
+    }
+  }, [consoleData.threads, draggedThreadId, focusPanePrompt, highlightPane, workspace]);
 
   const handleCloseTab = useCallback(() => {
     if (!workspace.activeProject || !workspace.activeTab) {
@@ -2578,8 +2711,26 @@ export function App() {
     }) as CSSProperties,
     [desktopWindowControlsInsetPx],
   );
+  const splitZoneDropAllowed = canDropDraggedThreadIntoSplitZone({
+    draggedThreadId,
+    targetProjectId: workspace.activeProject?.id ?? null,
+    activeTabPaneCount: activeTab?.paneIds.length ?? null,
+    threads: consoleData.threads,
+  });
+  const splitZoneLimitReached = isDraggedThreadSplitZoneLimitReached({
+    draggedThreadId,
+    targetProjectId: workspace.activeProject?.id ?? null,
+    activeTabPaneCount: activeTab?.paneIds.length ?? null,
+    threads: consoleData.threads,
+  });
+  const splitZoneClassName = getThreadSplitDropZoneClassName({
+    isDragActive: draggedThreadId !== null,
+    isDropEligible: splitZoneDropAllowed,
+    isDragOver: dragOverSplitZone,
+    isLimitReached: splitZoneLimitReached,
+  });
   const activePaneGridClassName = activeTab
-    ? `project-pane-grid project-pane-grid--${Math.min(Math.max(activeTab.paneIds.length, 1), 6)}`
+    ? `project-pane-grid project-pane-grid--${Math.min(Math.max(activeTab.paneIds.length, 1), MAX_TAB_PANES)}`
     : "project-pane-grid project-pane-grid--1";
   const projectContextMenuProject = projectContextMenu
     ? projects.find((project) => project.id === projectContextMenu.projectId) ?? null
@@ -2790,8 +2941,8 @@ export function App() {
                                   title={tooltip}
                                   draggable
                                   onContextMenu={(event) => handleOpenThreadContextMenu(event, thread.id)}
-                                  onDragStart={() => setDraggedThreadId(thread.id)}
-                                  onDragEnd={() => setDraggedThreadId(null)}
+                                  onDragStart={(event) => handleSidebarThreadDragStart(event, thread.id)}
+                                  onDragEnd={handleSidebarThreadDragEnd}
                                   onClick={() => handleOpenThread(thread.id)}
                                 >
                                   {status.tone === "working" ? (
@@ -2848,54 +2999,75 @@ export function App() {
           </aside>
           <main className="project-main">
             {workspace.activeProject && activeLayout && activeTab ? (
-              <div className={activePaneGridClassName}>
-                {paneViews.map((paneView) => {
-                  const dropAllowed = draggedThreadId
-                    ? (consoleData.threads.find((thread) => thread.id === draggedThreadId)?.projectId === paneView.project.id)
-                    : false;
+              <div className="project-main__content">
+                <div className={activePaneGridClassName}>
+                  {paneViews.map((paneView) => {
+                    const dropAllowed = canDropDraggedThreadIntoProject({
+                      draggedThreadId,
+                      targetProjectId: paneView.project.id,
+                      threads: consoleData.threads,
+                    });
 
-                  return (
-                    <section
-                      key={paneView.pane.id}
-                      ref={(element) => {
-                        if (!element) {
-                          delete paneElementRefs.current[paneView.pane.id];
-                          return;
-                        }
-                        paneElementRefs.current[paneView.pane.id] = element;
-                      }}
-                      className={`conversation-pane${paneView.isActive ? " conversation-pane--active" : ""}${dragOverPaneId === paneView.pane.id ? " conversation-pane--drag-over" : ""}${highlightedPaneId === paneView.pane.id ? " conversation-pane--highlight" : ""}`}
-                      onClick={() => workspace.activatePane(paneView.project.id, paneView.tabId, paneView.pane.id)}
-                      onDragOver={(event: ReactDragEvent<HTMLElement>) => {
-                        if (!dropAllowed) {
-                          return;
-                        }
-                        event.preventDefault();
-                        setDragOverPaneId(paneView.pane.id);
-                      }}
-                      onDragLeave={() => {
-                        setDragOverPaneId((current) => (current === paneView.pane.id ? null : current));
-                      }}
-                      onDrop={(event: ReactDragEvent<HTMLElement>) => {
-                        event.preventDefault();
-                        setDragOverPaneId(null);
-                        if (!draggedThreadId) {
-                          return;
-                        }
-                        const thread = consoleData.threads.find((candidate) => candidate.id === draggedThreadId) ?? null;
-                        if (!thread || thread.projectId !== paneView.project.id) {
-                          return;
-                        }
-                        workspace.mountThreadInPane({
-                          projectId: paneView.project.id,
-                          paneId: paneView.pane.id,
-                          threadId: draggedThreadId as ThreadId,
-                        });
-                        focusPanePrompt(paneView.pane.id);
-                        setDraggedThreadId(null);
-                      }}
-                    >
-                        <div className="transcript-shell">
+                    return (
+                      <section
+                        key={paneView.pane.id}
+                        ref={(element) => {
+                          if (!element) {
+                            delete paneElementRefs.current[paneView.pane.id];
+                            return;
+                          }
+                          paneElementRefs.current[paneView.pane.id] = element;
+                        }}
+                        className={getConversationPaneClassName({
+                          isActive: paneView.isActive,
+                          isDropEligible: dropAllowed,
+                          isDragOver: dragOverPaneId === paneView.pane.id,
+                          isHighlighted: highlightedPaneId === paneView.pane.id,
+                        })}
+                        onClick={() => workspace.activatePane(paneView.project.id, paneView.tabId, paneView.pane.id)}
+                        onDragOver={(event: ReactDragEvent<HTMLElement>) => {
+                          if (!dropAllowed) {
+                            return;
+                          }
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = "move";
+                          setDragOverSplitZone(false);
+                          setDragOverPaneId(paneView.pane.id);
+                        }}
+                        onDragLeave={(event: ReactDragEvent<HTMLElement>) => {
+                          const nextTarget = event.relatedTarget;
+                          if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+                            return;
+                          }
+                          setDragOverPaneId((current) => (current === paneView.pane.id ? null : current));
+                        }}
+                        onDrop={(event: ReactDragEvent<HTMLElement>) => {
+                          event.preventDefault();
+                          setDragOverPaneId(null);
+                          setDragOverSplitZone(false);
+                          if (!draggedThreadId) {
+                            return;
+                          }
+                          const thread = consoleData.threads.find((candidate) => candidate.id === draggedThreadId) ?? null;
+                          if (!thread || thread.projectId !== paneView.project.id) {
+                            return;
+                          }
+                          const didMount = workspace.mountThreadInPane({
+                            projectId: paneView.project.id,
+                            paneId: paneView.pane.id,
+                            threadId: draggedThreadId as ThreadId,
+                          });
+                          if (didMount) {
+                            focusPanePrompt(paneView.pane.id);
+                            highlightPane(paneView.pane.id);
+                          }
+                          setDraggedThreadId(null);
+                        }}
+                      >
+                          {dropAllowed ? (
+                            <div className="conversation-pane__dropOverlay" aria-hidden="true" />
+                          ) : null}
+                          <div className="transcript-shell">
                           <TranscriptRenderer
                             ref={(handle) => {
                               if (!handle) {
@@ -2959,13 +3131,48 @@ export function App() {
                                 : false)
                             }
                           />
-                        </div>
-                        <footer className="status-line" title={getPaneFooterText(paneView)}>
-                          {renderPaneFooter(paneView)}
-                        </footer>
-                    </section>
-                  );
-                })}
+                          </div>
+                          <footer className="status-line" title={getPaneFooterText(paneView)}>
+                            {renderPaneFooter(paneView)}
+                          </footer>
+                      </section>
+                    );
+                  })}
+                </div>
+                <aside
+                  className={splitZoneClassName}
+                  aria-label="Drop thread here to add a split pane"
+                  onDragOver={(event: ReactDragEvent<HTMLElement>) => {
+                    if (!splitZoneDropAllowed) {
+                      return;
+                    }
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                    setDragOverPaneId(null);
+                    setDragOverSplitZone(true);
+                  }}
+                  onDragLeave={(event: ReactDragEvent<HTMLElement>) => {
+                    const nextTarget = event.relatedTarget;
+                    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+                      return;
+                    }
+                    setDragOverSplitZone(false);
+                  }}
+                  onDrop={(event: ReactDragEvent<HTMLElement>) => {
+                    event.preventDefault();
+                    setDragOverSplitZone(false);
+                    setDragOverPaneId(null);
+                    if (!splitZoneDropAllowed) {
+                      return;
+                    }
+                    handleDropThreadIntoSplitZone();
+                    setDraggedThreadId(null);
+                  }}
+                >
+                  <div className="project-split-dropzone__rail" aria-hidden="true">
+                    <span className="project-split-dropzone__glyph">+</span>
+                  </div>
+                </aside>
               </div>
             ) : projects.length === 0 ? (
               <EmptyWorkspaceSurface title="No project loaded." detail="Create or sync a project first." />

@@ -1535,6 +1535,15 @@ body {
   overflow: hidden;
 }
 
+.project-main__content {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  gap: 10px;
+  overflow: hidden;
+}
+
 .project-modal-overlay {
   position: fixed;
   inset: 0;
@@ -2117,17 +2126,44 @@ body {
 }
 
 .conversation-pane {
+  position: relative;
   border: 0;
   background: transparent;
+  overflow: hidden;
+  isolation: isolate;
 }
 
 .conversation-pane--active {
   background: transparent;
 }
 
+.conversation-pane--drop-target::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px dashed rgba(96, 150, 204, 0.14);
+  background:
+    linear-gradient(180deg, rgba(57, 90, 122, 0.025), rgba(8, 12, 16, 0.01));
+  opacity: 0.72;
+  pointer-events: none;
+  transition:
+    border-color 90ms ease,
+    background-color 90ms ease,
+    opacity 90ms ease,
+    transform 90ms ease;
+}
+
 .conversation-pane--drag-over {
-  background: transparent;
-  box-shadow: inset 0 0 0 1px rgba(140, 196, 247, 0.24);
+  box-shadow:
+    0 0 0 1px rgba(118, 179, 232, 0.18),
+    0 0 24px rgba(74, 141, 204, 0.09);
+}
+
+.conversation-pane--drag-over::before {
+  border-color: rgba(150, 205, 255, 0.34);
+  background:
+    linear-gradient(180deg, rgba(78, 134, 187, 0.08), rgba(18, 28, 37, 0.035));
+  opacity: 0.88;
 }
 
 .conversation-pane--highlight {
@@ -2144,6 +2180,100 @@ body {
   70% {
     box-shadow: 0 0 0 1px rgba(140, 196, 247, 0.4), 0 0 24px rgba(140, 196, 247, 0.18);
   }
+}
+
+.conversation-pane__dropOverlay {
+  position: absolute;
+  inset: 10px;
+  z-index: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 90ms ease;
+}
+
+.conversation-pane__dropOverlay::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(89, 143, 194, 0.045), rgba(17, 23, 29, 0.018));
+}
+
+.conversation-pane--drag-over .conversation-pane__dropOverlay {
+  opacity: 1;
+}
+
+.project-split-dropzone {
+  position: relative;
+  display: flex;
+  flex: 0 0 50px;
+  align-items: stretch;
+  width: 50px;
+  min-width: 50px;
+  min-height: 0;
+  margin-right: 6px;
+  border-left: 1px solid rgba(76, 86, 96, 0.2);
+  background: linear-gradient(180deg, rgba(12, 16, 20, 0.085), rgba(12, 16, 20, 0.015));
+  overflow: hidden;
+  transition:
+    width 110ms ease,
+    min-width 110ms ease,
+    flex-basis 110ms ease,
+    border-color 110ms ease,
+    background-color 110ms ease,
+    box-shadow 110ms ease;
+}
+
+.project-split-dropzone--drag-active {
+  flex-basis: 58px;
+  width: 58px;
+  min-width: 58px;
+}
+
+.project-split-dropzone--eligible {
+  border-left-color: rgba(109, 153, 194, 0.28);
+  background: linear-gradient(180deg, rgba(28, 40, 52, 0.16), rgba(9, 13, 17, 0.03));
+}
+
+.project-split-dropzone--drag-over {
+  flex-basis: 74px;
+  width: 74px;
+  min-width: 74px;
+  border-left-color: rgba(165, 217, 255, 0.45);
+  background: linear-gradient(180deg, rgba(52, 89, 123, 0.22), rgba(16, 24, 31, 0.08));
+  box-shadow:
+    inset 0 0 0 1px rgba(165, 217, 255, 0.16),
+    0 0 18px rgba(90, 153, 209, 0.08);
+}
+
+.project-split-dropzone--limit-reached {
+  border-left-color: rgba(131, 118, 103, 0.38);
+}
+
+.project-split-dropzone__rail {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  color: rgba(109, 123, 136, 0.88);
+}
+
+.project-split-dropzone--eligible .project-split-dropzone__rail,
+.project-split-dropzone--drag-over .project-split-dropzone__rail {
+  color: rgba(169, 210, 243, 0.9);
+}
+
+.project-split-dropzone--limit-reached .project-split-dropzone__rail {
+  color: #948475;
+}
+
+.project-split-dropzone__glyph {
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0.82;
 }
 
 .conversation-pane__header {
