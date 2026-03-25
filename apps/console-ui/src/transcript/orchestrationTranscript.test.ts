@@ -3688,6 +3688,91 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("merges finished-state widgets across multiple assistant messages in one turn when no boundary splits the response", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-multi-assistant-single-phase");
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [
+        {
+          id: EventId.makeUnsafe("activity-runtime-warning-between-assistant-messages"),
+          tone: "info",
+          kind: "runtime.warning",
+          summary: "Runtime warning",
+          payload: {
+            detail: "C:\\Projects\\demo\\lorem.md",
+          },
+          turnId,
+          sequence: 1,
+          createdAt: "2026-03-11T09:00:04.000Z",
+        },
+      ],
+      messages: [
+        {
+          id: MessageId.makeUnsafe("assistant-message-before-warning"),
+          role: "assistant",
+          text: "Creating the markdown file.",
+          attachments: [],
+          turnId,
+          streaming: false,
+          createdAt: "2026-03-11T09:00:01.000Z",
+          updatedAt: "2026-03-11T09:00:03.000Z",
+        },
+        {
+          id: MessageId.makeUnsafe("assistant-message-after-warning"),
+          role: "assistant",
+          text: "Done - created lorem.md.",
+          attachments: [],
+          turnId,
+          streaming: false,
+          createdAt: "2026-03-11T09:00:05.000Z",
+          updatedAt: "2026-03-11T09:00:05.200Z",
+        },
+      ],
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-03-11T09:00:00.000Z",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        completedAt: "2026-03-11T09:00:05.200Z",
+        assistantMessageId: MessageId.makeUnsafe("assistant-message-after-warning"),
+      },
+      session: {
+        ...thread!.session!,
+        status: "ready",
+        activeTurnId: null,
+        updatedAt: "2026-03-11T09:00:05.200Z",
+      },
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Creating the markdown file.",
+        streaming: false,
+      },
+      {
+        type: "status",
+        text: "Runtime warning: C:\\Projects\\demo\\lorem.md",
+      },
+      {
+        type: "assistant-text",
+        text: "Done - created lorem.md.",
+        streaming: false,
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        finishedAt: "2026-03-11T09:00:05.200Z",
+      },
+    ]);
+  });
+
   it("resets the running timer to the resumed assistant output after a resolved ask_user boundary", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];

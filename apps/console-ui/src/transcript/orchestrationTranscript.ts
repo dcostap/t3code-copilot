@@ -55,6 +55,14 @@ interface TimelineEntry {
   readonly activity?: OrchestrationThreadActivity;
 }
 
+interface AssistantPhaseEntryState {
+  readonly id: string;
+  readonly turnId: string | null;
+  readonly entryIds: string[];
+  readonly finishedEntries: TimelineEntry[];
+  pendingClose: boolean;
+}
+
 interface UserInputQuestionBlock {
   id?: string;
   header: string;
@@ -1307,6 +1315,187 @@ function compareByCreatedAt(left: TimelineEntry, right: TimelineEntry) {
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
+function isFinishedStateEntry(entry: TimelineEntry) {
+  return entry.blocks?.every((block) => block.type === "finished-state") ?? false;
+}
+
+function isAssistantPhaseBoundaryEntry(entry: TimelineEntry) {
+  return entry.source === "activity" && entry.activity ? isAssistantBoundaryActivity(entry.activity) : false;
+}
+
+function isAssistantPhaseContentEntry(entry: TimelineEntry) {
+  return entry.source === "plan" || isVisibleOutputEntry(entry);
+}
+
+function isUserMessageEntry(entry: TimelineEntry) {
+  return entry.source === "message" && (entry.blocks?.some((block) => block.type === "user-message") ?? false);
+}
+
+function resolveAssistantPhaseTurnId(
+  entry: TimelineEntry,
+  currentPhase: AssistantPhaseEntryState | null,
+  options: {
+    readonly allowCurrentPhaseFallback: boolean;
+  },
+) {
+  if (entry.turnId !== undefined && entry.turnId !== null) {
+    return entry.turnId;
+  }
+
+  if (options.allowCurrentPhaseFallback && currentPhase?.turnId) {
+    return currentPhase.turnId;
+  }
+
+  return null;
+}
+
+function mergeAssistantPhaseFinishedEntry(
+  phase: AssistantPhaseEntryState,
+): TimelineEntry | null {
+  const finishedBlocks = phase.finishedEntries.flatMap((entry) => entry.blocks ?? [])
+    .filter((block): block is FinishedStateBlock => block.type === "finished-state");
+  if (finishedBlocks.length === 0) {
+    return null;
+  }
+
+  let startedAt = finishedBlocks[0]!.startedAt;
+  let finishedAt = finishedBlocks[0]!.finishedAt;
+
+  for (const block of finishedBlocks.slice(1)) {
+    if (block.startedAt.localeCompare(startedAt) < 0) {
+      startedAt = block.startedAt;
+    }
+    if (block.finishedAt.localeCompare(finishedAt) > 0) {
+      finishedAt = block.finishedAt;
+    }
+  }
+
+  return {
+    id: `phase:${phase.id}:finished`,
+    createdAt: finishedAt,
+    source: "message",
+    ...(phase.turnId !== null ? { turnId: phase.turnId } : {}),
+    blocks: [createFinishedStateBlock(startedAt, finishedAt)],
+  };
+}
+
+function normalizeAssistantPhaseEntries(
+  thread: OrchestrationThread,
+  entries: ReadonlyArray<TimelineEntry>,
+): TimelineEntry[] {
+  const phases: AssistantPhaseEntryState[] = [];
+  const phaseIdByEntryId = new Map<string, string>();
+  let currentPhase: AssistantPhaseEntryState | null = null;
+  let nextPhaseIndex = 0;
+
+  const createPhase = (turnId: string | null) => {
+    const phase: AssistantPhaseEntryState = {
+      id: `${turnId ?? "none"}:${nextPhaseIndex}`,
+      turnId,
+      entryIds: [],
+      finishedEntries: [],
+      pendingClose: false,
+    };
+    nextPhaseIndex += 1;
+    phases.push(phase);
+    return phase;
+  };
+
+  const getOrCreateCurrentPhase = (turnId: string | null) => {
+    if (!currentPhase) {
+      currentPhase = createPhase(turnId);
+    }
+    return currentPhase;
+  };
+
+  const resetPhaseIfClosed = () => {
+    if (currentPhase?.pendingClose) {
+      currentPhase.pendingClose = false;
+      currentPhase = null;
+    }
+  };
+
+  for (const entry of entries) {
+    const finishedStateEntry = isFinishedStateEntry(entry);
+    const boundaryEntry = isAssistantPhaseBoundaryEntry(entry);
+    const phaseContentEntry = isAssistantPhaseContentEntry(entry);
+    const boundaryCloseEntry =
+      entry.source === "activity" && entry.activity ? closesAssistantBoundaryActivity(entry.activity) : false;
+    const phaseTurnId = resolveAssistantPhaseTurnId(entry, currentPhase, {
+      allowCurrentPhaseFallback: finishedStateEntry || boundaryEntry || boundaryCloseEntry,
+    });
+
+    if (!finishedStateEntry) {
+      if (shouldResetAssistantPhaseForEntry(currentPhase, phaseTurnId)) {
+        currentPhase = null;
+      }
+
+      if (!phaseContentEntry && !boundaryEntry && (boundaryCloseEntry || isUserMessageEntry(entry))) {
+        currentPhase = null;
+      } else {
+        resetPhaseIfClosed();
+      }
+    }
+
+    if (finishedStateEntry) {
+      const phase = getOrCreateCurrentPhase(phaseTurnId);
+      phase.finishedEntries.push(entry);
+      continue;
+    }
+
+    if (boundaryEntry) {
+      const phase = getOrCreateCurrentPhase(phaseTurnId);
+      phase.entryIds.push(entry.id);
+      phaseIdByEntryId.set(entry.id, phase.id);
+      phase.pendingClose = true;
+      continue;
+    }
+
+    if (phaseContentEntry) {
+      const phase = getOrCreateCurrentPhase(phaseTurnId);
+      phase.entryIds.push(entry.id);
+      phaseIdByEntryId.set(entry.id, phase.id);
+    }
+  }
+
+  const finishedEntryByPhaseId = new Map<string, TimelineEntry>();
+  const lastEntryIdByPhaseId = new Map<string, string>();
+  for (const phase of phases) {
+    const finishedEntry = mergeAssistantPhaseFinishedEntry(phase);
+    if (finishedEntry) {
+      finishedEntryByPhaseId.set(phase.id, finishedEntry);
+    }
+    const lastEntryId = phase.entryIds.at(-1);
+    if (lastEntryId) {
+      lastEntryIdByPhaseId.set(phase.id, lastEntryId);
+    }
+  }
+
+  const normalizedEntries: TimelineEntry[] = [];
+  for (const entry of entries) {
+    if (isFinishedStateEntry(entry)) {
+      continue;
+    }
+    normalizedEntries.push(entry);
+
+    const phaseId = phaseIdByEntryId.get(entry.id);
+    if (!phaseId) {
+      continue;
+    }
+
+    if (lastEntryIdByPhaseId.get(phaseId) !== entry.id) {
+      continue;
+    }
+
+    const finishedEntry = finishedEntryByPhaseId.get(phaseId);
+    if (finishedEntry) {
+      normalizedEntries.push(finishedEntry);
+    }
+  }
+
+  return normalizedEntries;
+}
+
 function isAssistantBoundaryActivity(activity: OrchestrationThreadActivity) {
   return activity.kind === "user-input.requested" || activity.kind === "approval.requested";
 }
@@ -1321,8 +1510,19 @@ function closesAssistantBoundaryActivity(activity: OrchestrationThreadActivity) 
     )
     || (
       activity.kind === "provider.approval.respond.failed"
-      && asString(payload?.detail)?.includes("Unknown pending permission request")
+      && (asString(payload?.detail)?.includes("Unknown pending permission request") ?? false)
     );
+}
+
+function shouldResetAssistantPhaseForEntry(
+  currentPhase: AssistantPhaseEntryState | null,
+  phaseTurnId: string | null,
+) {
+  if (!currentPhase) {
+    return false;
+  }
+
+  return !currentPhase.pendingClose && phaseTurnId !== currentPhase.turnId;
 }
 
 function buildAssistantBoundaryMap(
@@ -2094,13 +2294,16 @@ export function threadToTranscriptBlocks(
     }
   };
 
-  const sortedEntries = appendFinishedStateToLatestTurnEntries(
+  const sortedEntries = normalizeAssistantPhaseEntries(
     thread,
-    appendPendingBoundaryFinishedStateToLatestTurnEntries(
+    appendFinishedStateToLatestTurnEntries(
       thread,
-      entries.toSorted(compareByCreatedAt),
+      appendPendingBoundaryFinishedStateToLatestTurnEntries(
+        thread,
+        entries.toSorted(compareByCreatedAt),
+      ).toSorted(compareByCreatedAt),
     ).toSorted(compareByCreatedAt),
-  ).toSorted(compareByCreatedAt);
+  );
 
   for (const entry of sortedEntries) {
     if (entry.source === "activity" && entry.activity) {
