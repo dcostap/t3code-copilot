@@ -464,6 +464,7 @@ describe("getThreadStatus", () => {
     )).toEqual({
       tone: "waiting",
       label: "Waiting for input 10m",
+      timingLabel: "10m",
     });
   });
 
@@ -519,6 +520,7 @@ describe("getThreadStatus", () => {
     )).toEqual({
       tone: "waiting",
       label: "Asking user 10m",
+      timingLabel: "10m",
     });
   });
 

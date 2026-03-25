@@ -135,8 +135,8 @@ function SidebarNewThreadIcon({ className }: { className?: string }) {
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <path d="M12 20h9" />
-      <path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z" />
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
     </svg>
   );
 }
@@ -234,7 +234,7 @@ interface SidebarThreadEntry {
   readonly thread: OrchestrationThread;
   readonly status: ThreadStatusDescriptor;
   readonly tooltip: string;
-  readonly sidebarLabel: string;
+  readonly sidebarLabel: string | null;
   readonly ageMs: number;
 }
 
@@ -665,9 +665,11 @@ export function getThreadStatus(
   if (pendingUserInputStartedAt) {
     const waitingStartedAt = parseTimestampMs(pendingUserInputStartedAt);
     const label = deriveRunningThreadIntentLabel(thread) ?? "Waiting for input";
+    const timingLabel = formatElapsedCompact(nowMs - waitingStartedAt);
     return {
       tone: "waiting",
-      label: `${label} ${formatElapsedCompact(nowMs - waitingStartedAt)}`,
+      label: `${label} ${timingLabel}`,
+      timingLabel,
     };
   }
 
@@ -689,9 +691,11 @@ export function getThreadStatus(
     thread.latestTurn?.completedAt ?? thread.latestTurn?.startedAt ?? thread.updatedAt,
   );
   if (Number.isFinite(waitingFrom)) {
+    const timingLabel = formatElapsedCompact(nowMs - waitingFrom);
     return {
       tone: "waiting",
-      label: `idling ${formatElapsedCompact(nowMs - waitingFrom)}`,
+      label: `idling ${timingLabel}`,
+      timingLabel,
     };
   }
 
@@ -3032,14 +3036,16 @@ export function App() {
                     pendingUserInput?.createdAt ?? null,
                   );
                   const ageMs = getThreadAgeMs(thread, nowIso);
-                  return {
-                    thread,
-                    status,
-                    tooltip: getThreadFirstPrompt(thread),
-                    sidebarLabel: status.label,
-                    ageMs,
-                  };
-                });
+                    return {
+                      thread,
+                      status,
+                      tooltip: getThreadFirstPrompt(thread),
+                      sidebarLabel: status.tone === "working" || status.tone === "error"
+                        ? (status.animatedLabel ?? status.label)
+                        : null,
+                      ageMs,
+                    };
+                  });
                 const visibleThreadEntries = expandedSidebarThreads
                   ? threadEntries
                   : threadEntries
@@ -3163,18 +3169,15 @@ export function App() {
                                       {status.tone === "working" ? (
                                         <span className="project-thread__workingSpinner" aria-hidden="true" />
                                       ) : null}
-                                      {status.tone === "working" ? (
+                                      {status.tone === "working" && sidebarLabel ? (
                                         <span className={statusClassName}>
-                                          <AnimatedLoadingText
-                                            text={status.animatedLabel ?? sidebarLabel}
-                                            className="project-thread__statusAnimatedLabel"
-                                          />
+                                          <AnimatedLoadingText text={sidebarLabel} className="project-thread__statusAnimatedLabel" />
                                         </span>
-                                      ) : (
+                                      ) : sidebarLabel ? (
                                         <span className={statusClassName}>
                                           {sidebarLabel}
                                         </span>
-                                      )}
+                                      ) : null}
                                     </span>
                                     {status.tone === "working" ? (
                                       <AnimatedLoadingText text={thread.title} className={titleClassName} />
