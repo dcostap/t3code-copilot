@@ -1694,10 +1694,10 @@ body {
 
 .project-main__content {
   display: flex;
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  gap: 10px;
   overflow: hidden;
 }
 
@@ -2373,46 +2373,61 @@ body {
 }
 
 .project-split-dropzone {
-  position: relative;
+  position: absolute;
+  top: 0;
+  right: 6px;
+  bottom: 0;
+  z-index: 2;
   display: flex;
-  flex: 0 0 50px;
   align-items: stretch;
-  width: 50px;
-  min-width: 50px;
+  width: 0;
+  min-width: 0;
   min-height: 0;
-  margin-right: 6px;
-  border-left: 1px solid rgba(76, 86, 96, 0.2);
-  background: linear-gradient(180deg, rgba(12, 16, 20, 0.085), rgba(12, 16, 20, 0.015));
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(10px);
+  border-left: 0 solid rgba(76, 86, 96, 0.2);
+  background: linear-gradient(180deg, rgba(17, 24, 31, 0.46), rgba(10, 14, 18, 0.24));
+  box-shadow: inset 0 0 0 1px rgba(115, 136, 154, 0.08);
+  backdrop-filter: blur(12px);
   overflow: hidden;
   transition:
     width 110ms ease,
     min-width 110ms ease,
-    flex-basis 110ms ease,
+    opacity 110ms ease,
+    transform 110ms ease,
+    border-left-width 110ms ease,
     border-color 110ms ease,
     background-color 110ms ease,
     box-shadow 110ms ease;
 }
 
 .project-split-dropzone--drag-active {
-  flex-basis: 58px;
   width: 58px;
   min-width: 58px;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+  border-left-width: 1px;
+  border-left-color: rgba(114, 131, 145, 0.34);
 }
 
 .project-split-dropzone--eligible {
   border-left-color: rgba(109, 153, 194, 0.28);
-  background: linear-gradient(180deg, rgba(28, 40, 52, 0.16), rgba(9, 13, 17, 0.03));
+  background: linear-gradient(180deg, rgba(28, 40, 52, 0.34), rgba(9, 13, 17, 0.16));
+  box-shadow:
+    inset 0 0 0 1px rgba(132, 176, 214, 0.12),
+    0 0 16px rgba(53, 94, 129, 0.08);
 }
 
 .project-split-dropzone--drag-over {
-  flex-basis: 74px;
   width: 74px;
   min-width: 74px;
   border-left-color: rgba(165, 217, 255, 0.45);
-  background: linear-gradient(180deg, rgba(52, 89, 123, 0.22), rgba(16, 24, 31, 0.08));
+  background: linear-gradient(180deg, rgba(52, 89, 123, 0.46), rgba(16, 24, 31, 0.22));
   box-shadow:
-    inset 0 0 0 1px rgba(165, 217, 255, 0.16),
-    0 0 18px rgba(90, 153, 209, 0.08);
+    inset 0 0 0 1px rgba(165, 217, 255, 0.22),
+    0 0 24px rgba(90, 153, 209, 0.14);
 }
 
 .project-split-dropzone--limit-reached {
@@ -2425,6 +2440,7 @@ body {
   flex: 1 1 auto;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   min-height: 0;
   color: rgba(109, 123, 136, 0.88);
 }

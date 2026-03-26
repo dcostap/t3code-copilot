@@ -23,8 +23,10 @@ import {
   parsePersistedUnreadThreadIds,
   reconcileUnreadThreadIds,
   reorderProjectIds,
+  resolvePaletteShortcutTransition,
   resolveProjectSelectionAfterArchive,
   resolveManagedThreadRowSelection,
+  shouldShowThreadSplitDropZone,
   shouldBlockGlobalPromptTypingForSelection,
   shouldActivateNextTabShortcut,
   shouldOpenPaneSearchShortcut,
@@ -289,6 +291,17 @@ describe("getThreadSplitDropZoneClassName", () => {
   });
 });
 
+describe("shouldShowThreadSplitDropZone", () => {
+  it("hides the split zone when no thread is being dragged", () => {
+    expect(shouldShowThreadSplitDropZone(null)).toBe(false);
+  });
+
+  it("shows the split zone only while a thread drag is active", () => {
+    const thread = buildTestSnapshot().threads[0]!;
+    expect(shouldShowThreadSplitDropZone(thread.id)).toBe(true);
+  });
+});
+
 describe("shouldSuppressTabFocusNavigation", () => {
   it("suppresses plain tab navigation", () => {
     expect(shouldSuppressTabFocusNavigation({
@@ -350,6 +363,63 @@ describe("isPaletteThreadShortcut", () => {
       metaKey: false,
       altKey: false,
     })).toBe(false);
+  });
+});
+
+describe("resolvePaletteShortcutTransition", () => {
+  it("toggles the command palette closed when ctrl+shift+a is pressed while open", () => {
+    expect(resolvePaletteShortcutTransition({
+      shortcut: "toggle",
+      paletteOpen: true,
+      paletteQuery: "",
+    })).toEqual({
+      open: false,
+      query: "",
+    });
+  });
+
+  it("opens the command palette in command mode when ctrl+shift+a is pressed while closed", () => {
+    expect(resolvePaletteShortcutTransition({
+      shortcut: "toggle",
+      paletteOpen: false,
+      paletteQuery: "",
+    })).toEqual({
+      open: true,
+      query: "",
+    });
+  });
+
+  it("switches an open thread picker back into command mode for ctrl+shift+a", () => {
+    expect(resolvePaletteShortcutTransition({
+      shortcut: "toggle",
+      paletteOpen: true,
+      paletteQuery: "@bug",
+    })).toEqual({
+      open: true,
+      query: "",
+    });
+  });
+
+  it("switches an open palette into thread picker mode for ctrl+e", () => {
+    expect(resolvePaletteShortcutTransition({
+      shortcut: "thread",
+      paletteOpen: true,
+      paletteQuery: "provider",
+    })).toEqual({
+      open: true,
+      query: "@",
+    });
+  });
+
+  it("opens the thread picker when ctrl+e is pressed while the palette is closed", () => {
+    expect(resolvePaletteShortcutTransition({
+      shortcut: "thread",
+      paletteOpen: false,
+      paletteQuery: "",
+    })).toEqual({
+      open: true,
+      query: "@",
+    });
   });
 });
 

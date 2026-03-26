@@ -45,6 +45,7 @@ import {
   hasThreadPickerSearchQuery,
   isThreadPickerQuery,
   stripThreadPickerQueryPrefix,
+  THREAD_PICKER_QUERY_PREFIX,
 } from "./commandPaletteThreads";
 import {
   findAppCommandShortcutByActionId,
@@ -385,6 +386,27 @@ export function isPaletteThreadShortcut(
   event: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "metaKey" | "altKey">,
 ) {
   return event.ctrlKey && !event.shiftKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "e";
+}
+
+export function resolvePaletteShortcutTransition(input: {
+  readonly shortcut: "toggle" | "thread";
+  readonly paletteOpen: boolean;
+  readonly paletteQuery: string;
+}) {
+  if (input.shortcut === "toggle") {
+    if (!input.paletteOpen) {
+      return { open: true, query: "" };
+    }
+
+    return isThreadPickerQuery(input.paletteQuery)
+      ? { open: true, query: "" }
+      : { open: false, query: "" };
+  }
+
+  return {
+    open: true,
+    query: THREAD_PICKER_QUERY_PREFIX,
+  };
 }
 
 export function shouldOpenPaneSearchShortcut(
@@ -889,6 +911,10 @@ export function getThreadSplitDropZoneClassName(input: {
     input.isDragOver ? "project-split-dropzone--drag-over" : null,
     input.isLimitReached ? "project-split-dropzone--limit-reached" : null,
   ].filter((className): className is string => className !== null).join(" ");
+}
+
+export function shouldShowThreadSplitDropZone(draggedThreadId: string | null) {
+  return draggedThreadId !== null;
 }
 
 function getThreadAgeMs(thread: OrchestrationThread, nowIso: string) {
@@ -2824,21 +2850,27 @@ export function App() {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isPaletteToggleShortcut(event)) {
         event.preventDefault();
-        if (paletteOpen) {
-          closePalette();
+        const nextPaletteState = resolvePaletteShortcutTransition({
+          shortcut: "toggle",
+          paletteOpen,
+          paletteQuery,
+        });
+        if (nextPaletteState.open) {
+          openPalette(nextPaletteState.query);
         } else {
-          openPalette();
+          closePalette();
         }
         return;
       }
 
       if (isPaletteThreadShortcut(event)) {
         event.preventDefault();
-        if (paletteOpen) {
-          closePalette();
-        } else {
-          openPalette("@");
-        }
+        const nextPaletteState = resolvePaletteShortcutTransition({
+          shortcut: "thread",
+          paletteOpen,
+          paletteQuery,
+        });
+        openPalette(nextPaletteState.query);
         return;
       }
 
@@ -2934,12 +2966,13 @@ export function App() {
     activeLayout,
     activePaneId,
     activeProjectForShortcuts,
-    closePalette,
-    hasBlockingModal,
-    openPalette,
-    paletteOpen,
-    resolveCommandsForPane,
-  ]);
+      closePalette,
+      hasBlockingModal,
+      openPalette,
+      paletteOpen,
+      paletteQuery,
+      resolveCommandsForPane,
+    ]);
 
   const getPaneFooterText = useCallback((paneView: PaneView) => {
     if (paneView.isActive && submitError) {
@@ -3049,9 +3082,10 @@ export function App() {
   const splitZoneClassName = getThreadSplitDropZoneClassName({
     isDragActive: draggedThreadId !== null,
     isDropEligible: splitZoneDropAllowed,
-    isDragOver: dragOverSplitZone,
+    isDragOver: dragOverSplitZone && splitZoneDropAllowed,
     isLimitReached: splitZoneLimitReached,
   });
+  const showSplitZone = shouldShowThreadSplitDropZone(draggedThreadId);
   const activePaneGridClassName = activeTab
     ? `project-pane-grid project-pane-grid--${Math.min(Math.max(activeTab.paneIds.length, 1), MAX_TAB_PANES)}`
     : "project-pane-grid project-pane-grid--1";
@@ -3507,14 +3541,15 @@ export function App() {
                 <aside
                   className={splitZoneClassName}
                   aria-label="Drop thread here to add a split pane"
+                  aria-hidden={!showSplitZone}
                   onDragOver={(event: ReactDragEvent<HTMLElement>) => {
+                    setDragOverPaneId(null);
+                    setDragOverSplitZone(true);
                     if (!splitZoneDropAllowed) {
                       return;
                     }
                     event.preventDefault();
                     event.dataTransfer.dropEffect = "move";
-                    setDragOverPaneId(null);
-                    setDragOverSplitZone(true);
                   }}
                   onDragLeave={(event: ReactDragEvent<HTMLElement>) => {
                     const nextTarget = event.relatedTarget;
@@ -3534,8 +3569,8 @@ export function App() {
                     setDraggedThreadId(null);
                   }}
                 >
-                  <div className="project-split-dropzone__rail" aria-hidden="true">
-                    <span className="project-split-dropzone__glyph">+</span>
+                  <div className="project-split-dropzone__rail">
+                    <span className="project-split-dropzone__glyph" aria-hidden="true">+</span>
                   </div>
                 </aside>
               </div>
