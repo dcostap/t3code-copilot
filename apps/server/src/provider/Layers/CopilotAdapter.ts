@@ -45,7 +45,7 @@ import {
   recordTurnUsage,
   type CopilotTurnTrackingState,
 } from "./copilotTurnTracking.ts";
-import { loadCopilotMcpServers } from "./copilotMcpServers.ts";
+import { loadCopilotMcpServersWithDiagnostics } from "./copilotMcpServers.ts";
 import {
   normalizeCopilotCliPathOverride,
   resolveBundledCopilotCliPath,
@@ -419,6 +419,9 @@ function hasLikelyFileMutationShape(value: unknown): boolean {
       "edits",
       "replacement",
       "replacements",
+      "old_str",
+      "new_str",
+      "file_text",
       "newText",
       "oldText",
       "content",
@@ -429,6 +432,46 @@ function hasLikelyFileMutationShape(value: unknown): boolean {
     }
     return ["arguments", "result", "input", "data", "changes", "files", "edits", "patch"]
       .some((key) => key in record && visit(record[key], depth + 1));
+  };
+
+  return visit(value, 0);
+}
+
+function extractUnifiedDiffText(value: unknown): string | undefined {
+  const visit = (candidate: unknown, depth: number): string | undefined => {
+    if (depth > 4 || candidate == null) {
+      return undefined;
+    }
+    if (typeof candidate === "string") {
+      const normalized = candidate.replace(/\r\n/g, "\n").trim();
+      if (!normalized) {
+        return undefined;
+      }
+      return normalized.includes("diff --git ") ? normalized : undefined;
+    }
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) {
+        const diff = visit(entry, depth + 1);
+        if (diff) {
+          return diff;
+        }
+      }
+      return undefined;
+    }
+    const record = asRecord(candidate);
+    if (!record) {
+      return undefined;
+    }
+    for (const key of ["diff", "patch", "detailedContent", "content", "result", "arguments", "input", "data", "changes", "files", "edits"]) {
+      if (!(key in record)) {
+        continue;
+      }
+      const diff = visit(record[key], depth + 1);
+      if (diff) {
+        return diff;
+      }
+    }
+    return undefined;
   };
 
   return visit(value, 0);
@@ -520,12 +563,17 @@ function buildCanonicalFileChangeData(input: {
   readonly changedFiles: ReadonlyArray<string>;
   readonly source: unknown;
 }) {
+  const unifiedDiff =
+    input.changedFiles.length === 1 ? extractUnifiedDiffText(input.source) : undefined;
   return {
     item: {
       id: input.toolCallId,
       type: "fileChange",
       status: input.status,
-      changes: input.changedFiles.map((path) => ({ path })),
+      changes: input.changedFiles.map((path) => ({
+        path,
+        ...(unifiedDiff ? { diff: unifiedDiff } : {}),
+      })),
     },
     source: input.source,
   };
@@ -539,6 +587,34 @@ function toolDetailFromEvent(data: {
   return trimToUndefined(
     [data.mcpServerName, data.mcpToolName ?? data.toolName].filter(Boolean).join(" / "),
   );
+}
+
+function toolDisplayTitleFromEvent(data: {
+  readonly toolName?: string;
+  readonly mcpToolName?: string;
+}) {
+  return trimToUndefined(data.mcpToolName ?? data.toolName);
+}
+
+function rememberAssistantToolRequestTitles(
+  record: ActiveCopilotSession,
+  data: unknown,
+) {
+  const eventRecord = asRecord(data);
+  const toolRequests = Array.isArray(eventRecord?.toolRequests) ? eventRecord.toolRequests : [];
+  for (const entry of toolRequests) {
+    const toolRequest = asRecord(entry);
+    const toolCallId = normalizeString(toolRequest?.toolCallId);
+    const title =
+      normalizeString(toolRequest?.toolTitle)
+      ?? normalizeString(toolRequest?.mcpToolName)
+      ?? normalizeString(toolRequest?.toolName)
+      ?? normalizeString(toolRequest?.name);
+    if (!toolCallId || !title || record.toolTitlesByCallId.has(toolCallId)) {
+      continue;
+    }
+    record.toolTitlesByCallId.set(toolCallId, title);
+  }
 }
 
 function terminalResultFromToolCompleteEvent(
@@ -1107,6 +1183,10 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
         case "tool.execution_start": {
           const itemType = itemTypeFromToolEvent(event);
           const changedFiles = extractChangedFiles(event.data.arguments);
+          const title =
+            record.toolTitlesByCallId.get(event.data.toolCallId)
+            ?? toolDisplayTitleFromEvent(event.data)
+            ?? "Tool call";
           return [
             {
               ...base({ itemId: event.data.toolCallId }),
@@ -1114,7 +1194,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
               payload: {
                 itemType,
                 status: "inProgress",
-                title: event.data.toolName ?? "Tool call",
+                title,
                 ...(toolDetailFromEvent(event.data)
                   ? { detail: toolDetailFromEvent(event.data) }
                   : {}),
@@ -1493,8 +1573,14 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
       if (event.type === "session.workspace_file_changed") {
         rememberWorkspaceFileChange(record, event.data.path);
       }
-      if (event.type === "tool.execution_start" && trimToUndefined(event.data.toolName)) {
-        record.toolTitlesByCallId.set(event.data.toolCallId, trimToUndefined(event.data.toolName)!);
+      if (event.type === "assistant.message") {
+        rememberAssistantToolRequestTitles(record, event.data);
+      }
+      if (event.type === "tool.execution_start") {
+        const title = toolDisplayTitleFromEvent(event.data);
+        if (title && !record.toolTitlesByCallId.has(event.data.toolCallId)) {
+          record.toolTitlesByCallId.set(event.data.toolCallId, title);
+        }
       }
       if (event.type === "tool.execution_start") {
         const itemType = itemTypeFromToolEvent(event);
@@ -1598,8 +1684,9 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
           normalizeCopilotCliPathOverride(input.providerOptions?.copilot?.cliPath) ??
           resolveBundledCopilotCliPath();
         const configDir = trimToUndefined(input.providerOptions?.copilot?.configDir);
-        const mcpServers = yield* Effect.tryPromise({
-          try: () => loadCopilotMcpServers(configDir),
+        const sdkCliPath = shouldPassCopilotCliPathToSdk(cliPath) ? cliPath : undefined;
+        const mcpLoadResult = yield* Effect.tryPromise({
+          try: () => loadCopilotMcpServersWithDiagnostics(configDir),
           catch: (cause) =>
             new ProviderAdapterProcessError({
               provider: PROVIDER,
@@ -1608,9 +1695,19 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
               cause,
             }),
         });
+        const mcpServers = mcpLoadResult.servers;
         const resumeSessionId = extractResumeSessionId(input.resumeCursor);
+        yield* Effect.logInfo("GitHub Copilot session bootstrap resolved", {
+          provider: PROVIDER,
+          threadId: input.threadId,
+          mcpConfigPath: mcpLoadResult.configPath,
+          loadedMcpServerNames: mcpLoadResult.loadedServerNames,
+          ignoredMcpServerNames: mcpLoadResult.ignoredServerNames,
+          resolvedCliPath: cliPath,
+          passedCliPathToSdk: sdkCliPath !== undefined,
+        });
         const clientOptions: CopilotClientOptions = {
-          ...(shouldPassCopilotCliPathToSdk(cliPath) ? { cliPath } : {}),
+          ...(sdkCliPath ? { cliPath: sdkCliPath } : {}),
           ...(input.cwd ? { cwd: input.cwd } : {}),
           logLevel: "error",
         };
@@ -1670,7 +1767,20 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
               detail: toMessage(cause, "Failed to start GitHub Copilot session."),
               cause,
             }),
-        });
+        }).pipe(
+          Effect.tapError((cause) =>
+            Effect.logWarning("GitHub Copilot session start failed", {
+              provider: PROVIDER,
+              threadId: input.threadId,
+              mcpConfigPath: mcpLoadResult.configPath,
+              loadedMcpServerNames: mcpLoadResult.loadedServerNames,
+              ignoredMcpServerNames: mcpLoadResult.ignoredServerNames,
+              resolvedCliPath: cliPath,
+              passedCliPathToSdk: sdkCliPath !== undefined,
+              cause,
+            }),
+          ),
+        );
 
         const record = createSessionRecord({
           threadId: input.threadId,

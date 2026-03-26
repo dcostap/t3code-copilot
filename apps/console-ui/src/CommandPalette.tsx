@@ -138,16 +138,13 @@ export function CommandPalette({
                     rowRefs.current[index] = element;
                   }}
                   type="button"
-                  className={`palette-row${index === selectedIndex ? " palette-row--active" : ""}`}
-                  tabIndex={-1}
-                  role="option"
-                  aria-selected={index === selectedIndex}
-                  onMouseEnter={() => {
-                    onSelectedIndexChange(index);
-                  }}
-                  onClick={() => {
-                    onRun(cmd);
-                  }}
+                   className={`palette-row${index === selectedIndex ? " palette-row--active" : ""}`}
+                   tabIndex={-1}
+                   role="option"
+                   aria-selected={index === selectedIndex}
+                   onClick={() => {
+                     onRun(cmd);
+                   }}
                 >
                   <span className="palette-marker" aria-hidden="true">{index === selectedIndex ? "›" : ""}</span>
                   <span className="palette-rowBody">

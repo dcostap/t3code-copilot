@@ -4,6 +4,7 @@ import {
   type OrchestrationThread,
   type ProviderInteractionMode,
   type ProviderKind,
+  type ProviderModelOptions,
 } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -13,6 +14,7 @@ export interface ConsolePaneSetup {
   readonly type: "new-thread";
   readonly selectedProvider: ProviderKind;
   readonly selectedModel: string;
+  readonly selectedModelOptions: ProviderModelOptions | undefined;
   readonly createdAt: string;
   readonly interactionMode: ProviderInteractionMode;
   readonly branch: string | null;
@@ -55,6 +57,7 @@ export interface ConsoleProjectLayoutsState {
   readonly layoutsByProjectId: Record<string, ConsoleProjectLayout>;
   readonly lastChosenProvider: ProviderKind;
   readonly lastChosenModelByProvider: Record<ProviderKind, string>;
+  readonly lastChosenModelOptionsByProvider: Record<ProviderKind, ProviderModelOptions | undefined>;
 }
 
 export interface ConsoleProjectView {
@@ -80,6 +83,7 @@ export interface ConsoleProjectLayoutsModel {
   readonly activePaneId: string | null;
   readonly lastChosenProvider: ProviderKind;
   readonly lastChosenModelByProvider: Record<ProviderKind, string>;
+  readonly lastChosenModelOptionsByProvider: Record<ProviderKind, ProviderModelOptions | undefined>;
   activateProject(projectId: OrchestrationProject["id"]): void;
   clearActiveProject(): void;
   toggleProjectCollapsed(projectId: OrchestrationProject["id"]): void;
@@ -96,6 +100,11 @@ export interface ConsoleProjectLayoutsModel {
     projectId: OrchestrationProject["id"];
     paneId: string;
   }): { tabId: string; paneId: string } | null;
+  replacePaneWithFreshDraft(
+    projectId: OrchestrationProject["id"],
+    paneId: string,
+    seed?: Pick<ConsolePaneSetup, "selectedProvider" | "selectedModel" | "selectedModelOptions">,
+  ): void;
   closePane(projectId: OrchestrationProject["id"], paneId: string): void;
   closeTab(projectId: OrchestrationProject["id"], tabId: string): void;
   updateDraftPane(input: {
@@ -112,13 +121,14 @@ export interface ConsoleProjectLayoutsModel {
     paneId: string;
     threadId: OrchestrationThread["id"];
   }): boolean;
-  rememberProviderModel(provider: ProviderKind, model: string): void;
+  rememberProviderModel(provider: ProviderKind, model: string, modelOptions?: ProviderModelOptions): void;
 }
 
 interface PersistedConsolePaneSetup {
   readonly type?: unknown;
   readonly selectedProvider?: unknown;
   readonly selectedModel?: unknown;
+  readonly selectedModelOptions?: unknown;
   readonly createdAt?: unknown;
   readonly interactionMode?: unknown;
   readonly branch?: unknown;
@@ -154,6 +164,7 @@ interface PersistedConsoleProjectLayoutsState {
   readonly layoutsByProjectId?: unknown;
   readonly lastChosenProvider?: unknown;
   readonly lastChosenModelByProvider?: unknown;
+  readonly lastChosenModelOptionsByProvider?: unknown;
 }
 
 function makeId(prefix: string) {
@@ -172,11 +183,68 @@ function isInteractionMode(value: unknown): value is ProviderInteractionMode {
   return value === "default" || value === "plan";
 }
 
+function isCodexReasoningEffort(value: unknown): value is "low" | "medium" | "high" | "xhigh" {
+  return value === "low" || value === "medium" || value === "high" || value === "xhigh";
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
 function createDefaultLastChosenModelByProvider(): Record<ProviderKind, string> {
   return {
     codex: DEFAULT_MODEL_BY_PROVIDER.codex,
     copilot: DEFAULT_MODEL_BY_PROVIDER.copilot,
   };
+}
+
+function createDefaultLastChosenModelOptionsByProvider(): Record<ProviderKind, ProviderModelOptions | undefined> {
+  return {
+    codex: undefined,
+    copilot: undefined,
+  };
+}
+
+function normalizeProviderModelOptions(candidate: unknown): ProviderModelOptions | undefined {
+  const record = asRecord(candidate);
+  if (!record) {
+    return undefined;
+  }
+
+  const codexRecord = asRecord(record.codex);
+  const codex = codexRecord
+    ? {
+        ...(typeof codexRecord.fastMode === "boolean" ? { fastMode: codexRecord.fastMode } : {}),
+        ...(isCodexReasoningEffort(codexRecord.reasoningEffort)
+          ? { reasoningEffort: codexRecord.reasoningEffort }
+          : {}),
+      }
+    : {};
+  const copilotRecord = asRecord(record.copilot);
+  const copilot = copilotRecord
+    ? (isCodexReasoningEffort(copilotRecord.reasoningEffort)
+        ? { reasoningEffort: copilotRecord.reasoningEffort }
+        : {})
+    : {};
+  const next = {
+    ...(Object.keys(codex).length > 0 ? { codex } : {}),
+    ...(Object.keys(copilot).length > 0 ? { copilot } : {}),
+  };
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function normalizeProviderModelOptionsForProvider(
+  provider: ProviderKind,
+  candidate: unknown,
+): ProviderModelOptions | undefined {
+  const normalized = normalizeProviderModelOptions(candidate);
+  if (!normalized) {
+    return undefined;
+  }
+
+  return provider === "codex"
+    ? (normalized.codex ? { codex: normalized.codex } : undefined)
+    : (normalized.copilot ? { copilot: normalized.copilot } : undefined);
 }
 
 function resolveProviderModelSelection(
@@ -205,10 +273,27 @@ function resolveLastChosenModelByProvider(candidate: unknown): Record<ProviderKi
   };
 }
 
+function resolveLastChosenModelOptionsByProvider(
+  candidate: unknown,
+): Record<ProviderKind, ProviderModelOptions | undefined> {
+  const defaults = createDefaultLastChosenModelOptionsByProvider();
+  if (!candidate || typeof candidate != "object") {
+    return defaults;
+  }
+
+  const parsed = candidate as { readonly codex?: unknown; readonly copilot?: unknown };
+  return {
+    codex: normalizeProviderModelOptionsForProvider("codex", parsed.codex),
+    copilot: normalizeProviderModelOptionsForProvider("copilot", parsed.copilot),
+  };
+}
+
 function defaultPaneSetup(input?: {
   readonly selectedProvider?: ProviderKind;
   readonly selectedModel?: string;
+  readonly selectedModelOptions?: ProviderModelOptions | undefined;
   readonly fallbackModelsByProvider?: Readonly<Record<ProviderKind, string>>;
+  readonly fallbackModelOptionsByProvider?: Readonly<Record<ProviderKind, ProviderModelOptions | undefined>>;
   readonly createdAt?: string;
   readonly interactionMode?: ProviderInteractionMode;
   readonly branch?: string | null;
@@ -216,10 +301,16 @@ function defaultPaneSetup(input?: {
 }): ConsolePaneSetup {
   const selectedProvider = input?.selectedProvider ?? "codex";
   const fallbackModelsByProvider = input?.fallbackModelsByProvider ?? createDefaultLastChosenModelByProvider();
+  const fallbackModelOptionsByProvider =
+    input?.fallbackModelOptionsByProvider ?? createDefaultLastChosenModelOptionsByProvider();
   return {
     type: "new-thread",
     selectedProvider,
     selectedModel: resolveProviderModelSelection(selectedProvider, input?.selectedModel, fallbackModelsByProvider),
+    selectedModelOptions: normalizeProviderModelOptionsForProvider(
+      selectedProvider,
+      input?.selectedModelOptions ?? fallbackModelOptionsByProvider[selectedProvider],
+    ),
     createdAt: input?.createdAt ?? nowIso(),
     interactionMode: input?.interactionMode ?? "default",
     branch: input?.branch ?? null,
@@ -231,7 +322,9 @@ function createDraftPane(input?: {
   readonly id?: string;
   readonly selectedProvider?: ProviderKind;
   readonly selectedModel?: string;
+  readonly selectedModelOptions?: ProviderModelOptions | undefined;
   readonly fallbackModelsByProvider?: Readonly<Record<ProviderKind, string>>;
+  readonly fallbackModelOptionsByProvider?: Readonly<Record<ProviderKind, ProviderModelOptions | undefined>>;
   readonly createdAt?: string;
   readonly interactionMode?: ProviderInteractionMode;
   readonly branch?: string | null;
@@ -257,7 +350,9 @@ function createDraftTabRef(input?: {
   readonly paneId?: string;
   readonly selectedProvider?: ProviderKind;
   readonly selectedModel?: string;
+  readonly selectedModelOptions?: ProviderModelOptions | undefined;
   readonly fallbackModelsByProvider?: Readonly<Record<ProviderKind, string>>;
+  readonly fallbackModelOptionsByProvider?: Readonly<Record<ProviderKind, ProviderModelOptions | undefined>>;
   readonly createdAt?: string;
   readonly interactionMode?: ProviderInteractionMode;
   readonly branch?: string | null;
@@ -267,7 +362,11 @@ function createDraftTabRef(input?: {
     ...(input?.paneId ? { id: input.paneId } : {}),
     ...(input?.selectedProvider ? { selectedProvider: input.selectedProvider } : {}),
     ...(input?.selectedModel ? { selectedModel: input.selectedModel } : {}),
+    ...(input?.selectedModelOptions ? { selectedModelOptions: input.selectedModelOptions } : {}),
     ...(input?.fallbackModelsByProvider ? { fallbackModelsByProvider: input.fallbackModelsByProvider } : {}),
+    ...(input?.fallbackModelOptionsByProvider
+      ? { fallbackModelOptionsByProvider: input.fallbackModelOptionsByProvider }
+      : {}),
     ...(input?.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input?.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input?.branch !== undefined ? { branch: input.branch ?? null } : {}),
@@ -288,7 +387,9 @@ function createDraftTabRef(input?: {
 function createProjectLayout(projectId: OrchestrationProject["id"], input?: {
   readonly selectedProvider?: ProviderKind;
   readonly selectedModel?: string;
+  readonly selectedModelOptions?: ProviderModelOptions | undefined;
   readonly fallbackModelsByProvider?: Readonly<Record<ProviderKind, string>>;
+  readonly fallbackModelOptionsByProvider?: Readonly<Record<ProviderKind, ProviderModelOptions | undefined>>;
   readonly interactionMode?: ProviderInteractionMode;
   readonly branch?: string | null;
   readonly worktreePath?: string | null;
@@ -296,7 +397,11 @@ function createProjectLayout(projectId: OrchestrationProject["id"], input?: {
   const { tab, pane } = createDraftTabRef({
     ...(input?.selectedProvider ? { selectedProvider: input.selectedProvider } : {}),
     ...(input?.selectedModel ? { selectedModel: input.selectedModel } : {}),
+    ...(input?.selectedModelOptions ? { selectedModelOptions: input.selectedModelOptions } : {}),
     ...(input?.fallbackModelsByProvider ? { fallbackModelsByProvider: input.fallbackModelsByProvider } : {}),
+    ...(input?.fallbackModelOptionsByProvider
+      ? { fallbackModelOptionsByProvider: input.fallbackModelOptionsByProvider }
+      : {}),
     ...(input?.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input?.branch !== undefined ? { branch: input.branch ?? null } : {}),
     ...(input?.worktreePath !== undefined ? { worktreePath: input.worktreePath ?? null } : {}),
@@ -317,12 +422,17 @@ function normalizePaneSetup(
   candidate: PersistedConsolePaneSetup | undefined,
   fallbackProvider: ProviderKind,
   fallbackModelsByProvider: Readonly<Record<ProviderKind, string>>,
+  fallbackModelOptionsByProvider: Readonly<Record<ProviderKind, ProviderModelOptions | undefined>>,
 ): ConsolePaneSetup {
   const selectedProvider = isProviderKind(candidate?.selectedProvider) ? candidate.selectedProvider : fallbackProvider;
   return {
     type: "new-thread",
     selectedProvider,
     selectedModel: resolveProviderModelSelection(selectedProvider, candidate?.selectedModel, fallbackModelsByProvider),
+    selectedModelOptions: normalizeProviderModelOptionsForProvider(
+      selectedProvider,
+      candidate?.selectedModelOptions ?? fallbackModelOptionsByProvider[selectedProvider],
+    ),
     createdAt: typeof candidate?.createdAt == "string" && candidate.createdAt.length > 0 ? candidate.createdAt : nowIso(),
     interactionMode: isInteractionMode(candidate?.interactionMode) ? candidate.interactionMode : "default",
     branch: typeof candidate?.branch == "string" && candidate.branch.length > 0 ? candidate.branch : null,
@@ -337,6 +447,7 @@ function normalizePane(
   candidate: PersistedConsoleProjectPane,
   fallbackProvider: ProviderKind,
   fallbackModelsByProvider: Readonly<Record<ProviderKind, string>>,
+  fallbackModelOptionsByProvider: Readonly<Record<ProviderKind, ProviderModelOptions | undefined>>,
 ): ConsoleProjectPane | null {
   if (typeof candidate?.id != "string" || candidate.id.length == 0) {
     return null;
@@ -351,7 +462,7 @@ function normalizePane(
   return {
     id: candidate.id,
     kind: "draft",
-    setup: normalizePaneSetup(candidate.setup, fallbackProvider, fallbackModelsByProvider),
+    setup: normalizePaneSetup(candidate.setup, fallbackProvider, fallbackModelsByProvider, fallbackModelOptionsByProvider),
   };
 }
 
@@ -384,6 +495,7 @@ function normalizeTab(candidate: PersistedConsoleProjectTab): ConsoleProjectTab 
 
 function readPersistedState(): ConsoleProjectLayoutsState {
   const defaultLastChosenModelByProvider = createDefaultLastChosenModelByProvider();
+  const defaultLastChosenModelOptionsByProvider = createDefaultLastChosenModelOptionsByProvider();
   if (typeof window == "undefined") {
     return {
       projectOrder: [],
@@ -392,6 +504,7 @@ function readPersistedState(): ConsoleProjectLayoutsState {
       layoutsByProjectId: {},
       lastChosenProvider: "codex",
       lastChosenModelByProvider: defaultLastChosenModelByProvider,
+      lastChosenModelOptionsByProvider: defaultLastChosenModelOptionsByProvider,
     };
   }
   try {
@@ -404,11 +517,15 @@ function readPersistedState(): ConsoleProjectLayoutsState {
         layoutsByProjectId: {},
         lastChosenProvider: "codex",
         lastChosenModelByProvider: defaultLastChosenModelByProvider,
+        lastChosenModelOptionsByProvider: defaultLastChosenModelOptionsByProvider,
       };
     }
     const parsed = JSON.parse(raw) as PersistedConsoleProjectLayoutsState;
     const lastChosenProvider = isProviderKind(parsed.lastChosenProvider) ? parsed.lastChosenProvider : "codex";
     const lastChosenModelByProvider = resolveLastChosenModelByProvider(parsed.lastChosenModelByProvider);
+    const lastChosenModelOptionsByProvider = resolveLastChosenModelOptionsByProvider(
+      parsed.lastChosenModelOptionsByProvider,
+    );
     const layoutsByProjectId: Record<string, ConsoleProjectLayout> = {};
     if (parsed.layoutsByProjectId && typeof parsed.layoutsByProjectId == "object") {
       for (const [projectId, candidate] of Object.entries(parsed.layoutsByProjectId)) {
@@ -422,7 +539,12 @@ function readPersistedState(): ConsoleProjectLayoutsState {
         const panesById: Record<string, ConsoleProjectPane> = {};
         if (persistedLayout.panesById && typeof persistedLayout.panesById == "object") {
           for (const candidatePane of Object.values(persistedLayout.panesById as Record<string, PersistedConsoleProjectPane>)) {
-            const pane = normalizePane(candidatePane, lastChosenProvider, lastChosenModelByProvider);
+            const pane = normalizePane(
+              candidatePane,
+              lastChosenProvider,
+              lastChosenModelByProvider,
+              lastChosenModelOptionsByProvider,
+            );
             if (pane) {
               panesById[pane.id] = pane;
             }
@@ -470,6 +592,7 @@ function readPersistedState(): ConsoleProjectLayoutsState {
       layoutsByProjectId,
       lastChosenProvider,
       lastChosenModelByProvider,
+      lastChosenModelOptionsByProvider,
     };
   } catch {
     return {
@@ -479,6 +602,7 @@ function readPersistedState(): ConsoleProjectLayoutsState {
       layoutsByProjectId: {},
       lastChosenProvider: "codex",
       lastChosenModelByProvider: defaultLastChosenModelByProvider,
+      lastChosenModelOptionsByProvider: defaultLastChosenModelOptionsByProvider,
     };
   }
 }
@@ -492,12 +616,13 @@ function persistState(state: ConsoleProjectLayoutsState) {
     JSON.stringify({
       projectOrder: state.projectOrder,
       collapsedProjectIds: state.collapsedProjectIds,
-      activeProjectId: state.activeProjectId,
-      layoutsByProjectId: state.layoutsByProjectId,
-      lastChosenProvider: state.lastChosenProvider,
-      lastChosenModelByProvider: state.lastChosenModelByProvider,
-    }),
-  );
+        activeProjectId: state.activeProjectId,
+        layoutsByProjectId: state.layoutsByProjectId,
+        lastChosenProvider: state.lastChosenProvider,
+        lastChosenModelByProvider: state.lastChosenModelByProvider,
+        lastChosenModelOptionsByProvider: state.lastChosenModelOptionsByProvider,
+      }),
+    );
 }
 
 export function resolveThreadCwd(
@@ -557,6 +682,7 @@ function ensureActiveLayoutState(
   layout: ConsoleProjectLayout,
   fallbackProvider: ProviderKind,
   fallbackModelsByProvider: Readonly<Record<ProviderKind, string>>,
+  fallbackModelOptionsByProvider: Readonly<Record<ProviderKind, ProviderModelOptions | undefined>>,
 ): ConsoleProjectLayout {
   const seenThreadIds = new Set<string>();
   const panesById: Record<string, ConsoleProjectPane> = {};
@@ -575,7 +701,9 @@ function ensureActiveLayoutState(
             id: pane.id,
             selectedProvider: fallbackProvider,
             selectedModel: fallbackModelsByProvider[fallbackProvider],
+            selectedModelOptions: fallbackModelOptionsByProvider[fallbackProvider],
             fallbackModelsByProvider,
+            fallbackModelOptionsByProvider,
           });
           panesById[draftPane.id] = draftPane;
           nextPaneIds.push(draftPane.id);
@@ -588,7 +716,12 @@ function ensureActiveLayoutState(
       }
       const draftPane: ConsoleDraftPane = {
         ...pane,
-        setup: normalizePaneSetup(pane.setup, fallbackProvider, fallbackModelsByProvider),
+        setup: normalizePaneSetup(
+          pane.setup,
+          fallbackProvider,
+          fallbackModelsByProvider,
+          fallbackModelOptionsByProvider,
+        ),
       };
       panesById[draftPane.id] = draftPane;
       nextPaneIds.push(draftPane.id);
@@ -608,7 +741,9 @@ function ensureActiveLayoutState(
     const fresh = createProjectLayout(layout.projectId, {
       selectedProvider: fallbackProvider,
       selectedModel: fallbackModelsByProvider[fallbackProvider],
+      selectedModelOptions: fallbackModelOptionsByProvider[fallbackProvider],
       fallbackModelsByProvider,
+      fallbackModelOptionsByProvider,
     });
     return fresh;
   }
@@ -653,10 +788,13 @@ export function reconcileProjectLayoutsState(input: {
       existingLayout ?? createProjectLayout(projectId, {
         selectedProvider: input.state.lastChosenProvider,
         selectedModel: input.state.lastChosenModelByProvider[input.state.lastChosenProvider],
+        selectedModelOptions: input.state.lastChosenModelOptionsByProvider[input.state.lastChosenProvider],
         fallbackModelsByProvider: input.state.lastChosenModelByProvider,
+        fallbackModelOptionsByProvider: input.state.lastChosenModelOptionsByProvider,
       }),
       input.state.lastChosenProvider,
       input.state.lastChosenModelByProvider,
+      input.state.lastChosenModelOptionsByProvider,
       );
     const panesById: Record<string, ConsoleProjectPane> = {};
     const validTabs: ConsoleProjectTab[] = [];
@@ -681,7 +819,9 @@ export function reconcileProjectLayoutsState(input: {
               id: pane.id,
               selectedProvider: input.state.lastChosenProvider,
               selectedModel: input.state.lastChosenModelByProvider[input.state.lastChosenProvider],
+              selectedModelOptions: input.state.lastChosenModelOptionsByProvider[input.state.lastChosenProvider],
               fallbackModelsByProvider: input.state.lastChosenModelByProvider,
+              fallbackModelOptionsByProvider: input.state.lastChosenModelOptionsByProvider,
             });
             panesById[draftPane.id] = draftPane;
             nextPaneIds.push(draftPane.id);
@@ -716,13 +856,15 @@ export function reconcileProjectLayoutsState(input: {
       updatedAt: reconciled.updatedAt,
     };
 
-    if (layout.tabs.length == 0) {
-      layout = createProjectLayout(projectId, {
-        selectedProvider: input.state.lastChosenProvider,
-        selectedModel: input.state.lastChosenModelByProvider[input.state.lastChosenProvider],
-        fallbackModelsByProvider: input.state.lastChosenModelByProvider,
-      });
-    }
+      if (layout.tabs.length == 0) {
+        layout = createProjectLayout(projectId, {
+          selectedProvider: input.state.lastChosenProvider,
+          selectedModel: input.state.lastChosenModelByProvider[input.state.lastChosenProvider],
+          selectedModelOptions: input.state.lastChosenModelOptionsByProvider[input.state.lastChosenProvider],
+          fallbackModelsByProvider: input.state.lastChosenModelByProvider,
+          fallbackModelOptionsByProvider: input.state.lastChosenModelOptionsByProvider,
+        });
+      }
 
     layoutsByProjectId[projectId] = layout;
   });
@@ -739,6 +881,7 @@ export function reconcileProjectLayoutsState(input: {
     layoutsByProjectId,
     lastChosenProvider: input.state.lastChosenProvider,
     lastChosenModelByProvider: input.state.lastChosenModelByProvider,
+    lastChosenModelOptionsByProvider: input.state.lastChosenModelOptionsByProvider,
   };
 }
 
@@ -771,7 +914,9 @@ function updateLayoutState(
   const currentLayout = state.layoutsByProjectId[projectId] ?? createProjectLayout(projectId, {
     selectedProvider: state.lastChosenProvider,
     selectedModel: state.lastChosenModelByProvider[state.lastChosenProvider],
+    selectedModelOptions: state.lastChosenModelOptionsByProvider[state.lastChosenProvider],
     fallbackModelsByProvider: state.lastChosenModelByProvider,
+    fallbackModelOptionsByProvider: state.lastChosenModelOptionsByProvider,
   });
   const nextLayout = updater(currentLayout);
   if (nextLayout === currentLayout && state.activeProjectId === projectId) {
@@ -787,12 +932,49 @@ function updateLayoutState(
   };
 }
 
-function createFreshDraftReplacement(state: ConsoleProjectLayoutsState, paneId: string): ConsoleDraftPane {
+function createFreshDraftReplacement(
+  state: ConsoleProjectLayoutsState,
+  paneId: string,
+  seed?: Pick<ConsolePaneSetup, "selectedProvider" | "selectedModel" | "selectedModelOptions">,
+): ConsoleDraftPane {
+  const selectedProvider = seed?.selectedProvider ?? state.lastChosenProvider;
   return createDraftPane({
     id: paneId,
-    selectedProvider: state.lastChosenProvider,
-    selectedModel: state.lastChosenModelByProvider[state.lastChosenProvider],
+    selectedProvider,
+    selectedModel: seed?.selectedModel ?? state.lastChosenModelByProvider[selectedProvider],
+    selectedModelOptions: seed?.selectedModelOptions ?? state.lastChosenModelOptionsByProvider[selectedProvider],
     fallbackModelsByProvider: state.lastChosenModelByProvider,
+    fallbackModelOptionsByProvider: state.lastChosenModelOptionsByProvider,
+  });
+}
+
+export function replacePaneWithFreshDraft(
+  state: ConsoleProjectLayoutsState,
+  projectId: OrchestrationProject["id"],
+  paneId: string,
+  seed?: Pick<ConsolePaneSetup, "selectedProvider" | "selectedModel" | "selectedModelOptions">,
+): ConsoleProjectLayoutsState {
+  return updateLayoutState(state, projectId, (layout) => {
+    const located = locatePane(layout, paneId);
+    if (!located) {
+      return layout;
+    }
+
+    const tabs = layout.tabs.map((tab) =>
+      tab.id === located.tab.id
+        ? { ...tab, activePaneId: paneId }
+        : tab,
+    );
+
+    return withUpdatedLayout(layout, {
+      ...layout,
+      activeTabId: located.tab.id,
+      tabs,
+      panesById: {
+        ...layout.panesById,
+        [paneId]: createFreshDraftReplacement(state, paneId, seed),
+      },
+    });
   });
 }
 
@@ -832,10 +1014,19 @@ export function useConsoleProjectLayouts(input: {
     layout: state.layoutsByProjectId[project.id] ?? createProjectLayout(project.id, {
       selectedProvider: state.lastChosenProvider,
       selectedModel: state.lastChosenModelByProvider[state.lastChosenProvider],
+      selectedModelOptions: state.lastChosenModelOptionsByProvider[state.lastChosenProvider],
       fallbackModelsByProvider: state.lastChosenModelByProvider,
+      fallbackModelOptionsByProvider: state.lastChosenModelOptionsByProvider,
     }),
     collapsed: state.collapsedProjectIds.includes(project.id),
-  })), [orderedProjects, state.collapsedProjectIds, state.layoutsByProjectId, state.lastChosenModelByProvider, state.lastChosenProvider]);
+  })), [
+    orderedProjects,
+    state.collapsedProjectIds,
+    state.layoutsByProjectId,
+    state.lastChosenModelByProvider,
+    state.lastChosenModelOptionsByProvider,
+    state.lastChosenProvider,
+  ]);
 
   const activeProject = useMemo(
     () => (state.activeProjectId ? input.projects.find((project) => project.id === state.activeProjectId) ?? null : null),
@@ -931,7 +1122,9 @@ export function useConsoleProjectLayouts(input: {
       const next = createDraftTabRef({
         selectedProvider: existing.lastChosenProvider,
         selectedModel: existing.lastChosenModelByProvider[existing.lastChosenProvider],
+        selectedModelOptions: existing.lastChosenModelOptionsByProvider[existing.lastChosenProvider],
         fallbackModelsByProvider: existing.lastChosenModelByProvider,
+        fallbackModelOptionsByProvider: existing.lastChosenModelOptionsByProvider,
         ...(inputValue.interactionMode ? { interactionMode: inputValue.interactionMode } : {}),
         ...(inputValue.branch !== undefined ? { branch: inputValue.branch ?? null } : {}),
         ...(inputValue.worktreePath !== undefined ? { worktreePath: inputValue.worktreePath ?? null } : {}),
@@ -960,7 +1153,9 @@ export function useConsoleProjectLayouts(input: {
       const pane = createDraftPane({
         selectedProvider: existing.lastChosenProvider,
         selectedModel: existing.lastChosenModelByProvider[existing.lastChosenProvider],
+        selectedModelOptions: existing.lastChosenModelOptionsByProvider[existing.lastChosenProvider],
         fallbackModelsByProvider: existing.lastChosenModelByProvider,
+        fallbackModelOptionsByProvider: existing.lastChosenModelOptionsByProvider,
       });
       created = { tabId: located.tab.id, paneId: pane.id };
       const tabs = layout.tabs.map((tab) =>
@@ -981,6 +1176,14 @@ export function useConsoleProjectLayouts(input: {
     return created;
   }, []);
 
+  const replacePaneWithFreshDraftAction = useCallback((
+    projectId: OrchestrationProject["id"],
+    paneId: string,
+    seed?: Pick<ConsolePaneSetup, "selectedProvider" | "selectedModel" | "selectedModelOptions">,
+  ) => {
+    setState((existing) => replacePaneWithFreshDraft(existing, projectId, paneId, seed));
+  }, []);
+
   const closeTab = useCallback((projectId: OrchestrationProject["id"], tabId: string) => {
     setState((existing) => updateLayoutState(existing, projectId, (layout) => {
       const closingIndex = layout.tabs.findIndex((tab) => tab.id === tabId);
@@ -997,7 +1200,9 @@ export function useConsoleProjectLayouts(input: {
         const fresh = createProjectLayout(projectId, {
           selectedProvider: existing.lastChosenProvider,
           selectedModel: existing.lastChosenModelByProvider[existing.lastChosenProvider],
+          selectedModelOptions: existing.lastChosenModelOptionsByProvider[existing.lastChosenProvider],
           fallbackModelsByProvider: existing.lastChosenModelByProvider,
+          fallbackModelOptionsByProvider: existing.lastChosenModelOptionsByProvider,
         });
         return fresh;
       }
@@ -1024,7 +1229,9 @@ export function useConsoleProjectLayouts(input: {
           return createProjectLayout(projectId, {
             selectedProvider: existing.lastChosenProvider,
             selectedModel: existing.lastChosenModelByProvider[existing.lastChosenProvider],
+            selectedModelOptions: existing.lastChosenModelOptionsByProvider[existing.lastChosenProvider],
             fallbackModelsByProvider: existing.lastChosenModelByProvider,
+            fallbackModelOptionsByProvider: existing.lastChosenModelOptionsByProvider,
           });
         }
         const nextPanesById = { ...layout.panesById };
@@ -1071,16 +1278,27 @@ export function useConsoleProjectLayouts(input: {
         }
         const updatedSetup = inputValue.updater(located.pane.setup);
         const providerChanged = updatedSetup.selectedProvider !== located.pane.setup.selectedProvider;
+        const explicitModelOptionsChanged = updatedSetup.selectedModelOptions !== located.pane.setup.selectedModelOptions;
+        const nextSelectedModel =
+          providerChanged && updatedSetup.selectedModel === located.pane.setup.selectedModel
+            ? existing.lastChosenModelByProvider[updatedSetup.selectedProvider]
+            : resolveProviderModelSelection(
+                updatedSetup.selectedProvider,
+                updatedSetup.selectedModel,
+                existing.lastChosenModelByProvider,
+              );
+        const nextSelectedModelOptions = explicitModelOptionsChanged
+          ? normalizeProviderModelOptionsForProvider(updatedSetup.selectedProvider, updatedSetup.selectedModelOptions)
+          : (providerChanged || nextSelectedModel !== located.pane.setup.selectedModel)
+              ? undefined
+              : normalizeProviderModelOptionsForProvider(
+                  updatedSetup.selectedProvider,
+                  located.pane.setup.selectedModelOptions,
+                );
         const nextSetup: ConsolePaneSetup = {
           ...updatedSetup,
-          selectedModel:
-            providerChanged && updatedSetup.selectedModel === located.pane.setup.selectedModel
-              ? existing.lastChosenModelByProvider[updatedSetup.selectedProvider]
-              : resolveProviderModelSelection(
-                  updatedSetup.selectedProvider,
-                  updatedSetup.selectedModel,
-                  existing.lastChosenModelByProvider,
-                ),
+          selectedModel: nextSelectedModel,
+          selectedModelOptions: nextSelectedModelOptions,
         };
         const nextPane: ConsoleDraftPane = {
           ...located.pane,
@@ -1100,6 +1318,10 @@ export function useConsoleProjectLayouts(input: {
           lastChosenModelByProvider: {
             ...existing.lastChosenModelByProvider,
             [nextSetup.selectedProvider]: nextSetup.selectedModel,
+          },
+          lastChosenModelOptionsByProvider: {
+            ...existing.lastChosenModelOptionsByProvider,
+            [nextSetup.selectedProvider]: nextSetup.selectedModelOptions,
           },
           layoutsByProjectId: {
             ...existing.layoutsByProjectId,
@@ -1203,10 +1425,15 @@ export function useConsoleProjectLayouts(input: {
     return result;
   }, [input.threads]);
 
-  const rememberProviderModel = useCallback((provider: ProviderKind, model: string) => {
+  const rememberProviderModel = useCallback((provider: ProviderKind, model: string, modelOptions?: ProviderModelOptions) => {
     setState((existing) => {
       const normalizedModel = resolveProviderModelSelection(provider, model, existing.lastChosenModelByProvider);
-      if (existing.lastChosenModelByProvider[provider] === normalizedModel) {
+      const normalizedModelOptions = normalizeProviderModelOptionsForProvider(provider, modelOptions);
+      if (
+        existing.lastChosenModelByProvider[provider] === normalizedModel
+        && JSON.stringify(existing.lastChosenModelOptionsByProvider[provider] ?? null)
+          === JSON.stringify(normalizedModelOptions ?? null)
+      ) {
         return existing;
       }
       return {
@@ -1215,6 +1442,10 @@ export function useConsoleProjectLayouts(input: {
         lastChosenModelByProvider: {
           ...existing.lastChosenModelByProvider,
           [provider]: normalizedModel,
+        },
+        lastChosenModelOptionsByProvider: {
+          ...existing.lastChosenModelOptionsByProvider,
+          [provider]: normalizedModelOptions,
         },
       };
     });
@@ -1232,6 +1463,7 @@ export function useConsoleProjectLayouts(input: {
     activePaneId,
     lastChosenProvider: state.lastChosenProvider,
     lastChosenModelByProvider: state.lastChosenModelByProvider,
+    lastChosenModelOptionsByProvider: state.lastChosenModelOptionsByProvider,
     activateProject,
     clearActiveProject,
     toggleProjectCollapsed,
@@ -1240,6 +1472,7 @@ export function useConsoleProjectLayouts(input: {
     activatePane,
     createDraftTab,
     splitPane,
+    replacePaneWithFreshDraft: replacePaneWithFreshDraftAction,
     closePane,
     closeTab,
     updateDraftPane,

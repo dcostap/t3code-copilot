@@ -48,6 +48,7 @@ export interface ConsolePendingUserInput {
 export interface PendingConsoleThread {
   readonly provider: ProviderKind;
   readonly model: string;
+  readonly modelOptions?: ProviderModelOptions;
   readonly interactionMode: ProviderInteractionMode;
   readonly worktreePath: string | null;
 }
@@ -80,6 +81,7 @@ export interface ConsoleDataState {
     provider: ProviderKind;
     title?: string;
     model?: string;
+    modelOptions?: ProviderModelOptions;
     interactionMode?: ProviderInteractionMode;
     branch?: string | null;
     worktreePath?: string | null;
@@ -107,7 +109,12 @@ export interface ConsoleDataState {
     answers: Record<string, unknown>,
     fallbackPrompt?: string,
   ): Promise<void>;
-  setThreadModel(threadId: string, provider: ProviderKind, model: string): Promise<void>;
+  setThreadModel(
+    threadId: string,
+    provider: ProviderKind,
+    model: string,
+    modelOptions?: ProviderModelOptions,
+  ): Promise<void>;
   setThreadReasoningEffort(
     threadId: string,
     provider: ProviderKind,
@@ -966,6 +973,7 @@ export function useConsoleData(): ConsoleDataState {
       provider: ProviderKind;
       title?: string;
       model?: string;
+      modelOptions?: ProviderModelOptions;
       interactionMode?: ProviderInteractionMode;
       branch?: string | null;
       worktreePath?: string | null;
@@ -988,6 +996,12 @@ export function useConsoleData(): ConsoleDataState {
         project?.defaultModel ||
         snapshot?.projects[0]?.defaultModel ||
         "gpt-5-codex";
+      const modelOptions = normalizeModelOptionsForModel(
+        input?.modelOptions,
+        provider,
+        model,
+        serverConfig,
+      );
       const interactionMode = input?.interactionMode ?? sameProjectThread?.interactionMode ?? "default";
       const worktreePath = input?.worktreePath ?? sameProjectThread?.worktreePath ?? null;
       await backend.dispatchCommand({
@@ -1010,12 +1024,13 @@ export function useConsoleData(): ConsoleDataState {
         pendingThread: {
           provider,
           model,
+          ...(modelOptions !== undefined ? { modelOptions } : {}),
           interactionMode,
           worktreePath,
         },
       };
     },
-    [assertLiveCommandReady, backend, snapshot, thread],
+    [assertLiveCommandReady, backend, serverConfig, snapshot, thread],
   );
 
   const dispatchUserInputResponse = useCallback(
@@ -1105,11 +1120,12 @@ export function useConsoleData(): ConsoleDataState {
       setIsPromptSubmitting(true);
       try {
         const dispatchThreadId = targetThread?.id ?? (input.threadId as ThreadId);
+        const modelOptions = targetThread?.modelOptions ?? input.pendingThread?.modelOptions;
         await dispatchThreadTurnStart({
           backend,
           threadId: dispatchThreadId,
           threadSeed,
-          ...(targetThread?.modelOptions !== undefined ? { modelOptions: targetThread.modelOptions } : {}),
+          ...(modelOptions !== undefined ? { modelOptions } : {}),
           prompt: trimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
           attachments,
         });
@@ -1138,18 +1154,28 @@ export function useConsoleData(): ConsoleDataState {
     [assertLiveCommandReady, dispatchUserInputResponse, threads],
   );
 
-  const setThreadModel = useCallback(async (threadId: string, provider: ProviderKind, model: string) => {
+  const setThreadModel = useCallback(async (
+    threadId: string,
+    provider: ProviderKind,
+    model: string,
+    modelOptions?: ProviderModelOptions,
+  ) => {
     const targetThread = findThreadById(threads, threadId);
     const normalizedModel = model.trim();
-    if (!targetThread || normalizedModel.length === 0 || targetThread.model === normalizedModel) {
+    if (!targetThread || normalizedModel.length === 0) {
       return;
     }
     const normalizedModelOptions = normalizeModelOptionsForModel(
-      targetThread.modelOptions,
+      modelOptions ?? targetThread.modelOptions,
       provider,
       normalizedModel,
       serverConfig,
     );
+    const currentModelOptionsJson = JSON.stringify(targetThread.modelOptions ?? null);
+    const nextModelOptionsJson = JSON.stringify(normalizedModelOptions ?? null);
+    if (targetThread.model === normalizedModel && currentModelOptionsJson === nextModelOptionsJson) {
+      return;
+    }
     assertLiveCommandReady();
     const previousModel = targetThread.model;
     const previousModelOptions = targetThread.modelOptions;

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { formatCopilotBillingMultiplier, formatProviderModelLabel } from "./providerModelLabels";
+import {
+  formatCopilotBillingMultiplier,
+  formatProviderModelLabel,
+  formatProviderModelSelectionLabel,
+  formatReasoningEffortLabel,
+} from "./providerModelLabels";
 
 describe("providerModelLabels", () => {
   it("formats copilot billing multipliers as a compact x suffix", () => {
@@ -69,5 +74,24 @@ describe("providerModelLabels", () => {
         ],
       ]),
     })).toBe("Gemini 3 Pro (Preview) (1x)");
+  });
+
+  it("formats reasoning effort labels for visible selection text", () => {
+    expect(formatReasoningEffortLabel("high")).toBe("High reasoning");
+    expect(formatReasoningEffortLabel("medium")).toBe("Medium reasoning");
+  });
+
+  it("appends the reasoning effort label when model options request it", () => {
+    expect(formatProviderModelSelectionLabel({
+      provider: "codex",
+      model: "gpt-5.4",
+      modelOptions: {
+        codex: {
+          reasoningEffort: "high",
+        },
+      },
+      baseLabel: "Codex: GPT-5.4",
+      copilotModelById: new Map(),
+    })).toBe("Codex: GPT-5.4 · High reasoning");
   });
 });

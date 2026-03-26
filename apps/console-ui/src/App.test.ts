@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { EventId, ThreadId } from "@t3tools/contracts";
 
 import {
+  buildProviderReasoningEffortModelOptions,
   canDropDraggedThreadIntoProject,
   canDropDraggedThreadIntoSplitZone,
   findDuplicateProjectForWorkspaceRoot,
@@ -29,8 +30,10 @@ import {
   shouldShowThreadSplitDropZone,
   shouldBlockGlobalPromptTypingForSelection,
   shouldActivateNextTabShortcut,
+  getDefaultManualModelOptions,
   shouldOpenPaneSearchShortcut,
   shouldScopeGlobalSelectAllToHistory,
+  getSupportedCuratedReasoningEfforts,
   summarizeThreadSelection,
   getNextProjectTabId,
   shouldRetainPendingPromptSend,
@@ -420,6 +423,75 @@ describe("resolvePaletteShortcutTransition", () => {
       open: true,
       query: "@",
     });
+  });
+});
+
+describe("getSupportedCuratedReasoningEfforts", () => {
+  it("keeps the curated high and medium variants for codex models", () => {
+    expect(getSupportedCuratedReasoningEfforts({
+      provider: "codex",
+      model: "gpt-5.4",
+      reasoningEfforts: ["high", "medium"],
+      copilotModelById: new Map(),
+    })).toEqual(["high", "medium"]);
+  });
+
+  it("intersects copilot reasoning variants with live model support", () => {
+    expect(getSupportedCuratedReasoningEfforts({
+      provider: "copilot",
+      model: "gpt-5-mini",
+      reasoningEfforts: ["high", "medium"],
+      copilotModelById: new Map([
+        [
+          "gpt-5-mini",
+          {
+            id: "gpt-5-mini",
+            name: "GPT-5 Mini",
+            supportsReasoningEffort: true,
+            supportedReasoningEfforts: ["medium"],
+          },
+        ],
+      ]),
+    })).toEqual(["medium"]);
+  });
+});
+
+describe("getDefaultManualModelOptions", () => {
+  it("defaults to high reasoning for curated models when supported", () => {
+    expect(getDefaultManualModelOptions({
+      provider: "copilot",
+      model: "gpt-5.4",
+      reasoningEfforts: ["high", "medium"],
+      copilotModelById: new Map([
+        [
+          "gpt-5.4",
+          {
+            id: "gpt-5.4",
+            name: "GPT-5.4",
+            supportsReasoningEffort: true,
+            supportedReasoningEfforts: ["low", "medium", "high"],
+          },
+        ],
+      ]),
+    })).toEqual(buildProviderReasoningEffortModelOptions("copilot", "high"));
+  });
+
+  it("returns no default reasoning options when the model does not support reasoning", () => {
+    expect(getDefaultManualModelOptions({
+      provider: "copilot",
+      model: "gemini-3-pro-preview",
+      reasoningEfforts: ["high", "medium"],
+      copilotModelById: new Map([
+        [
+          "gemini-3-pro-preview",
+          {
+            id: "gemini-3-pro-preview",
+            name: "Gemini 3 Pro (Preview)",
+            supportsReasoningEffort: false,
+          },
+        ],
+      ]),
+    })).toBeUndefined();
   });
 });
 
@@ -952,6 +1024,7 @@ describe("findReusableDraftPaneForThreadOpen", () => {
               type: "new-thread",
               selectedProvider: "codex",
               selectedModel: "gpt-5-codex",
+              selectedModelOptions: undefined,
               createdAt: "2026-03-21T00:00:00.000Z",
               interactionMode: "default",
               branch: null,
@@ -986,6 +1059,7 @@ describe("findReusableDraftPaneForThreadOpen", () => {
               type: "new-thread",
               selectedProvider: "codex",
               selectedModel: "gpt-5-codex",
+              selectedModelOptions: undefined,
               createdAt: "2026-03-21T00:00:00.000Z",
               interactionMode: "default",
               branch: null,

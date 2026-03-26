@@ -1,8 +1,10 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
+  type CodexReasoningEffort,
   type OrchestrationProject,
   type OrchestrationThread,
   type ProviderKind,
+  type ProviderModelOptions,
   type ServerProviderModel,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -76,7 +78,7 @@ import {
   threadToTranscriptBlocks,
 } from "./transcript";
 import { useConsoleData, type PendingConsoleThread } from "./consoleData/useConsoleData";
-import { formatProviderModelLabel } from "./providerModelLabels";
+import { formatProviderModelSelectionLabel } from "./providerModelLabels";
 import {
   type ConsoleProjectLayout,
   resolveThreadCwd,
@@ -104,23 +106,75 @@ interface AppPaletteCommand extends CommandPaletteCommand {
 
 const PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL = "gpt-5.4" as const;
 const HIGH_PRIORITY_COMMAND = 100;
-const MANUAL_MODEL_COMMANDS_BY_PROVIDER = {
+const CURATED_REASONING_EFFORTS = ["high", "medium"] as const satisfies ReadonlyArray<CodexReasoningEffort>;
+interface ManualModelCommandDefinition {
+  readonly slug: string;
+  readonly label: string;
+  readonly reasoningEfforts?: ReadonlyArray<CodexReasoningEffort>;
+}
+const MANUAL_MODEL_COMMANDS_BY_PROVIDER: Record<ProviderKind, ReadonlyArray<ManualModelCommandDefinition>> = {
   codex: [
-    { slug: "gpt-5.4", label: "Codex: GPT-5.4" },
-    { slug: "gpt-5.4-mini", label: "Codex: GPT-5.4 Mini" },
+    { slug: "gpt-5.4", label: "Codex: GPT-5.4", reasoningEfforts: CURATED_REASONING_EFFORTS },
+    { slug: "gpt-5.4-mini", label: "Codex: GPT-5.4 Mini", reasoningEfforts: CURATED_REASONING_EFFORTS },
   ],
   copilot: [
-    { slug: "gpt-5.4", label: "Copilot CLI: GPT-5.4" },
-    { slug: "gpt-5.4-mini", label: "Copilot CLI: GPT-5.4 Mini" },
-    { slug: "claude-opus-4.6", label: "Copilot CLI: Claude Opus 4.6" },
+    { slug: "gpt-5.4", label: "Copilot CLI: GPT-5.4", reasoningEfforts: CURATED_REASONING_EFFORTS },
+    { slug: "gpt-5.4-mini", label: "Copilot CLI: GPT-5.4 Mini", reasoningEfforts: CURATED_REASONING_EFFORTS },
+    { slug: "claude-opus-4.6", label: "Copilot CLI: Claude Opus 4.6", reasoningEfforts: CURATED_REASONING_EFFORTS },
     { slug: "gemini-3-pro-preview", label: "Copilot CLI: Gemini 3 Pro (Preview)" },
-    { slug: "gpt-5-mini", label: "Copilot CLI: GPT-5 Mini" },
+    { slug: "gpt-5-mini", label: "Copilot CLI: GPT-5 Mini", reasoningEfforts: CURATED_REASONING_EFFORTS },
   ],
-} as const satisfies Record<ProviderKind, ReadonlyArray<{ readonly slug: string; readonly label: string }>>;
-const SPLIT_PANE_COMMAND_LABEL = "Split into new pane";
+};
+const SPLIT_PANE_COMMAND_LABEL = "New thread in new split pane";
+const NEW_THREAD_IN_CURRENT_PANE_COMMAND_LABEL = "New thread in current pane";
 const CLOSE_PANE_COMMAND_LABEL = "Close current pane";
 const CREATE_TAB_COMMAND_LABEL = "Add new tab";
 const ADD_PROJECT_COMMAND_LABEL = "Add new project";
+
+export function buildProviderReasoningEffortModelOptions(
+  provider: ProviderKind,
+  reasoningEffort: CodexReasoningEffort,
+): ProviderModelOptions {
+  return provider === "codex"
+    ? { codex: { reasoningEffort } }
+    : { copilot: { reasoningEffort } };
+}
+
+export function getSupportedCuratedReasoningEfforts(input: {
+  readonly provider: ProviderKind;
+  readonly model: string;
+  readonly reasoningEfforts: ReadonlyArray<CodexReasoningEffort> | undefined;
+  readonly copilotModelById: ReadonlyMap<string, ServerProviderModel>;
+}): ReadonlyArray<CodexReasoningEffort> {
+  if (!input.reasoningEfforts || input.reasoningEfforts.length === 0) {
+    return [];
+  }
+
+  if (input.provider !== "copilot") {
+    return input.reasoningEfforts;
+  }
+
+  const modelMetadata = input.copilotModelById.get(input.model);
+  if (!modelMetadata?.supportsReasoningEffort) {
+    return [];
+  }
+
+  if (!modelMetadata.supportedReasoningEfforts || modelMetadata.supportedReasoningEfforts.length === 0) {
+    return input.reasoningEfforts;
+  }
+
+  return input.reasoningEfforts.filter((effort) => modelMetadata.supportedReasoningEfforts?.includes(effort));
+}
+
+export function getDefaultManualModelOptions(input: {
+  readonly provider: ProviderKind;
+  readonly model: string;
+  readonly reasoningEfforts: ReadonlyArray<CodexReasoningEffort> | undefined;
+  readonly copilotModelById: ReadonlyMap<string, ServerProviderModel>;
+}): ProviderModelOptions | undefined {
+  const reasoningEffort = getSupportedCuratedReasoningEfforts(input)[0];
+  return reasoningEffort ? buildProviderReasoningEffortModelOptions(input.provider, reasoningEffort) : undefined;
+}
 
 function SidebarChevronIcon({ className }: { className?: string }) {
   return (
@@ -251,6 +305,7 @@ interface PaneView {
   readonly interactionMode: "default" | "plan";
   readonly provider: ProviderKind;
   readonly model: string;
+  readonly modelOptions: ProviderModelOptions | undefined;
 }
 
 interface PaneScrollState {
@@ -1741,6 +1796,9 @@ export function App() {
         const model = thread?.model
           ?? pendingThread?.model
           ?? (pane.kind === "draft" ? pane.setup.selectedModel : DEFAULT_MODEL_BY_PROVIDER[provider]);
+        const modelOptions = thread?.modelOptions
+          ?? pendingThread?.modelOptions
+          ?? (pane.kind === "draft" ? pane.setup.selectedModelOptions : undefined);
         const effectiveNow = thread && (isThreadTurnRunning(thread.id) || pendingPromptSendStartedAtByThreadId[thread.id])
           ? animationNowIso
           : undefined;
@@ -1788,6 +1846,7 @@ export function App() {
           interactionMode: thread?.interactionMode ?? pendingThread?.interactionMode ?? (pane.kind === "draft" ? pane.setup.interactionMode : "default"),
           provider,
           model,
+          modelOptions,
         } satisfies PaneView];
       });
   }, [
@@ -1851,6 +1910,65 @@ export function App() {
     focusPanePrompt(created.paneId);
     return created;
   }, [focusPanePrompt, workspace]);
+
+  const handleCreateNewThreadInCurrentPane = useCallback((paneView: Pick<
+    PaneView,
+    "attachments" | "model" | "modelOptions" | "pane" | "project" | "provider"
+  >) => {
+    for (const attachment of paneView.attachments) {
+      revokeComposerImageAttachmentPreview(attachment);
+    }
+    setComposerAttachmentsByPaneId((existing) => {
+      if (!(paneView.pane.id in existing)) {
+        return existing;
+      }
+      const next = { ...existing };
+      delete next[paneView.pane.id];
+      return next;
+    });
+    setComposerDraftByPaneId((existing) => {
+      if (!(paneView.pane.id in existing)) {
+        return existing;
+      }
+      const next = { ...existing };
+      delete next[paneView.pane.id];
+      return next;
+    });
+    setPendingDraftPaneIds((existing) => {
+      if (!existing.has(paneView.pane.id)) {
+        return existing;
+      }
+      const next = new Set(existing);
+      next.delete(paneView.pane.id);
+      return next;
+    });
+    const pendingThreadEntry = pendingThreadByPaneId[paneView.pane.id] ?? null;
+    setPendingThreadByPaneId((existing) => {
+      if (!(paneView.pane.id in existing)) {
+        return existing;
+      }
+      const next = { ...existing };
+      delete next[paneView.pane.id];
+      return next;
+    });
+    if (pendingThreadEntry) {
+      setPendingPromptSendStartedAtByThreadId((existing) => {
+        if (!(pendingThreadEntry.threadId in existing)) {
+          return existing;
+        }
+        const next = { ...existing };
+        delete next[pendingThreadEntry.threadId];
+        return next;
+      });
+    }
+    workspace.replacePaneWithFreshDraft(paneView.project.id, paneView.pane.id, {
+      selectedProvider: paneView.provider,
+      selectedModel: paneView.model,
+      selectedModelOptions: paneView.modelOptions,
+    });
+    setSubmitError(null);
+    focusPanePrompt(paneView.pane.id);
+  }, [focusPanePrompt, pendingThreadByPaneId, workspace]);
 
   const handleCreateDraftTab = useCallback(() => {
     const projectId = workspace.activeProject?.id ?? workspace.projectViews[0]?.project.id ?? null;
@@ -2447,6 +2565,9 @@ export function App() {
           projectId: paneView.project.id,
           provider: paneView.pane.setup.selectedProvider,
           model: paneView.pane.setup.selectedModel,
+          ...(paneView.pane.setup.selectedModelOptions !== undefined
+            ? { modelOptions: paneView.pane.setup.selectedModelOptions }
+            : {}),
           title: truncateTitle(prompt || "New thread"),
           interactionMode: paneView.pane.setup.interactionMode,
           branch: paneView.pane.setup.branch,
@@ -2696,6 +2817,15 @@ export function App() {
             },
           }]
         : [];
+    const newThreadInCurrentPaneCommands: ReadonlyArray<AppPaletteCommand> = [{
+      id: `pane:new-thread:${targetPaneView.pane.id}`,
+      label: NEW_THREAD_IN_CURRENT_PANE_COMMAND_LABEL,
+      keywords: ["new thread", "current pane", "replace pane", "reset pane"],
+      priority: HIGH_PRIORITY_COMMAND,
+      run: () => {
+        handleCreateNewThreadInCurrentPane(targetPaneView);
+      },
+    }];
     const closePaneCommands: ReadonlyArray<AppPaletteCommand> = [{
       id: `pane:close:${targetPaneView.pane.id}`,
       actionId: "pane.close",
@@ -2734,42 +2864,65 @@ export function App() {
         ? [targetPaneView.thread.provider]
         : [];
     const modelCommands = modelProviders.flatMap((provider) =>
-      MANUAL_MODEL_COMMANDS_BY_PROVIDER[provider].map(({ slug, label }) => ({
-        id: `model:${targetPaneView.pane.id}:${provider}:${slug}`,
-        label: formatProviderModelLabel({
+      MANUAL_MODEL_COMMANDS_BY_PROVIDER[provider].flatMap(({ slug, label, reasoningEfforts }) => {
+        const supportedReasoningEfforts = getSupportedCuratedReasoningEfforts({
           provider,
           model: slug,
-          baseLabel: label,
+          reasoningEfforts,
           copilotModelById,
-        }),
-        keywords: [provider === "copilot" ? "copilot cli" : provider, slug],
-        run: async () => {
-          if (targetPaneView.setup) {
-            workspace.updateDraftPane({
-              paneId: targetPaneView.pane.id,
-              updater: (setup) => ({
-                ...setup,
-                selectedProvider: provider,
-                selectedModel: slug,
-              }),
-            });
-            workspace.rememberProviderModel(provider, slug);
-            return;
-          }
+        });
+        const commandVariants = supportedReasoningEfforts.length > 0
+          ? supportedReasoningEfforts.map((reasoningEffort) => ({
+              idSuffix: reasoningEffort,
+              modelOptions: buildProviderReasoningEffortModelOptions(provider, reasoningEffort),
+              keywords: [reasoningEffort, `${reasoningEffort} reasoning`, "reasoning"],
+            }))
+          : [{
+              idSuffix: "default",
+              modelOptions: undefined,
+              keywords: [] as string[],
+            }];
 
-          if (!targetPaneView.thread) {
-            return;
-          }
+        return commandVariants.map(({ idSuffix, modelOptions, keywords }) => ({
+          id: `model:${targetPaneView.pane.id}:${provider}:${slug}:${idSuffix}`,
+          label: formatProviderModelSelectionLabel({
+            provider,
+            model: slug,
+            modelOptions,
+            baseLabel: label,
+            copilotModelById,
+          }),
+          keywords: [provider === "copilot" ? "copilot cli" : provider, slug, ...keywords],
+          run: async () => {
+            if (targetPaneView.setup) {
+              workspace.updateDraftPane({
+                paneId: targetPaneView.pane.id,
+                updater: (setup) => ({
+                  ...setup,
+                  selectedProvider: provider,
+                  selectedModel: slug,
+                  selectedModelOptions: modelOptions,
+                }),
+              });
+              workspace.rememberProviderModel(provider, slug, modelOptions);
+              return;
+            }
 
-          await setThreadModel(targetPaneView.thread.id, provider, slug);
-          workspace.rememberProviderModel(provider, slug);
-        },
-      } satisfies AppPaletteCommand)),
+            if (!targetPaneView.thread) {
+              return;
+            }
+
+            await setThreadModel(targetPaneView.thread.id, provider, slug, modelOptions);
+            workspace.rememberProviderModel(provider, slug, modelOptions);
+          },
+        } satisfies AppPaletteCommand));
+      }),
     );
 
     return [
       ...addProjectCommands,
       ...createTabCommands,
+      ...newThreadInCurrentPaneCommands,
       ...closePaneCommands,
       ...splitPaneCommands,
       ...providerCommands.map(({ provider, label, keywords, priority }) => ({
@@ -2778,20 +2931,36 @@ export function App() {
         keywords,
         priority,
         run: () => {
+          const selectedModelOptions = getDefaultManualModelOptions({
+            provider,
+            model: PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL,
+            reasoningEfforts: MANUAL_MODEL_COMMANDS_BY_PROVIDER[provider]
+              .find((entry) => entry.slug === PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL)
+              ?.reasoningEfforts,
+            copilotModelById,
+          });
           workspace.updateDraftPane({
             paneId: targetPaneView.pane.id,
             updater: (setup) => ({
               ...setup,
               selectedProvider: provider,
               selectedModel: PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL,
+              selectedModelOptions,
             }),
           });
-          workspace.rememberProviderModel(provider, PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL);
+          workspace.rememberProviderModel(provider, PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL, selectedModelOptions);
         },
       })),
       ...modelCommands,
     ];
-  }, [copilotModelById, handleCreateDraftTabForProject, paletteAddProjectCommand, setThreadModel, workspace]);
+  }, [
+    copilotModelById,
+    handleCreateDraftTabForProject,
+    handleCreateNewThreadInCurrentPane,
+    paletteAddProjectCommand,
+    setThreadModel,
+    workspace,
+  ]);
 
   const paletteCommands = useMemo(
     () => resolveCommandsForPane(palettePaneView),
@@ -2980,17 +3149,19 @@ export function App() {
     }
 
     if (paneView.setup) {
-      return `Draft · ${paneView.setup.selectedProvider} · ${formatProviderModelLabel({
+      return `Draft · ${paneView.setup.selectedProvider} · ${formatProviderModelSelectionLabel({
         provider: paneView.setup.selectedProvider,
         model: paneView.setup.selectedModel,
+        modelOptions: paneView.setup.selectedModelOptions,
         copilotModelById,
       })} · ${paneView.cwd ?? paneView.project.workspaceRoot}`;
     }
 
     if (paneView.thread) {
-      return `${paneView.thread.title} · ${paneView.thread.provider} · ${formatProviderModelLabel({
+      return `${paneView.thread.title} · ${paneView.thread.provider} · ${formatProviderModelSelectionLabel({
         provider: paneView.thread.provider,
         model: paneView.model,
+        modelOptions: paneView.modelOptions,
         copilotModelById,
       })} · ${paneView.cwd ?? paneView.project.workspaceRoot}`;
     }
@@ -3004,9 +3175,10 @@ export function App() {
     }
 
     if (paneView.setup) {
-      const modelLabel = formatProviderModelLabel({
+      const modelLabel = formatProviderModelSelectionLabel({
         provider: paneView.setup.selectedProvider,
         model: paneView.setup.selectedModel,
+        modelOptions: paneView.setup.selectedModelOptions,
         copilotModelById,
       });
       return (
@@ -3025,9 +3197,10 @@ export function App() {
     }
 
     if (paneView.thread) {
-      const modelLabel = formatProviderModelLabel({
+      const modelLabel = formatProviderModelSelectionLabel({
         provider: paneView.thread.provider,
         model: paneView.model,
+        modelOptions: paneView.modelOptions,
         copilotModelById,
       });
       return (

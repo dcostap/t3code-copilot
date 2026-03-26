@@ -4,6 +4,13 @@ import path from "node:path";
 
 import type { MCPServerConfig } from "@github/copilot-sdk";
 
+export interface CopilotMcpLoadResult {
+  readonly configPath: string;
+  readonly servers: Record<string, MCPServerConfig> | undefined;
+  readonly loadedServerNames: ReadonlyArray<string>;
+  readonly ignoredServerNames: ReadonlyArray<string>;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -96,15 +103,31 @@ function toMcpServerConfig(entry: unknown): MCPServerConfig | undefined {
 export async function loadCopilotMcpServers(
   configDir: string | undefined,
 ): Promise<Record<string, MCPServerConfig> | undefined> {
+  const result = await loadCopilotMcpServersWithDiagnostics(configDir);
+  return result.servers;
+}
+
+export function resolveCopilotMcpConfigPath(configDir: string | undefined): string {
   const baseDir = asNonEmptyString(configDir) ?? path.join(os.homedir(), ".copilot");
-  const configPath = path.join(baseDir, "mcp-config.json");
+  return path.join(baseDir, "mcp-config.json");
+}
+
+export async function loadCopilotMcpServersWithDiagnostics(
+  configDir: string | undefined,
+): Promise<CopilotMcpLoadResult> {
+  const configPath = resolveCopilotMcpConfigPath(configDir);
 
   let raw: string;
   try {
     raw = await fsp.readFile(configPath, "utf-8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return undefined;
+      return {
+        configPath,
+        servers: undefined,
+        loadedServerNames: [],
+        ignoredServerNames: [],
+      };
     }
     throw error;
   }
@@ -112,7 +135,12 @@ export async function loadCopilotMcpServers(
   const parsed = asRecord(JSON.parse(raw));
   const servers = asRecord(parsed?.mcpServers);
   if (!servers) {
-    return undefined;
+    return {
+      configPath,
+      servers: undefined,
+      loadedServerNames: [],
+      ignoredServerNames: [],
+    };
   }
 
   const normalizedEntries = Object.entries(servers).flatMap(([name, value]) => {
@@ -120,5 +148,13 @@ export async function loadCopilotMcpServers(
     return normalized ? [[name, normalized] as const] : [];
   });
 
-  return normalizedEntries.length > 0 ? Object.fromEntries(normalizedEntries) : undefined;
+  const loadedServerNames = normalizedEntries.map(([name]) => name);
+  const ignoredServerNames = Object.keys(servers).filter((name) => !loadedServerNames.includes(name));
+
+  return {
+    configPath,
+    servers: normalizedEntries.length > 0 ? Object.fromEntries(normalizedEntries) : undefined,
+    loadedServerNames,
+    ignoredServerNames,
+  };
 }

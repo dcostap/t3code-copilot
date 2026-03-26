@@ -1,4 +1,9 @@
-import { type ProviderKind, type ServerProviderModel } from "@t3tools/contracts";
+import {
+  type CodexReasoningEffort,
+  type ProviderKind,
+  type ProviderModelOptions,
+  type ServerProviderModel,
+} from "@t3tools/contracts";
 
 const copilotBillingMultiplierFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
@@ -33,4 +38,38 @@ export function formatProviderModelLabel(input: {
   }
 
   return `${resolvedLabel} ${formatCopilotBillingMultiplier(multiplier)}`;
+}
+
+function getProviderReasoningEffort(
+  modelOptions: ProviderModelOptions | undefined,
+  provider: ProviderKind,
+): CodexReasoningEffort | null {
+  return provider === "codex"
+    ? (modelOptions?.codex?.reasoningEffort ?? null)
+    : (modelOptions?.copilot?.reasoningEffort ?? null);
+}
+
+export function formatReasoningEffortLabel(reasoningEffort: CodexReasoningEffort): string {
+  switch (reasoningEffort) {
+    case "low":
+      return "Low reasoning";
+    case "medium":
+      return "Medium reasoning";
+    case "high":
+      return "High reasoning";
+    case "xhigh":
+      return "X-High reasoning";
+  }
+}
+
+export function formatProviderModelSelectionLabel(input: {
+  readonly provider: ProviderKind;
+  readonly model: string;
+  readonly modelOptions: ProviderModelOptions | undefined;
+  readonly baseLabel?: string;
+  readonly copilotModelById: ReadonlyMap<string, ServerProviderModel>;
+}): string {
+  const baseLabel = formatProviderModelLabel(input);
+  const reasoningEffort = getProviderReasoningEffort(input.modelOptions, input.provider);
+  return reasoningEffort ? `${baseLabel} · ${formatReasoningEffortLabel(reasoningEffort)}` : baseLabel;
 }

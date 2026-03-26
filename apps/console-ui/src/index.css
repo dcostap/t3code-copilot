@@ -870,9 +870,6 @@ body {
   font-size: 13px;
   font-family: inherit;
   cursor: pointer;
-  transition:
-    background-color 120ms ease,
-    color 120ms ease;
 }
 
 .palette-marker {
@@ -916,7 +913,7 @@ body {
 }
 
 .palette-row:hover {
-  background: rgba(126, 138, 153, 0.08);
+  background: rgba(120, 180, 237, 0.12);
 }
 
 .palette-row--active .palette-marker {

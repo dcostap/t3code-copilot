@@ -450,6 +450,115 @@ toolLifecycleLayer("CopilotAdapterLive tool lifecycle mapping", (it) => {
 
 });
 
+const mcpToolTitleSession = new FakeCopilotSession("copilot-session-mcp-tool-title");
+const mcpToolTitleClient = new FakeCopilotClient(mcpToolTitleSession);
+const mcpToolTitleLayer = it.layer(
+  makeCopilotAdapterLive({
+    clientFactory: () => mcpToolTitleClient,
+  }).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+mcpToolTitleLayer("CopilotAdapterLive MCP tool title precedence", (it) => {
+  it.effect("prefers assistant-provided toolTitle over raw MCP toolName for display", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CopilotAdapter;
+      yield* adapter.startSession({
+        provider: "copilot",
+        threadId: asThreadId("thread-mcp-title"),
+        runtimeMode: "full-access",
+      });
+
+      yield* Stream.take(adapter.streamEvents, 4).pipe(Stream.runDrain);
+
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 6).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      mcpToolTitleSession.emit({
+        id: "evt-mcp-turn-start",
+        timestamp: "2026-03-26T21:55:00.000Z",
+        parentId: null,
+        type: "assistant.turn_start",
+        data: {
+          turnId: "turn-mcp-title-1",
+        },
+      } satisfies SessionEvent);
+
+      const assistantMessageEvent = {
+        id: "evt-mcp-assistant-message",
+        timestamp: "2026-03-26T21:55:00.100Z",
+        parentId: "evt-mcp-turn-start",
+        type: "assistant.message",
+        data: {
+          messageId: "message-mcp-title-1",
+          content: "Running Everything search.",
+          toolRequests: [
+            {
+              toolCallId: "tool-mcp-title-1",
+              name: "everything-search-everything_search",
+              toolTitle: "everything_search",
+            },
+          ],
+        },
+      };
+
+      mcpToolTitleSession.emit(assistantMessageEvent as SessionEvent);
+
+      mcpToolTitleSession.emit({
+        id: "evt-mcp-tool-start",
+        timestamp: "2026-03-26T21:55:01.000Z",
+        parentId: "evt-mcp-turn-start",
+        type: "tool.execution_start",
+        data: {
+          toolCallId: "tool-mcp-title-1",
+          toolName: "everything-search-everything_search",
+          mcpServerName: "everything-search",
+          mcpToolName: "everything_search",
+          arguments: {
+            query: "ext:xlsx",
+          },
+        },
+      } satisfies SessionEvent);
+
+      mcpToolTitleSession.emit({
+        id: "evt-mcp-tool-complete",
+        timestamp: "2026-03-26T21:55:02.000Z",
+        parentId: "evt-mcp-tool-start",
+        type: "tool.execution_complete",
+        data: {
+          toolCallId: "tool-mcp-title-1",
+          success: true,
+          result: {
+            content: "Found files",
+            detailedContent: "Found files",
+          },
+        },
+      } satisfies SessionEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+
+      const startedEvent = events.find((event) => event.type === "item.started");
+      assert.equal(startedEvent?.type, "item.started");
+      if (startedEvent?.type === "item.started") {
+        assert.equal(startedEvent.payload.title, "everything_search");
+      }
+
+      const completedEvent = events.find(
+        (event) => event.type === "item.completed" && event.payload.itemType !== "assistant_message",
+      );
+      assert.equal(completedEvent?.type, "item.completed");
+      if (completedEvent?.type === "item.completed") {
+        assert.equal(completedEvent.payload.title, "everything_search");
+      }
+    }),
+  );
+
+});
+
 const fileChangeSession = new FakeCopilotSession("copilot-session-file-change");
 const fileChangeClient = new FakeCopilotClient(fileChangeSession);
 const fileChangeLayer = it.layer(
@@ -580,6 +689,151 @@ fileChangeLayer("CopilotAdapterLive file-change normalization", (it) => {
   );
 });
 
+const nativeEditSession = new FakeCopilotSession("copilot-session-native-edit");
+const nativeEditClient = new FakeCopilotClient(nativeEditSession);
+const nativeEditLayer = it.layer(
+  makeCopilotAdapterLive({
+    clientFactory: () => nativeEditClient,
+  }).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+nativeEditLayer("CopilotAdapterLive native edit normalization", (it) => {
+  it.effect("normalizes plain edit tools into file-change items with inline diffs", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CopilotAdapter;
+      yield* adapter.startSession({
+        provider: "copilot",
+        threadId: asThreadId("thread-native-edit"),
+        runtimeMode: "full-access",
+      });
+
+      yield* Stream.take(adapter.streamEvents, 4).pipe(Stream.runDrain);
+
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 5).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      nativeEditSession.emit({
+        id: "evt-native-edit-turn-start",
+        timestamp: "2026-03-26T22:22:29.500Z",
+        parentId: null,
+        type: "assistant.turn_start",
+        data: {
+          turnId: "turn-native-edit-1",
+        },
+      } satisfies SessionEvent);
+
+      nativeEditSession.emit({
+        id: "evt-native-edit-tool-start",
+        timestamp: "2026-03-26T22:22:29.585Z",
+        parentId: "evt-native-edit-turn-start",
+        type: "tool.execution_start",
+        data: {
+          toolCallId: "tool-native-edit-1",
+          toolName: "edit",
+          arguments: {
+            path: "src/example.txt",
+            old_str: "old line\n",
+            new_str: "new line\n",
+          },
+        },
+      } satisfies SessionEvent);
+
+      nativeEditSession.emit({
+        id: "evt-native-edit-tool-complete",
+        timestamp: "2026-03-26T22:22:29.599Z",
+        parentId: "evt-native-edit-tool-start",
+        type: "tool.execution_complete",
+        data: {
+          toolCallId: "tool-native-edit-1",
+          success: true,
+          result: {
+            content: "File src/example.txt updated with changes.",
+            detailedContent:
+              "diff --git a/src/example.txt b/src/example.txt\n"
+              + "index 0000000..0000000 100644\n"
+              + "--- a/src/example.txt\n"
+              + "+++ b/src/example.txt\n"
+              + "@@ -1 +1 @@\n"
+              + "-old line\n"
+              + "+new line\n",
+          },
+        },
+      } satisfies SessionEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+
+      const startedEvent = events.find((event) => event.type === "item.started");
+      assert.equal(startedEvent?.type, "item.started");
+      if (startedEvent?.type === "item.started") {
+        assert.equal(startedEvent.payload.itemType, "file_change");
+        assert.deepStrictEqual(startedEvent.payload.data, {
+          item: {
+            id: "tool-native-edit-1",
+            type: "fileChange",
+            status: "inProgress",
+            changes: [{ path: "src/example.txt" }],
+          },
+          source: {
+            toolCallId: "tool-native-edit-1",
+            toolName: "edit",
+            arguments: {
+              path: "src/example.txt",
+              old_str: "old line\n",
+              new_str: "new line\n",
+            },
+          },
+        });
+      }
+
+      const completedEvent = events.find((event) => event.type === "item.completed");
+      assert.equal(completedEvent?.type, "item.completed");
+      if (completedEvent?.type === "item.completed") {
+        assert.equal(completedEvent.payload.itemType, "file_change");
+        assert.deepStrictEqual(completedEvent.payload.data, {
+          item: {
+            id: "tool-native-edit-1",
+            type: "fileChange",
+            status: "completed",
+            changes: [
+              {
+                path: "src/example.txt",
+                diff:
+                  "diff --git a/src/example.txt b/src/example.txt\n"
+                  + "index 0000000..0000000 100644\n"
+                  + "--- a/src/example.txt\n"
+                  + "+++ b/src/example.txt\n"
+                  + "@@ -1 +1 @@\n"
+                  + "-old line\n"
+                  + "+new line",
+              },
+            ],
+          },
+          source: {
+            toolCallId: "tool-native-edit-1",
+            success: true,
+            result: {
+              content: "File src/example.txt updated with changes.",
+              detailedContent:
+                "diff --git a/src/example.txt b/src/example.txt\n"
+                + "index 0000000..0000000 100644\n"
+                + "--- a/src/example.txt\n"
+                + "+++ b/src/example.txt\n"
+                + "@@ -1 +1 @@\n"
+                + "-old line\n"
+                + "+new line\n",
+            },
+          },
+        });
+      }
+    }),
+  );
+});
+
 afterAll(() => {
   void modeSession.destroy();
   void modeClient.stop();
@@ -589,6 +843,10 @@ afterAll(() => {
   void mcpClient.stop();
   void toolLifecycleSession.destroy();
   void toolLifecycleClient.stop();
+  void mcpToolTitleSession.destroy();
+  void mcpToolTitleClient.stop();
   void fileChangeSession.destroy();
   void fileChangeClient.stop();
+  void nativeEditSession.destroy();
+  void nativeEditClient.stop();
 });

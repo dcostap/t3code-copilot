@@ -197,6 +197,31 @@ function itemTitle(itemType: CanonicalItemType): string | undefined {
   }
 }
 
+function itemDisplayTitle(
+  itemType: CanonicalItemType,
+  item: Record<string, unknown>,
+  payload: Record<string, unknown>,
+): string | undefined {
+  if (itemType === "mcp_tool_call") {
+    const candidates = [
+      asString(item.title),
+      asString(item.toolTitle),
+      asString(item.tool),
+      asString(item.toolName),
+      asString(payload.tool),
+      asString(payload.toolName),
+      asString(item.server),
+    ];
+    for (const candidate of candidates) {
+      const trimmed = candidate?.trim();
+      if (trimmed) {
+        return trimmed;
+      }
+    }
+  }
+  return itemTitle(itemType);
+}
+
 function itemDetail(
   item: Record<string, unknown>,
   payload: Record<string, unknown>,
@@ -511,6 +536,7 @@ function mapItemLifecycle(
   }
 
   const detail = itemDetail(source, payload ?? {});
+  const title = itemDisplayTitle(itemType, source, payload ?? {});
   const status =
     lifecycle === "item.started"
       ? "inProgress"
@@ -524,7 +550,7 @@ function mapItemLifecycle(
     payload: {
       itemType,
       ...(status ? { status } : {}),
-      ...(itemTitle(itemType) ? { title: itemTitle(itemType) } : {}),
+      ...(title ? { title } : {}),
       ...(detail ? { detail } : {}),
       ...(event.payload !== undefined ? { data: event.payload } : {}),
     },

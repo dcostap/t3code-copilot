@@ -6,6 +6,7 @@ import type {
 } from "@t3tools/contracts";
 
 import {
+  replacePaneWithFreshDraft,
   reconcileProjectLayoutsState,
   reconcileProjectLayoutsStateWhenReady,
   resolveThreadCwd,
@@ -70,6 +71,10 @@ function createEmptyState(): ConsoleProjectLayoutsState {
       codex: "gpt-5-codex",
       copilot: "gpt-5",
     },
+    lastChosenModelOptionsByProvider: {
+      codex: undefined,
+      copilot: undefined,
+    },
   };
 }
 
@@ -123,6 +128,14 @@ describe("reconcileProjectLayoutsState", () => {
           codex: "gpt-5-codex",
           copilot: "claude-sonnet-4.5",
         },
+        lastChosenModelOptionsByProvider: {
+          codex: undefined,
+          copilot: {
+            copilot: {
+              reasoningEffort: "high",
+            },
+          },
+        },
       },
       threads: [],
       projects: [project],
@@ -136,6 +149,11 @@ describe("reconcileProjectLayoutsState", () => {
     if (pane?.kind === "draft") {
       expect(pane.setup.selectedProvider).toBe("copilot");
       expect(pane.setup.selectedModel).toBe("claude-sonnet-4.5");
+      expect(pane.setup.selectedModelOptions).toEqual({
+        copilot: {
+          reasoningEffort: "high",
+        },
+      });
     }
   });
 
@@ -299,5 +317,68 @@ describe("reconcileProjectLayoutsState", () => {
       preferredThreadId: null,
       hydrated: false,
     })).toBe(persistedState);
+  });
+
+  it("can swap the current pane back into a fresh draft while inheriting the pane model selection", () => {
+    const thread = makeThread({
+      id: "thread:replace",
+      createdAt: "2026-03-12T10:00:00.000Z",
+    });
+
+    const state = replacePaneWithFreshDraft({
+      ...createEmptyState(),
+      lastChosenProvider: "copilot",
+      lastChosenModelByProvider: {
+        codex: "gpt-5-codex",
+        copilot: "gpt-5.4",
+      },
+      lastChosenModelOptionsByProvider: {
+        codex: undefined,
+        copilot: {
+          copilot: {
+            reasoningEffort: "high",
+          },
+        },
+      },
+      projectOrder: [project.id],
+      activeProjectId: project.id,
+      layoutsByProjectId: {
+        [project.id]: {
+          projectId: project.id,
+          activeTabId: "tab:1",
+          updatedAt: "2026-03-12T10:00:00.000Z",
+          tabs: [{
+            id: "tab:1",
+            paneIds: ["pane:1"],
+            activePaneId: "pane:1",
+            createdAt: "2026-03-12T10:00:00.000Z",
+          }],
+          panesById: {
+            "pane:1": { id: "pane:1", kind: "thread", threadId: thread.id },
+          },
+        },
+      },
+    }, project.id, "pane:1", {
+      selectedProvider: "codex",
+      selectedModel: "gpt-5.3-codex",
+      selectedModelOptions: {
+        codex: {
+          reasoningEffort: "medium",
+        },
+      },
+    });
+
+    const pane = state.layoutsByProjectId[project.id]?.panesById["pane:1"];
+    expect(pane?.kind).toBe("draft");
+    if (pane?.kind === "draft") {
+      expect(pane.setup.selectedProvider).toBe("codex");
+      expect(pane.setup.selectedModel).toBe("gpt-5.3-codex");
+      expect(pane.setup.selectedModelOptions).toEqual({
+        codex: {
+          reasoningEffort: "medium",
+        },
+      });
+    }
+    expect(state.layoutsByProjectId[project.id]?.tabs[0]?.activePaneId).toBe("pane:1");
   });
 });
