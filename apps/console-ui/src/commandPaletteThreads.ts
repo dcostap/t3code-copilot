@@ -13,6 +13,10 @@ export function stripThreadPickerQueryPrefix(query: string): string {
     : query;
 }
 
+export function hasThreadPickerSearchQuery(query: string): boolean {
+  return stripThreadPickerQueryPrefix(query).trim().length > 0;
+}
+
 export function getPaletteThreadIndicator(tone: PaletteThreadIndicatorTone): string {
   switch (tone) {
     case "working":
@@ -38,4 +42,33 @@ export function formatPaletteThreadLabel(input: {
   return input.indicatorTone === "working" && input.workingLabel
     ? `${input.projectTitle} - ${input.threadTitle} - ${indicator} ${input.workingLabel}`
     : `${input.projectTitle} - ${input.threadTitle} - ${indicator}`;
+}
+
+export function formatPaletteProjectLabel(input: {
+  readonly projectTitle: string;
+  readonly workspaceRoot: string;
+  readonly unreadThreadCount: number;
+  readonly workingThreadCount: number;
+}): string {
+  const parts = [input.projectTitle, input.workspaceRoot];
+  if (input.workingThreadCount > 0) {
+    parts.push(`${getPaletteThreadIndicator("working")} ${input.workingThreadCount}`);
+  }
+  if (input.unreadThreadCount > 0) {
+    parts.push(`${getPaletteThreadIndicator("unread")} ${input.unreadThreadCount}`);
+  }
+  return parts.join(" - ");
+}
+
+export interface PaletteThreadPickerGroup<TCommand> {
+  readonly projectCommand: TCommand;
+  readonly threadCommands: ReadonlyArray<TCommand>;
+}
+
+export function flattenPaletteThreadPickerGroups<TCommand>(
+  groups: ReadonlyArray<PaletteThreadPickerGroup<TCommand>>,
+): ReadonlyArray<TCommand> {
+  return groups.flatMap((group) => group.threadCommands.length > 0
+    ? [group.projectCommand, ...group.threadCommands]
+    : []);
 }

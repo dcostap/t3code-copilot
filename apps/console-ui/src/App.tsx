@@ -39,7 +39,10 @@ import {
   type CommandPaletteCommand,
 } from "./commandPaletteCommands";
 import {
+  flattenPaletteThreadPickerGroups,
+  formatPaletteProjectLabel,
   formatPaletteThreadLabel,
+  hasThreadPickerSearchQuery,
   isThreadPickerQuery,
   stripThreadPickerQueryPrefix,
 } from "./commandPaletteThreads";
@@ -114,6 +117,9 @@ const MANUAL_MODEL_COMMANDS_BY_PROVIDER = {
   ],
 } as const satisfies Record<ProviderKind, ReadonlyArray<{ readonly slug: string; readonly label: string }>>;
 const SPLIT_PANE_COMMAND_LABEL = "Split into new pane";
+const CLOSE_PANE_COMMAND_LABEL = "Close current pane";
+const CREATE_TAB_COMMAND_LABEL = "Add new tab";
+const ADD_PROJECT_COMMAND_LABEL = "Add new project";
 
 function SidebarChevronIcon({ className }: { className?: string }) {
   return (
@@ -385,6 +391,25 @@ export function shouldOpenPaneSearchShortcut(
   event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey">,
 ) {
   return !event.altKey && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f";
+}
+
+export function shouldActivateNextTabShortcut(
+  event: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "metaKey" | "altKey">,
+) {
+  return event.ctrlKey && !event.shiftKey && !event.metaKey && !event.altKey && event.key === "Tab";
+}
+
+export function getNextProjectTabId(
+  layout: Pick<ConsoleProjectLayout, "tabs" | "activeTabId"> | null,
+) {
+  if (!layout || layout.tabs.length <= 1) {
+    return null;
+  }
+  const activeIndex = layout.tabs.findIndex((tab) => tab.id === layout.activeTabId);
+  if (activeIndex === -1) {
+    return layout.tabs[0]?.id ?? null;
+  }
+  return layout.tabs[(activeIndex + 1) % layout.tabs.length]?.id ?? null;
 }
 
 export function shouldBlockGlobalPromptTypingForSelection(input: {
@@ -2498,14 +2523,19 @@ export function App() {
     }
   }, [createThread, respondToUserInput, submitPrompt, workspace]);
 
-  const paletteThreadCommands = useMemo<AppPaletteCommand[]>(() => {
+  const paletteThreadPickerGroups = useMemo<ReadonlyArray<{
+    readonly projectCommand: AppPaletteCommand;
+    readonly threadCommands: ReadonlyArray<AppPaletteCommand>;
+  }>>(() => {
     if (!palettePaneView) {
       return [];
     }
 
-    return visibleSidebarProjectViews.flatMap((projectView) => {
+    return visibleSidebarProjectViews.map((projectView) => {
       const threads = orderedThreadsByProjectId.get(projectView.project.id) ?? [];
-      return threads.map((thread) => {
+      let workingThreadCount = 0;
+      let unreadThreadCount = 0;
+      const threadCommands = threads.map((thread) => {
         const pendingUserInput = getPendingUserInputs(thread.id)[0] ?? null;
         const status = getThreadStatus(
           thread,
@@ -2515,6 +2545,11 @@ export function App() {
         );
         const isWorking = status.tone === "working";
         const hasUnreadMarker = !isWorking && unreadThreadIds.has(thread.id);
+        if (isWorking) {
+          workingThreadCount += 1;
+        } else if (hasUnreadMarker) {
+          unreadThreadCount += 1;
+        }
         return {
           id: `thread:${palettePaneView.pane.id}:${thread.id}`,
           label: formatPaletteThreadLabel({
@@ -2546,6 +2581,25 @@ export function App() {
           },
         } satisfies AppPaletteCommand;
       });
+      return {
+        projectCommand: {
+          id: `thread-project:${palettePaneView.pane.id}:${projectView.project.id}`,
+          label: formatPaletteProjectLabel({
+            projectTitle: projectView.project.title,
+            workspaceRoot: projectView.project.workspaceRoot,
+            workingThreadCount,
+            unreadThreadCount,
+          }),
+          keywords: [
+            projectView.project.title,
+            projectView.project.workspaceRoot,
+          ],
+          run: () => {
+            workspace.activateProject(projectView.project.id);
+          },
+        } satisfies AppPaletteCommand,
+        threadCommands,
+      };
     });
   }, [
     getPendingUserInputs,
@@ -2557,12 +2611,28 @@ export function App() {
     visibleSidebarProjectViews,
     workspace,
   ]);
+  const paletteProjectCommands = useMemo(
+    () => paletteThreadPickerGroups.map((group) => group.projectCommand),
+    [paletteThreadPickerGroups],
+  );
+  const paletteAddProjectCommand = useMemo<AppPaletteCommand>(() => ({
+    id: "project:add",
+    label: ADD_PROJECT_COMMAND_LABEL,
+    keywords: ["add project", "new project", "open project", "create project", "workspace"],
+    priority: HIGH_PRIORITY_COMMAND,
+    run: () => {
+      handleOpenProjectModal();
+    },
+  }), [handleOpenProjectModal]);
 
   const paletteThreadPickerMode = useMemo(() => isThreadPickerQuery(paletteQuery), [paletteQuery]);
+  const paletteThreadSearchQuery = useMemo(() => stripThreadPickerQueryPrefix(paletteQuery), [paletteQuery]);
+  const paletteThreadSearchMode = useMemo(() => hasThreadPickerSearchQuery(paletteQuery), [paletteQuery]);
 
-  const resolveCommandsForPane = useCallback((targetPaneView: PaneView | null): AppPaletteCommand[] => {
+  const resolveCommandsForPane = useCallback((targetPaneView: PaneView | null): ReadonlyArray<AppPaletteCommand> => {
+    const addProjectCommands: ReadonlyArray<AppPaletteCommand> = [paletteAddProjectCommand];
     if (!targetPaneView) {
-      return [];
+      return addProjectCommands;
     }
 
     const targetProjectView =
@@ -2570,6 +2640,19 @@ export function App() {
     const targetTab =
       targetProjectView?.layout.tabs.find((tab) => tab.id === targetPaneView.tabId) ?? null;
     const splitPaneShortcut = findAppCommandShortcutByActionId("pane.split");
+    const closePaneShortcut = findAppCommandShortcutByActionId("pane.close");
+    const createTabShortcut = findAppCommandShortcutByActionId("tab.create");
+    const createTabCommands: ReadonlyArray<AppPaletteCommand> = [{
+      id: `tab:create:${targetPaneView.project.id}`,
+      actionId: "tab.create",
+      label: CREATE_TAB_COMMAND_LABEL,
+      keywords: ["new tab", "add new tab", "create tab"],
+      priority: HIGH_PRIORITY_COMMAND,
+      ...(createTabShortcut ? { shortcutLabel: formatAppCommandShortcutLabel(createTabShortcut) } : {}),
+      run: () => {
+        void handleCreateDraftTabForProject(targetPaneView.project.id);
+      },
+    }];
     const splitPaneCommands: ReadonlyArray<AppPaletteCommand> =
       targetTab && targetTab.paneIds.length < MAX_TAB_PANES
         ? [{
@@ -2587,6 +2670,17 @@ export function App() {
             },
           }]
         : [];
+    const closePaneCommands: ReadonlyArray<AppPaletteCommand> = [{
+      id: `pane:close:${targetPaneView.pane.id}`,
+      actionId: "pane.close",
+      label: CLOSE_PANE_COMMAND_LABEL,
+      keywords: ["close pane", "close current pane", "remove pane"],
+      priority: HIGH_PRIORITY_COMMAND,
+      ...(closePaneShortcut ? { shortcutLabel: formatAppCommandShortcutLabel(closePaneShortcut) } : {}),
+      run: () => {
+        workspace.closePane(targetPaneView.project.id, targetPaneView.pane.id);
+      },
+    }];
 
     const providerCommands: ReadonlyArray<{
       readonly provider: ProviderKind;
@@ -2648,6 +2742,9 @@ export function App() {
     );
 
     return [
+      ...addProjectCommands,
+      ...createTabCommands,
+      ...closePaneCommands,
       ...splitPaneCommands,
       ...providerCommands.map(({ provider, label, keywords, priority }) => ({
         id: `draft-provider:${targetPaneView.pane.id}:${provider}`,
@@ -2668,22 +2765,38 @@ export function App() {
       })),
       ...modelCommands,
     ];
-  }, [copilotModelById, setThreadModel, workspace]);
+  }, [copilotModelById, handleCreateDraftTabForProject, paletteAddProjectCommand, setThreadModel, workspace]);
 
   const paletteCommands = useMemo(
     () => resolveCommandsForPane(palettePaneView),
     [palettePaneView, resolveCommandsForPane],
   );
+  const activeProjectForShortcuts = workspace.activeProject;
+  const activePaneId = workspace.activePaneId;
+  const activateProjectTab = workspace.activateTab;
 
   const filteredCommands = useMemo(
     () =>
       paletteThreadPickerMode
-        ? filterCommandPaletteCommands(
-            paletteThreadCommands,
-            stripThreadPickerQueryPrefix(paletteQuery),
-          )
+        ? paletteThreadSearchMode
+          ? flattenPaletteThreadPickerGroups(
+              paletteThreadPickerGroups.map((group) => ({
+                projectCommand: group.projectCommand,
+                threadCommands: filterCommandPaletteCommands(group.threadCommands, paletteThreadSearchQuery),
+              })),
+            )
+          : [...paletteProjectCommands, paletteAddProjectCommand]
         : filterCommandPaletteCommands(paletteCommands, paletteQuery),
-    [paletteCommands, paletteQuery, paletteThreadCommands, paletteThreadPickerMode],
+    [
+      paletteAddProjectCommand,
+      paletteCommands,
+      paletteProjectCommands,
+      paletteQuery,
+      paletteThreadPickerGroups,
+      paletteThreadPickerMode,
+      paletteThreadSearchMode,
+      paletteThreadSearchQuery,
+    ],
   );
 
   useEffect(() => {
@@ -2737,8 +2850,18 @@ export function App() {
         return;
       }
 
-      const activePaneHandle = workspace.activePaneId ? paneRefs.current[workspace.activePaneId] : null;
+      const activePaneHandle = activePaneId ? paneRefs.current[activePaneId] : null;
       if (hasBlockingModal) {
+        return;
+      }
+
+      if (shouldActivateNextTabShortcut(event)) {
+        const nextTabId = getNextProjectTabId(activeLayout);
+        if (!nextTabId || !activeProjectForShortcuts) {
+          return;
+        }
+        event.preventDefault();
+        activateProjectTab(activeProjectForShortcuts.id, nextTabId);
         return;
       }
 
@@ -2757,7 +2880,7 @@ export function App() {
         return;
       }
 
-      if (workspace.activePaneId && shouldOpenPaneSearchShortcut(event)) {
+      if (activePaneId && shouldOpenPaneSearchShortcut(event)) {
         if (isEditableTarget(event.target) && !activePaneHandle?.hasFocusWithinPane()) {
           return;
         }
@@ -2766,7 +2889,7 @@ export function App() {
         return;
       }
 
-      if (!workspace.activePaneId || isEditableTarget(event.target)) {
+      if (!activePaneId || isEditableTarget(event.target)) {
         return;
       }
 
@@ -2774,7 +2897,7 @@ export function App() {
         typeof window !== "undefined"
         && typeof document !== "undefined"
         && hasNonCollapsedSelectionInsideElement(window.getSelection(), document.body);
-      const hasSelectionInActiveHistory = paneRefs.current[workspace.activePaneId]?.hasHistorySelection() ?? false;
+      const hasSelectionInActiveHistory = paneRefs.current[activePaneId]?.hasHistorySelection() ?? false;
       if (shouldBlockGlobalPromptTypingForSelection({ hasSelectionInDocument, hasSelectionInActiveHistory })) {
         return;
       }
@@ -2805,7 +2928,18 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activePaneView, closePalette, hasBlockingModal, openPalette, paletteOpen, resolveCommandsForPane, workspace.activePaneId]);
+  }, [
+    activateProjectTab,
+    activePaneView,
+    activeLayout,
+    activePaneId,
+    activeProjectForShortcuts,
+    closePalette,
+    hasBlockingModal,
+    openPalette,
+    paletteOpen,
+    resolveCommandsForPane,
+  ]);
 
   const getPaneFooterText = useCallback((paneView: PaneView) => {
     if (paneView.isActive && submitError) {

@@ -26,14 +26,26 @@ import {
   resolveProjectSelectionAfterArchive,
   resolveManagedThreadRowSelection,
   shouldBlockGlobalPromptTypingForSelection,
+  shouldActivateNextTabShortcut,
   shouldOpenPaneSearchShortcut,
   shouldScopeGlobalSelectAllToHistory,
   summarizeThreadSelection,
+  getNextProjectTabId,
   shouldRetainPendingPromptSend,
   shouldSuppressTabFocusNavigation,
   toggleManagedThreadChecksForRows,
 } from "./App";
+import type { ConsoleProjectLayout } from "./consoleSessions";
 import { buildTestSnapshot } from "./testSupport/testSnapshot";
+
+function buildTestConsoleLayoutTab(id: string): ConsoleProjectLayout["tabs"][number] {
+  return {
+    id,
+    paneIds: [`pane:${id}`],
+    activePaneId: `pane:${id}`,
+    createdAt: "2026-03-26T00:00:00.000Z",
+  };
+}
 
 describe("shouldRetainPendingPromptSend", () => {
   it("clears the pending sending state once a provider turn start failure arrives after the send started", () => {
@@ -367,6 +379,66 @@ describe("shouldOpenPaneSearchShortcut", () => {
       metaKey: false,
       altKey: true,
     })).toBe(false);
+  });
+});
+
+describe("shouldActivateNextTabShortcut", () => {
+  it("matches Ctrl+Tab without other modifiers", () => {
+    expect(shouldActivateNextTabShortcut({
+      key: "Tab",
+      ctrlKey: true,
+      shiftKey: false,
+      metaKey: false,
+      altKey: false,
+    } as KeyboardEvent)).toBe(true);
+  });
+
+  it("ignores plain Tab and modified variants", () => {
+    expect(shouldActivateNextTabShortcut({
+      key: "Tab",
+      ctrlKey: false,
+      shiftKey: false,
+      metaKey: false,
+      altKey: false,
+    } as KeyboardEvent)).toBe(false);
+
+    expect(shouldActivateNextTabShortcut({
+      key: "Tab",
+      ctrlKey: true,
+      shiftKey: true,
+      metaKey: false,
+      altKey: false,
+    } as KeyboardEvent)).toBe(false);
+  });
+});
+
+describe("getNextProjectTabId", () => {
+  it("wraps to the first tab after the active tab", () => {
+    expect(getNextProjectTabId({
+      activeTabId: "tab-2",
+      tabs: [
+        buildTestConsoleLayoutTab("tab-1"),
+        buildTestConsoleLayoutTab("tab-2"),
+        buildTestConsoleLayoutTab("tab-3"),
+      ],
+    })).toBe("tab-3");
+
+    expect(getNextProjectTabId({
+      activeTabId: "tab-3",
+      tabs: [
+        buildTestConsoleLayoutTab("tab-1"),
+        buildTestConsoleLayoutTab("tab-2"),
+        buildTestConsoleLayoutTab("tab-3"),
+      ],
+    })).toBe("tab-1");
+  });
+
+  it("returns null when there is nothing to cycle", () => {
+    expect(getNextProjectTabId(null)).toBeNull();
+    expect(getNextProjectTabId({
+      activeTabId: "tab-1",
+      tabs: [buildTestConsoleLayoutTab("tab-1")],
+    })).toBeNull();
   });
 });
 

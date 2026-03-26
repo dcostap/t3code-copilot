@@ -1,4 +1,4 @@
-export type AppCommandActionId = "pane.split";
+export type AppCommandActionId = "pane.split" | "pane.close" | "tab.create";
 
 interface AppCommandShortcut {
   readonly key: string;
@@ -18,6 +18,26 @@ export const APP_COMMAND_SHORTCUTS = [
     actionId: "pane.split",
     shortcut: {
       key: "0",
+      ctrlKey: true,
+      shiftKey: false,
+      metaKey: false,
+      altKey: false,
+    },
+  },
+  {
+    actionId: "pane.close",
+    shortcut: {
+      key: "w",
+      ctrlKey: true,
+      shiftKey: false,
+      metaKey: false,
+      altKey: false,
+    },
+  },
+  {
+    actionId: "tab.create",
+    shortcut: {
+      key: "t",
       ctrlKey: true,
       shiftKey: false,
       metaKey: false,
