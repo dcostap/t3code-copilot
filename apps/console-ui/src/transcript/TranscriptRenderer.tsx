@@ -2374,7 +2374,7 @@ function buildEditorTheme() {
         backgroundColor: "transparent",
         fontFamily:
           '"Cascadia Code", "Cascadia Mono", "Iosevka Term", "JetBrains Mono", Consolas, monospace',
-        fontSize: "16px",
+        fontSize: "15px",
       },
       ".cm-scroller": {
         display: "flex",
@@ -2454,14 +2454,14 @@ function buildEditorTheme() {
       },
       ".cm-line-reasoningSummary": {
         color: "#84919f",
-        fontSize: "14px",
+        fontSize: "13px",
         fontStyle: "italic",
         paddingTop: "2px",
         paddingBottom: "4px",
       },
       ".cm-line-reasoning": {
         color: "#84919f",
-        fontSize: "14px",
+        fontSize: "13px",
         fontStyle: "italic",
       },
       ".cm-line-table": {
