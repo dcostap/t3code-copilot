@@ -152,8 +152,8 @@ export function CommandPalette({
                   <span className="palette-marker" aria-hidden="true">{index === selectedIndex ? "›" : ""}</span>
                   <span className="palette-rowBody">
                     <span className="palette-cmd">{cmd.label}</span>
-                    {cmd.shortcutLabel ? (
-                      <span className="palette-shortcut">{cmd.shortcutLabel}</span>
+                    {cmd.shortcutLabel ?? cmd.trailingLabel ? (
+                      <span className="palette-shortcut">{cmd.shortcutLabel ?? cmd.trailingLabel}</span>
                     ) : null}
                   </span>
                 </button>

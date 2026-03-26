@@ -4,6 +4,7 @@ export interface CommandPaletteCommand {
   readonly keywords?: ReadonlyArray<string>;
   readonly priority?: number;
   readonly shortcutLabel?: string;
+  readonly trailingLabel?: string;
 }
 
 function tokenizeCommandPaletteQuery(query: string) {

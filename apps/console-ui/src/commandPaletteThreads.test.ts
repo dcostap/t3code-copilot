@@ -49,17 +49,15 @@ describe("commandPaletteThreads", () => {
   it("formats project labels with the full workspace path and aggregate counts", () => {
     expect(formatPaletteProjectLabel({
       projectTitle: "Console UI",
-      workspaceRoot: "C:\\Projects\\webdev\\t3code-copilot",
       workingThreadCount: 2,
       unreadThreadCount: 1,
-    })).toBe("Console UI - C:\\Projects\\webdev\\t3code-copilot - 🔵 2 - 🟢 1");
+    })).toBe("Console UI - 🔵 2 - 🟢 1");
 
     expect(formatPaletteProjectLabel({
       projectTitle: "Console UI",
-      workspaceRoot: "C:\\Projects\\webdev\\t3code-copilot",
       workingThreadCount: 0,
       unreadThreadCount: 0,
-    })).toBe("Console UI - C:\\Projects\\webdev\\t3code-copilot");
+    })).toBe("Console UI");
   });
 
   it("inserts project commands above each matching thread group", () => {

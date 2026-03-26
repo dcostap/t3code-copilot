@@ -2586,10 +2586,10 @@ export function App() {
           id: `thread-project:${palettePaneView.pane.id}:${projectView.project.id}`,
           label: formatPaletteProjectLabel({
             projectTitle: projectView.project.title,
-            workspaceRoot: projectView.project.workspaceRoot,
             workingThreadCount,
             unreadThreadCount,
           }),
+          trailingLabel: projectView.project.workspaceRoot,
           keywords: [
             projectView.project.title,
             projectView.project.workspaceRoot,
@@ -3099,9 +3099,7 @@ export function App() {
                 </button>
               ))}
             </div>
-          ) : (
-            <div className="project-tabs__spacer" aria-hidden="true" />
-          )}
+          ) : null}
           <button type="button" className="project-tab project-tab--create" onClick={handleCreateDraftTab} aria-label="New tab">
             +
           </button>

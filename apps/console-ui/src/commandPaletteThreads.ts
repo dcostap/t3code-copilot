@@ -46,11 +46,10 @@ export function formatPaletteThreadLabel(input: {
 
 export function formatPaletteProjectLabel(input: {
   readonly projectTitle: string;
-  readonly workspaceRoot: string;
   readonly unreadThreadCount: number;
   readonly workingThreadCount: number;
 }): string {
-  const parts = [input.projectTitle, input.workspaceRoot];
+  const parts = [input.projectTitle];
   if (input.workingThreadCount > 0) {
     parts.push(`${getPaletteThreadIndicator("working")} ${input.workingThreadCount}`);
   }
