@@ -476,6 +476,8 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     productName,
     artifactName: "T3-Code-${version}-${arch}.${ext}",
     asarUnpack: ["node_modules/@github/copilot*/**/*"],
+    npmRebuild: false,
+    nodeGypRebuild: false,
     directories: {
       buildResources: "apps/desktop/resources",
     },
