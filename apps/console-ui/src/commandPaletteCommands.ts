@@ -1,8 +1,9 @@
 export interface CommandPaletteCommand {
   readonly id: string;
   readonly label: string;
-  readonly contextText?: string;
   readonly keywords?: ReadonlyArray<string>;
+  readonly priority?: number;
+  readonly shortcutLabel?: string;
 }
 
 function tokenizeCommandPaletteQuery(query: string) {
@@ -15,9 +16,7 @@ function tokenizeCommandPaletteQuery(query: string) {
 
 function commandSearchFields(command: CommandPaletteCommand) {
   return [
-    command.id,
     command.label,
-    command.contextText ?? "",
     ...(command.keywords ?? []),
   ].map((value) => value.toLowerCase());
 }
@@ -59,7 +58,7 @@ function scoreCommandPaletteCommand(command: CommandPaletteCommand, normalizedQu
   return 0;
 }
 
-/** Token-aware filtering across id, label, context text, and keywords with ordered matching. */
+/** Token-aware filtering across visible labels and hidden keyword aliases with ordered matching. */
 export function filterCommandPaletteCommands(
   commands: ReadonlyArray<CommandPaletteCommand>,
   query: string,
@@ -74,9 +73,13 @@ export function filterCommandPaletteCommands(
     .map((command, index) => ({
       command,
       index,
+      priority: command.priority ?? 0,
       score: scoreCommandPaletteCommand(command, normalizedQuery, tokens),
     }))
     .filter((entry) => entry.score > 0)
-    .toSorted((left, right) => right.score - left.score || left.index - right.index)
+    .toSorted((left, right) =>
+      right.priority - left.priority
+      || right.score - left.score
+      || left.index - right.index)
     .map((entry) => entry.command);
 }

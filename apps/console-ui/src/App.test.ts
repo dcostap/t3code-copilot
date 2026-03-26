@@ -17,6 +17,7 @@ import {
   getThreadSplitDropZoneClassName,
   isDraggedThreadSplitZoneLimitReached,
   isPaletteToggleShortcut,
+  isPaletteThreadShortcut,
   normalizeProjectWorkspaceRootForComparison,
   parsePersistedArchivedProjectIds,
   parsePersistedUnreadThreadIds,
@@ -307,11 +308,33 @@ describe("isPaletteToggleShortcut", () => {
     })).toBe(true);
   });
 
-  it("does not match the old ctrl+k shortcut", () => {
+  it("does not match ctrl+e", () => {
     expect(isPaletteToggleShortcut({
-      key: "k",
+      key: "e",
       ctrlKey: true,
       shiftKey: false,
+      metaKey: false,
+      altKey: false,
+    })).toBe(false);
+  });
+});
+
+describe("isPaletteThreadShortcut", () => {
+  it("matches ctrl+e", () => {
+    expect(isPaletteThreadShortcut({
+      key: "e",
+      ctrlKey: true,
+      shiftKey: false,
+      metaKey: false,
+      altKey: false,
+    })).toBe(true);
+  });
+
+  it("does not match ctrl+shift+a", () => {
+    expect(isPaletteThreadShortcut({
+      key: "a",
+      ctrlKey: true,
+      shiftKey: true,
       metaKey: false,
       altKey: false,
     })).toBe(false);

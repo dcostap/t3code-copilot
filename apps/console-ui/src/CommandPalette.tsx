@@ -32,8 +32,13 @@ export function CommandPalette({
     }
 
     const focusInput = () => {
-      inputRef.current?.focus();
-      inputRef.current?.select();
+      const input = inputRef.current;
+      if (!input) {
+        return;
+      }
+      input.focus();
+      const caretOffset = input.value.length;
+      input.setSelectionRange(caretOffset, caretOffset);
     };
 
     focusInput();
@@ -113,7 +118,7 @@ export function CommandPalette({
               ref={inputRef}
               className="palette-search"
               type="text"
-              placeholder="Search commands"
+              placeholder="Type a command or @ to search threads"
               spellCheck={false}
               value={query}
               onChange={(event) => {
@@ -124,7 +129,7 @@ export function CommandPalette({
           </div>
           <div className="palette-results" role="listbox">
             {commands.length === 0 ? (
-              <div className="palette-empty">No results.</div>
+              <div className="palette-empty">No commands yet.</div>
             ) : (
               commands.map((cmd, index) => (
                 <button
@@ -147,7 +152,9 @@ export function CommandPalette({
                   <span className="palette-marker" aria-hidden="true">{index === selectedIndex ? "›" : ""}</span>
                   <span className="palette-rowBody">
                     <span className="palette-cmd">{cmd.label}</span>
-                    {cmd.contextText ? <span className="palette-context">{cmd.contextText}</span> : null}
+                    {cmd.shortcutLabel ? (
+                      <span className="palette-shortcut">{cmd.shortcutLabel}</span>
+                    ) : null}
                   </span>
                 </button>
               ))

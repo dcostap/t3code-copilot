@@ -1,10 +1,9 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
-  MODEL_OPTIONS_BY_PROVIDER,
-  REASONING_EFFORT_OPTIONS_BY_PROVIDER,
   type OrchestrationProject,
   type OrchestrationThread,
   type ProviderKind,
+  type ServerProviderModel,
   type ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -40,6 +39,17 @@ import {
   type CommandPaletteCommand,
 } from "./commandPaletteCommands";
 import {
+  formatPaletteThreadLabel,
+  isThreadPickerQuery,
+  stripThreadPickerQueryPrefix,
+} from "./commandPaletteThreads";
+import {
+  findAppCommandShortcutByActionId,
+  findMatchingAppCommandShortcut,
+  formatAppCommandShortcutLabel,
+  type AppCommandActionId,
+} from "./commandShortcuts";
+import {
   IMAGE_ATTACHMENT_SIZE_LIMIT_LABEL,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
@@ -62,6 +72,7 @@ import {
   threadToTranscriptBlocks,
 } from "./transcript";
 import { useConsoleData, type PendingConsoleThread } from "./consoleData/useConsoleData";
+import { formatProviderModelLabel } from "./providerModelLabels";
 import {
   type ConsoleProjectLayout,
   resolveThreadCwd,
@@ -83,8 +94,26 @@ const PROJECT_CONTEXT_MENU_WIDTH = 360;
 const PROJECT_CONTEXT_MENU_HEIGHT = 256;
 const THREAD_DRAG_DATA_TYPE = "application/x-t3tools-console-thread";
 interface AppPaletteCommand extends CommandPaletteCommand {
+  readonly actionId?: AppCommandActionId;
   run(): Promise<void> | void;
 }
+
+const PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL = "gpt-5.4" as const;
+const HIGH_PRIORITY_COMMAND = 100;
+const MANUAL_MODEL_COMMANDS_BY_PROVIDER = {
+  codex: [
+    { slug: "gpt-5.4", label: "Codex: GPT-5.4" },
+    { slug: "gpt-5.4-mini", label: "Codex: GPT-5.4 Mini" },
+  ],
+  copilot: [
+    { slug: "gpt-5.4", label: "Copilot CLI: GPT-5.4" },
+    { slug: "gpt-5.4-mini", label: "Copilot CLI: GPT-5.4 Mini" },
+    { slug: "claude-opus-4.6", label: "Copilot CLI: Claude Opus 4.6" },
+    { slug: "gemini-3-pro-preview", label: "Copilot CLI: Gemini 3 Pro (Preview)" },
+    { slug: "gpt-5-mini", label: "Copilot CLI: GPT-5 Mini" },
+  ],
+} as const satisfies Record<ProviderKind, ReadonlyArray<{ readonly slug: string; readonly label: string }>>;
+const SPLIT_PANE_COMMAND_LABEL = "Split into new pane";
 
 function SidebarChevronIcon({ className }: { className?: string }) {
   return (
@@ -344,6 +373,12 @@ export function isPaletteToggleShortcut(
   event: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "metaKey" | "altKey">,
 ) {
   return event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "a";
+}
+
+export function isPaletteThreadShortcut(
+  event: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "metaKey" | "altKey">,
+) {
+  return event.ctrlKey && !event.shiftKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "e";
 }
 
 export function shouldOpenPaneSearchShortcut(
@@ -1043,6 +1078,11 @@ export function shouldRetainPendingPromptSend(input: {
 export function App() {
   const isDesktop = useMemo(isDesktopBridgeAvailable, []);
   const consoleData = useConsoleData();
+  const copilotModelById = useMemo<ReadonlyMap<string, ServerProviderModel>>(() => {
+    const copilotProviderStatus =
+      consoleData.serverConfig?.providers.find((entry) => entry.provider === "copilot") ?? null;
+    return new Map(copilotProviderStatus?.models?.map((entry) => [entry.id, entry] as const) ?? []);
+  }, [consoleData.serverConfig]);
   const [pendingThreadByPaneId, setPendingThreadByPaneId] = useState<
     Record<string, { readonly threadId: OrchestrationThread["id"]; readonly pendingThread: PendingConsoleThread }>
   >({});
@@ -1072,11 +1112,7 @@ export function App() {
   const submitPrompt = consoleData.submitPrompt;
   const respondToUserInput = consoleData.respondToUserInput;
   const setThreadModel = consoleData.setThreadModel;
-  const setThreadReasoningEffort = consoleData.setThreadReasoningEffort;
-  const setInteractionMode = consoleData.setInteractionMode;
   const deleteThread = consoleData.deleteThread;
-  const interruptTurn = consoleData.interruptTurn;
-  const stopSession = consoleData.stopSession;
 
   const [nowIso, setNowIso] = useState(() => new Date().toISOString());
   const [animationNowIso, setAnimationNowIso] = useState(() => new Date().toISOString());
@@ -1731,10 +1767,10 @@ export function App() {
     [activePaneView, paletteContextPaneId, paneViews],
   );
 
-  const openPalette = useCallback(() => {
+  const openPalette = useCallback((initialQuery = "") => {
     setPaletteContextPaneId(activePaneView?.pane.id ?? null);
     setPaletteOpen(true);
-    setPaletteQuery("");
+    setPaletteQuery(initialQuery);
     setSelectedCommandIndex(0);
   }, [activePaneView]);
 
@@ -2462,225 +2498,192 @@ export function App() {
     }
   }, [createThread, respondToUserInput, submitPrompt, workspace]);
 
-  const paletteCommands = useMemo<AppPaletteCommand[]>(() => {
-    const commands: AppPaletteCommand[] = [];
-    const canDispatchBackendCommands = consoleData.connectionState === "connected";
-
-    for (const projectView of workspace.projectViews) {
-      commands.push({
-        id: `project:${projectView.project.id}`,
-        label:
-          projectView.project.id === workspace.activeProject?.id
-            ? `[Project] Current · ${projectView.project.title}`
-            : `[Project] Focus · ${projectView.project.title}`,
-        contextText: projectView.project.workspaceRoot,
-        keywords: ["project", projectView.project.title, projectView.project.workspaceRoot],
-        run: () => {
-          workspace.activateProject(projectView.project.id);
-          focusPanePrompt(projectView.layout.tabs.find((tab) => tab.id === projectView.layout.activeTabId)?.activePaneId ?? null);
-        },
-      });
-
-      for (const thread of orderedThreadsByProjectId.get(projectView.project.id) ?? []) {
-        commands.push({
-          id: `thread:${thread.id}`,
-          label: `[Thread] Open · ${thread.title}`,
-          contextText: projectView.project.title,
-          keywords: ["thread", thread.title, getThreadFirstPrompt(thread), projectView.project.title],
-          run: () => handleOpenThread(thread.id),
-        });
-      }
+  const paletteThreadCommands = useMemo<AppPaletteCommand[]>(() => {
+    if (!palettePaneView) {
+      return [];
     }
 
-    if (canDispatchBackendCommands && workspace.projectViews.length > 0) {
-      commands.push({
-        id: "tab:new",
-        label: "[Tab] New",
-        keywords: ["tab", "new", "draft"],
-        run: () => {
-          if (palettePaneView) {
-            void handleCreateDraftTabForProject(palettePaneView.project.id);
-            return;
-          }
-          handleCreateDraftTab();
-        },
-      });
-    }
-
-    if (palettePaneView) {
-      commands.push({
-        id: `pane:split:${palettePaneView.pane.id}`,
-        label: "[Pane] Split active",
-        keywords: ["pane", "split", "draft"],
-        run: () => {
-          const created = workspace.splitPane({
-            projectId: palettePaneView.project.id,
-            paneId: palettePaneView.pane.id,
-          });
-          if (created) {
-            focusPanePrompt(created.paneId);
-          }
-        },
-      });
-      commands.push({
-        id: `pane:close:${palettePaneView.pane.id}`,
-        label: "[Pane] Close active",
-        keywords: ["pane", "close"],
-        run: () => workspace.closePane(palettePaneView.project.id, palettePaneView.pane.id),
-      });
-    }
-
-    if (
-      palettePaneView
-      && (workspace.projectViews.find((projectView) => projectView.project.id === palettePaneView.project.id)?.layout.tabs.length ?? 0) > 1
-    ) {
-      commands.push({
-        id: `tab:close:${palettePaneView.tabId}`,
-        label: "[Tab] Close active",
-        keywords: ["tab", "close"],
-        run: () => workspace.closeTab(palettePaneView.project.id, palettePaneView.tabId),
-      });
-    }
-
-    if (palettePaneView?.setup) {
-      for (const provider of ["codex", "copilot"] satisfies ProviderKind[]) {
-        commands.push({
-          id: `draft-provider:${provider}`,
-          label:
-            palettePaneView.setup.selectedProvider === provider
-              ? `[Draft] Provider · ${provider} · current`
-              : `[Draft] Provider · ${provider}`,
-          keywords: ["draft", "provider", provider],
+    return visibleSidebarProjectViews.flatMap((projectView) => {
+      const threads = orderedThreadsByProjectId.get(projectView.project.id) ?? [];
+      return threads.map((thread) => {
+        const pendingUserInput = getPendingUserInputs(thread.id)[0] ?? null;
+        const status = getThreadStatus(
+          thread,
+          nowIso,
+          isThreadTurnRunning(thread.id),
+          pendingUserInput?.createdAt ?? null,
+        );
+        const isWorking = status.tone === "working";
+        const hasUnreadMarker = !isWorking && unreadThreadIds.has(thread.id);
+        return {
+          id: `thread:${palettePaneView.pane.id}:${thread.id}`,
+          label: formatPaletteThreadLabel({
+            projectTitle: projectView.project.title,
+            threadTitle: thread.title,
+            indicatorTone: isWorking ? "working" : hasUnreadMarker ? "unread" : "idle",
+            workingLabel: isWorking ? (deriveRunningThreadIntentLabel(thread) ?? "Working") : null,
+          }),
+          keywords: [
+            projectView.project.title,
+            thread.title,
+            thread.provider,
+            thread.model,
+            getThreadFirstPrompt(thread),
+            isWorking ? "working" : hasUnreadMarker ? "unread" : "idle",
+          ],
           run: () => {
-            workspace.updateDraftPane({
-              paneId: palettePaneView.pane.id,
-              updater: (setup) => ({
-                ...setup,
-                selectedProvider: provider,
-                selectedModel: workspace.lastChosenModelByProvider[provider],
-              }),
-            });
+            if (thread.projectId === palettePaneView.project.id) {
+              const mounted = workspace.mountThreadInPane({
+                projectId: thread.projectId,
+                paneId: palettePaneView.pane.id,
+                threadId: thread.id,
+              });
+              if (mounted) {
+                return;
+              }
+            }
+            workspace.openThread(thread.id);
           },
-        });
-      }
-      for (const modelOption of MODEL_OPTIONS_BY_PROVIDER[palettePaneView.setup.selectedProvider]) {
-        commands.push({
-          id: `draft-model:${palettePaneView.pane.id}:${modelOption.slug}`,
-          label:
-            palettePaneView.setup.selectedModel === modelOption.slug
-              ? `[Model] Current · ${modelOption.name}`
-              : `[Model] Set · ${modelOption.name}`,
-          contextText: modelOption.slug,
-          keywords: ["model", "draft", palettePaneView.setup.selectedProvider, modelOption.name, modelOption.slug],
-          run: () => {
-            workspace.updateDraftPane({
-              paneId: palettePaneView.pane.id,
-              updater: (setup) => ({ ...setup, selectedModel: modelOption.slug }),
-            });
-          },
-        });
-      }
-    }
-
-    if (palettePaneView?.thread && canDispatchBackendCommands) {
-      const activeThread = palettePaneView.thread;
-      const activeProvider = activeThread.provider;
-      const activeReasoningEffort = activeThread.modelOptions?.[activeProvider]?.reasoningEffort ?? null;
-      const activeReasoningOptions = REASONING_EFFORT_OPTIONS_BY_PROVIDER[activeProvider];
-
-      for (const modelOption of MODEL_OPTIONS_BY_PROVIDER[activeProvider]) {
-        commands.push({
-          id: `model:${activeThread.id}:${modelOption.slug}`,
-          label:
-            activeThread.model === modelOption.slug
-              ? `[Model] Current · ${modelOption.name}`
-              : `[Model] Set · ${modelOption.name}`,
-          contextText: modelOption.slug,
-          keywords: ["model", activeProvider, modelOption.name, modelOption.slug],
-            run: async () => {
-              await setThreadModel(activeThread.id, activeProvider, modelOption.slug);
-              workspace.rememberProviderModel(activeProvider, modelOption.slug);
-            },
-          });
-        }
-
-      if (activeReasoningOptions.length > 0) {
-        commands.push({
-          id: `reasoning:${activeThread.id}:default`,
-          label:
-            activeReasoningEffort === null
-              ? "[Reasoning] Current · default"
-              : "[Reasoning] Set · default",
-          keywords: ["reasoning", "default", activeProvider],
-          run: () => setThreadReasoningEffort(activeThread.id, activeProvider, null),
-        });
-        for (const option of activeReasoningOptions) {
-          commands.push({
-            id: `reasoning:${activeThread.id}:${option}`,
-            label:
-              activeReasoningEffort === option
-                ? `[Reasoning] Current · ${option}`
-                : `[Reasoning] Set · ${option}`,
-            keywords: ["reasoning", option, activeProvider],
-            run: () => setThreadReasoningEffort(activeThread.id, activeProvider, option),
-          });
-        }
-      }
-
-      commands.push(
-        {
-          id: `mode:${activeThread.id}:default`,
-          label: "[Mode] Set · default",
-          keywords: ["mode", "default"],
-          run: () => setInteractionMode(activeThread.id, "default"),
-        },
-        {
-          id: `mode:${activeThread.id}:plan`,
-          label: "[Mode] Set · plan",
-          keywords: ["mode", "plan"],
-          run: () => setInteractionMode(activeThread.id, "plan"),
-        },
-        {
-          id: `session:${activeThread.id}:stop`,
-          label: "[Session] Stop active",
-          keywords: ["session", "stop"],
-          run: () => stopSession(activeThread.id),
-        },
-      );
-
-      if (isThreadTurnRunning(activeThread.id) && !consoleData.isInterruptingTurn && !consoleData.isStoppingSession) {
-        commands.push({
-          id: `turn:${activeThread.id}:interrupt`,
-          label: "[Turn] Interrupt active",
-          keywords: ["turn", "interrupt", "stop"],
-          run: () => interruptTurn(activeThread.id),
-        });
-      }
-    }
-
-    return commands;
+        } satisfies AppPaletteCommand;
+      });
+    });
   }, [
-    palettePaneView,
-    consoleData.connectionState,
-    consoleData.isInterruptingTurn,
-    consoleData.isStoppingSession,
-    focusPanePrompt,
-    handleCreateDraftTab,
-    handleCreateDraftTabForProject,
-    handleOpenThread,
-    interruptTurn,
+    getPendingUserInputs,
     isThreadTurnRunning,
+    nowIso,
     orderedThreadsByProjectId,
-    setInteractionMode,
-    setThreadModel,
-    setThreadReasoningEffort,
-    stopSession,
+    palettePaneView,
+    unreadThreadIds,
+    visibleSidebarProjectViews,
     workspace,
   ]);
 
+  const paletteThreadPickerMode = useMemo(() => isThreadPickerQuery(paletteQuery), [paletteQuery]);
+
+  const resolveCommandsForPane = useCallback((targetPaneView: PaneView | null): AppPaletteCommand[] => {
+    if (!targetPaneView) {
+      return [];
+    }
+
+    const targetProjectView =
+      workspace.projectViews.find((projectView) => projectView.project.id === targetPaneView.project.id) ?? null;
+    const targetTab =
+      targetProjectView?.layout.tabs.find((tab) => tab.id === targetPaneView.tabId) ?? null;
+    const splitPaneShortcut = findAppCommandShortcutByActionId("pane.split");
+    const splitPaneCommands: ReadonlyArray<AppPaletteCommand> =
+      targetTab && targetTab.paneIds.length < MAX_TAB_PANES
+        ? [{
+            id: `pane:split:${targetPaneView.pane.id}`,
+            actionId: "pane.split",
+            label: SPLIT_PANE_COMMAND_LABEL,
+            keywords: ["split pane", "new pane", "split into new pane"],
+            priority: HIGH_PRIORITY_COMMAND,
+            ...(splitPaneShortcut ? { shortcutLabel: formatAppCommandShortcutLabel(splitPaneShortcut) } : {}),
+            run: () => {
+              workspace.splitPane({
+                projectId: targetPaneView.project.id,
+                paneId: targetPaneView.pane.id,
+              });
+            },
+          }]
+        : [];
+
+    const providerCommands: ReadonlyArray<{
+      readonly provider: ProviderKind;
+      readonly label: string;
+      readonly keywords: ReadonlyArray<string>;
+      readonly priority: number;
+    }> = targetPaneView.setup ? [
+      {
+        provider: "codex",
+        label: "Switch thread to provider: Codex",
+        keywords: ["switch provider", "provider codex", "codex"],
+        priority: HIGH_PRIORITY_COMMAND,
+      },
+      {
+        provider: "copilot",
+        label: "Switch thread to provider: Copilot CLI",
+        keywords: ["switch provider", "provider copilot cli", "copilot cli", "copilot-cli", "copilot"],
+        priority: HIGH_PRIORITY_COMMAND,
+      },
+    ] : [];
+
+    const modelProviders: ReadonlyArray<ProviderKind> = targetPaneView.setup
+      ? ["codex", "copilot"]
+      : targetPaneView.thread
+        ? [targetPaneView.thread.provider]
+        : [];
+    const modelCommands = modelProviders.flatMap((provider) =>
+      MANUAL_MODEL_COMMANDS_BY_PROVIDER[provider].map(({ slug, label }) => ({
+        id: `model:${targetPaneView.pane.id}:${provider}:${slug}`,
+        label: formatProviderModelLabel({
+          provider,
+          model: slug,
+          baseLabel: label,
+          copilotModelById,
+        }),
+        keywords: [provider === "copilot" ? "copilot cli" : provider, slug],
+        run: async () => {
+          if (targetPaneView.setup) {
+            workspace.updateDraftPane({
+              paneId: targetPaneView.pane.id,
+              updater: (setup) => ({
+                ...setup,
+                selectedProvider: provider,
+                selectedModel: slug,
+              }),
+            });
+            workspace.rememberProviderModel(provider, slug);
+            return;
+          }
+
+          if (!targetPaneView.thread) {
+            return;
+          }
+
+          await setThreadModel(targetPaneView.thread.id, provider, slug);
+          workspace.rememberProviderModel(provider, slug);
+        },
+      } satisfies AppPaletteCommand)),
+    );
+
+    return [
+      ...splitPaneCommands,
+      ...providerCommands.map(({ provider, label, keywords, priority }) => ({
+        id: `draft-provider:${targetPaneView.pane.id}:${provider}`,
+        label,
+        keywords,
+        priority,
+        run: () => {
+          workspace.updateDraftPane({
+            paneId: targetPaneView.pane.id,
+            updater: (setup) => ({
+              ...setup,
+              selectedProvider: provider,
+              selectedModel: PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL,
+            }),
+          });
+          workspace.rememberProviderModel(provider, PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL);
+        },
+      })),
+      ...modelCommands,
+    ];
+  }, [copilotModelById, setThreadModel, workspace]);
+
+  const paletteCommands = useMemo(
+    () => resolveCommandsForPane(palettePaneView),
+    [palettePaneView, resolveCommandsForPane],
+  );
+
   const filteredCommands = useMemo(
-    () => filterCommandPaletteCommands(paletteCommands, paletteQuery),
-    [paletteCommands, paletteQuery],
+    () =>
+      paletteThreadPickerMode
+        ? filterCommandPaletteCommands(
+            paletteThreadCommands,
+            stripThreadPickerQueryPrefix(paletteQuery),
+          )
+        : filterCommandPaletteCommands(paletteCommands, paletteQuery),
+    [paletteCommands, paletteQuery, paletteThreadCommands, paletteThreadPickerMode],
   );
 
   useEffect(() => {
@@ -2716,6 +2719,16 @@ export function App() {
         return;
       }
 
+      if (isPaletteThreadShortcut(event)) {
+        event.preventDefault();
+        if (paletteOpen) {
+          closePalette();
+        } else {
+          openPalette("@");
+        }
+        return;
+      }
+
       if (paletteOpen) {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -2725,6 +2738,25 @@ export function App() {
       }
 
       const activePaneHandle = workspace.activePaneId ? paneRefs.current[workspace.activePaneId] : null;
+      if (hasBlockingModal) {
+        return;
+      }
+
+      const matchedCommandShortcut = findMatchingAppCommandShortcut(event);
+      if (matchedCommandShortcut) {
+        if (isEditableTarget(event.target) && !activePaneHandle?.hasFocusWithinPane()) {
+          return;
+        }
+        const directCommand = resolveCommandsForPane(activePaneView)
+          .find((command) => command.actionId === matchedCommandShortcut.actionId);
+        if (!directCommand) {
+          return;
+        }
+        event.preventDefault();
+        void directCommand.run();
+        return;
+      }
+
       if (workspace.activePaneId && shouldOpenPaneSearchShortcut(event)) {
         if (isEditableTarget(event.target) && !activePaneHandle?.hasFocusWithinPane()) {
           return;
@@ -2773,7 +2805,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [closePalette, openPalette, paletteOpen, workspace.activePaneId]);
+  }, [activePaneView, closePalette, hasBlockingModal, openPalette, paletteOpen, resolveCommandsForPane, workspace.activePaneId]);
 
   const getPaneFooterText = useCallback((paneView: PaneView) => {
     if (paneView.isActive && submitError) {
@@ -2781,15 +2813,23 @@ export function App() {
     }
 
     if (paneView.setup) {
-      return `Draft · ${paneView.setup.selectedProvider} · ${paneView.setup.selectedModel} · ${paneView.cwd ?? paneView.project.workspaceRoot}`;
+      return `Draft · ${paneView.setup.selectedProvider} · ${formatProviderModelLabel({
+        provider: paneView.setup.selectedProvider,
+        model: paneView.setup.selectedModel,
+        copilotModelById,
+      })} · ${paneView.cwd ?? paneView.project.workspaceRoot}`;
     }
 
     if (paneView.thread) {
-      return `${paneView.thread.title} · ${paneView.thread.provider} · ${paneView.model} · ${paneView.cwd ?? paneView.project.workspaceRoot}`;
+      return `${paneView.thread.title} · ${paneView.thread.provider} · ${formatProviderModelLabel({
+        provider: paneView.thread.provider,
+        model: paneView.model,
+        copilotModelById,
+      })} · ${paneView.cwd ?? paneView.project.workspaceRoot}`;
     }
 
     return `${paneView.project.title} · ${paneView.project.workspaceRoot}`;
-  }, [submitError]);
+  }, [copilotModelById, submitError]);
 
   const renderPaneFooter = useCallback((paneView: PaneView) => {
     if (paneView.isActive && submitError) {
@@ -2797,13 +2837,18 @@ export function App() {
     }
 
     if (paneView.setup) {
+      const modelLabel = formatProviderModelLabel({
+        provider: paneView.setup.selectedProvider,
+        model: paneView.setup.selectedModel,
+        copilotModelById,
+      });
       return (
         <>
           <span className="status-line__segment">Draft</span>
           <span className="status-line__separator">·</span>
           <span className="status-line__segment">{paneView.setup.selectedProvider}</span>
           <span className="status-line__separator">·</span>
-          <span className="status-line__segment">{paneView.setup.selectedModel}</span>
+          <span className="status-line__segment">{modelLabel}</span>
           <span className="status-line__separator">·</span>
           <span className="status-line__segment status-line__segment--detail">
             {paneView.cwd ?? paneView.project.workspaceRoot}
@@ -2813,6 +2858,11 @@ export function App() {
     }
 
     if (paneView.thread) {
+      const modelLabel = formatProviderModelLabel({
+        provider: paneView.thread.provider,
+        model: paneView.model,
+        copilotModelById,
+      });
       return (
         <>
           <span
@@ -2824,7 +2874,7 @@ export function App() {
           <span className="status-line__separator">·</span>
           <span className="status-line__segment">{paneView.thread.provider}</span>
           <span className="status-line__separator">·</span>
-          <span className="status-line__segment">{paneView.model}</span>
+          <span className="status-line__segment">{modelLabel}</span>
           <span className="status-line__separator">·</span>
           <span
             className="status-line__segment status-line__segment--detail"
@@ -2837,7 +2887,7 @@ export function App() {
     }
 
     return <span className="status-line__segment status-line__segment--detail">{paneView.project.title} · {paneView.project.workspaceRoot}</span>;
-  }, [submitError]);
+  }, [copilotModelById, submitError]);
 
   const shellClassName = `console-shell${isDesktop ? " console-shell--desktop" : ""}`;
   const desktopWindowControlsInsetPx = useMemo(

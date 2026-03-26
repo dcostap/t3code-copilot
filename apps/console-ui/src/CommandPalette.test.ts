@@ -38,4 +38,45 @@ describe("filterCommandPaletteCommands", () => {
       commands[1],
     ]);
   });
+
+  it("does not use internal ids as searchable text", () => {
+    const commands = [
+      {
+        id: "provider:copilot-hidden",
+        label: "Switch thread to provider: copilot-cli",
+        keywords: ["switch provider", "copilot-cli"],
+      },
+    ];
+
+    expect(filterCommandPaletteCommands(commands, "hidden")).toEqual([]);
+  });
+
+  it("bubbles higher-priority commands above lower-priority matches", () => {
+    const commands = [
+      {
+        id: "provider:codex",
+        label: "Switch thread to provider: Codex",
+        keywords: ["switch provider", "provider codex"],
+        priority: 100,
+      },
+      {
+        id: "provider:copilot",
+        label: "Switch thread to provider: Copilot CLI",
+        keywords: ["switch provider", "provider copilot cli"],
+        priority: 100,
+      },
+      {
+        id: "other:provider",
+        label: "Provider settings",
+        keywords: ["provider"],
+        priority: 0,
+      },
+    ];
+
+    expect(filterCommandPaletteCommands(commands, "provider")).toEqual([
+      commands[0],
+      commands[1],
+      commands[2],
+    ]);
+  });
 });

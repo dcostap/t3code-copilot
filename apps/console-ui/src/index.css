@@ -884,16 +884,26 @@ body {
 .palette-rowBody {
   display: flex;
   min-width: 0;
-  flex-direction: column;
-  gap: 3px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .palette-cmd {
+  flex: 1 1 auto;
   min-width: 0;
   color: rgba(226, 233, 242, 0.92);
   white-space: normal;
   overflow: hidden;
   text-wrap: balance;
+}
+
+.palette-shortcut {
+  flex: 0 0 auto;
+  align-self: center;
+  color: rgba(144, 154, 166, 0.66);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .palette-context {
@@ -921,6 +931,10 @@ body {
 .palette-row--active .palette-cmd {
   color: #f3f7fb;
   font-weight: 600;
+}
+
+.palette-row--active .palette-shortcut {
+  color: rgba(211, 220, 230, 0.72);
 }
 
 .palette-row--active .palette-context {

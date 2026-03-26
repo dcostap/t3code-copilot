@@ -485,11 +485,14 @@ export const checkCopilotProviderStatus: Effect.Effect<ServerProviderStatus> = E
             client.getStatus(),
             client.getAuthStatus().catch(() => undefined),
           ]);
-          const quota =
+          const [quota, models] =
             authStatus?.isAuthenticated === true
-              ? await client.rpc.account.getQuota().catch(() => undefined)
-              : undefined;
-          return { status, authStatus, quota };
+              ? await Promise.all([
+                  client.rpc.account.getQuota().catch(() => undefined),
+                  client.listModels().catch(() => undefined),
+                ])
+              : [undefined, undefined];
+          return { status, authStatus, quota, models };
         } finally {
           await client.stop().catch(() => []);
         }
@@ -543,6 +546,9 @@ export const checkCopilotProviderStatus: Effect.Effect<ServerProviderStatus> = E
       available: true,
       authStatus,
       checkedAt,
+      ...(probe.success.value.models && probe.success.value.models.length > 0
+        ? { models: probe.success.value.models.map(mapCopilotModel) }
+        : {}),
       ...(quotaSnapshots.length > 0 ? { quotaSnapshots } : {}),
       ...(probe.success.value.authStatus?.statusMessage
         ? { message: probe.success.value.authStatus.statusMessage }
