@@ -1187,7 +1187,11 @@ interface TopbarActiveTabCutout {
   readonly y: number;
   readonly width: number;
   readonly height: number;
+  readonly radiusX: number;
+  readonly radiusY: number;
 }
+
+const TOPBAR_TAB_RADIUS_PX = 10;
 
 function clampUnitInterval(value: number) {
   if (!Number.isFinite(value)) {
@@ -1208,11 +1212,15 @@ function deriveTopbarActiveTabCutout(input: {
   const y = clampUnitInterval((input.tabRect.top - input.topbarRect.top) / input.topbarRect.height);
   const width = clampUnitInterval(input.tabRect.width / input.topbarRect.width);
   const height = clampUnitInterval(input.tabRect.height / input.topbarRect.height);
+  const clampedWidth = Math.min(width, 1 - x);
+  const clampedHeight = Math.min(height, 1 - y);
   return {
     x,
     y,
-    width: Math.min(width, 1 - x),
-    height: Math.min(height, 1 - y),
+    width: clampedWidth,
+    height: clampedHeight,
+    radiusX: Math.min(TOPBAR_TAB_RADIUS_PX / input.topbarRect.width, clampedWidth / 2),
+    radiusY: Math.min(TOPBAR_TAB_RADIUS_PX / input.topbarRect.height, clampedHeight),
   };
 }
 
@@ -1226,10 +1234,29 @@ function areTopbarActiveTabCutoutsEqual(
   if (!left || !right) {
     return false;
   }
-  return left.x === right.x
+    return left.x === right.x
     && left.y === right.y
     && left.width === right.width
-    && left.height === right.height;
+    && left.height === right.height
+    && left.radiusX === right.radiusX
+    && left.radiusY === right.radiusY;
+}
+
+function formatSvgUnit(value: number) {
+  return Number(value.toFixed(6));
+}
+
+function getTopbarActiveTabCutoutPath(cutout: TopbarActiveTabCutout) {
+  const left = formatSvgUnit(cutout.x);
+  const top = formatSvgUnit(cutout.y);
+  const right = formatSvgUnit(cutout.x + cutout.width);
+  const bottom = formatSvgUnit(cutout.y + cutout.height);
+  const radiusX = formatSvgUnit(Math.min(cutout.radiusX, cutout.width / 2));
+  const radiusY = formatSvgUnit(Math.min(cutout.radiusY, cutout.height));
+  const innerLeft = formatSvgUnit(left + radiusX);
+  const innerRight = formatSvgUnit(right - radiusX);
+  const innerTop = formatSvgUnit(top + radiusY);
+  return `M ${left} ${bottom} L ${left} ${innerTop} Q ${left} ${top} ${innerLeft} ${top} L ${innerRight} ${top} Q ${right} ${top} ${right} ${innerTop} L ${right} ${bottom} Z`;
 }
 
 export function App() {
@@ -3417,13 +3444,7 @@ export function App() {
           <mask id={topbarMaskId} maskUnits="objectBoundingBox" maskContentUnits="objectBoundingBox">
             <rect x="0" y="0" width="1" height="1" fill="white" />
             {topbarActiveTabCutout ? (
-              <rect
-                x={topbarActiveTabCutout.x}
-                y={topbarActiveTabCutout.y}
-                width={topbarActiveTabCutout.width}
-                height={topbarActiveTabCutout.height}
-                fill="black"
-              />
+              <path d={getTopbarActiveTabCutoutPath(topbarActiveTabCutout)} fill="black" />
             ) : null}
           </mask>
         </defs>
@@ -3959,14 +3980,14 @@ export function App() {
                 className="project-context-menu__action"
                 onClick={() => handleOpenManageProjectModal(projectContextMenuProject.id)}
               >
-                Manage threads
+                Manage threads...
               </button>
               <button
                 type="button"
-                className="project-context-menu__action"
+                className="project-context-menu__action project-context-menu__action--danger"
                 onClick={() => handleRequestProjectArchive(projectContextMenuProject.id)}
               >
-                Archive project
+                Archive project...
               </button>
             </div>
           </section>
@@ -3992,18 +4013,18 @@ export function App() {
             <div className="project-context-menu__actions">
               <button
                 type="button"
-                className="project-context-menu__action"
+                className="project-context-menu__action project-context-menu__action--danger"
                 disabled
                 title="Thread archive is not wired through orchestration yet."
               >
-                Archive thread
+                Archive thread...
               </button>
               <button
                 type="button"
                 className="project-context-menu__action project-context-menu__action--danger"
                 onClick={() => handleRequestThreadDelete(threadContextMenuThread.id)}
               >
-                Delete thread
+                Delete thread...
               </button>
             </div>
           </section>
@@ -4155,11 +4176,11 @@ export function App() {
                 </button>
                 <button
                   type="button"
-                  className="project-modal__action project-modal__action--secondary"
+                  className="project-modal__action project-modal__action--danger"
                   disabled
                   title="Thread archive is not wired through orchestration yet."
                 >
-                  Archive selected
+                  Archive selected...
                 </button>
                 <button
                   type="button"
@@ -4191,8 +4212,20 @@ export function App() {
             aria-label={`Archive ${projectArchiveConfirmProject.title}`}
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <div className="project-manage-modal__eyebrow">Archive project</div>
-            <div className="project-modal__title">{projectArchiveConfirmProject.title}</div>
+            <div className="project-modal__header">
+              <div className="project-modal__heading">
+                <div className="project-modal__eyebrow">Archive project</div>
+                <div className="project-modal__title">{projectArchiveConfirmProject.title}</div>
+              </div>
+              <button
+                type="button"
+                className="project-modal__close"
+                aria-label="Close archive project dialog"
+                onClick={handleCloseProjectArchiveConfirm}
+              >
+                ×
+              </button>
+            </div>
             <div className="project-confirm-modal__body">
               This hides the project from the left sidebar in this console UI. Its threads and history stay intact.
             </div>
@@ -4228,8 +4261,21 @@ export function App() {
             aria-label={`Delete ${threadDeleteConfirmThread.title}`}
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <div className="project-manage-modal__eyebrow">Delete thread</div>
-            <div className="project-modal__title">{threadDeleteConfirmThread.title}</div>
+            <div className="project-modal__header">
+              <div className="project-modal__heading">
+                <div className="project-modal__eyebrow">Delete thread</div>
+                <div className="project-modal__title">{threadDeleteConfirmThread.title}</div>
+              </div>
+              <button
+                type="button"
+                className="project-modal__close"
+                aria-label="Close delete thread dialog"
+                onClick={handleCloseThreadDeleteConfirm}
+                disabled={isDeletingThread}
+              >
+                ×
+              </button>
+            </div>
             <div className="project-confirm-modal__body">
               This will remove the thread from the project history view.
             </div>
@@ -4264,7 +4310,21 @@ export function App() {
             aria-label="Add project"
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <div className="project-modal__title">Add project</div>
+            <div className="project-modal__header">
+              <div className="project-modal__heading">
+                <div className="project-modal__eyebrow">Workspace</div>
+                <div className="project-modal__title">Add project</div>
+              </div>
+              <button
+                type="button"
+                className="project-modal__close"
+                aria-label="Close add project dialog"
+                onClick={handleCloseProjectModal}
+                disabled={isCreatingProject}
+              >
+                ×
+              </button>
+            </div>
             <div className="project-modal__body">
               <label className="project-modal__label" htmlFor="project-path-input">Project path</label>
               <div className="project-modal__pathRow">
@@ -4326,7 +4386,21 @@ export function App() {
             aria-label="Project already exists"
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <div className="project-modal__title">Project path already exists</div>
+            <div className="project-modal__header">
+              <div className="project-modal__heading">
+                <div className="project-modal__eyebrow">Existing project</div>
+                <div className="project-modal__title">Project path already exists</div>
+              </div>
+              <button
+                type="button"
+                className="project-modal__close"
+                aria-label="Close existing project dialog"
+                onClick={handleCloseDuplicateProjectConfirm}
+                disabled={isCreatingProject}
+              >
+                ×
+              </button>
+            </div>
             <div className="project-modal__body project-modal__body--stacked">
               <div className="project-modal__message">
                 {duplicateProjectConfirm.isArchived

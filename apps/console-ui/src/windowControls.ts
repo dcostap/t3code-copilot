@@ -1,4 +1,4 @@
-const NON_MAC_DESKTOP_WINDOW_CONTROLS_INSET_PX = 138;
+const NON_MAC_DESKTOP_WINDOW_CONTROLS_INSET_PX = 200;
 
 export function resolveDesktopWindowControlsInsetPx(
   isDesktop: boolean,

@@ -106,6 +106,7 @@ interface ActiveCopilotSession extends CopilotTurnTrackingState {
   model: string | undefined;
   reasoningEffort: CodexReasoningEffort | undefined;
   interactionMode: "default" | "plan" | undefined;
+  latestPlanMarkdown: string | undefined;
   updatedAt: string;
   lastError: string | undefined;
   toolTitlesByCallId: Map<string, string>;
@@ -202,6 +203,78 @@ function trimToUndefined(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizePlanStepText(value: string) {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function planStepKey(value: string) {
+  return normalizePlanStepText(value).toLowerCase();
+}
+
+function parseCopilotPlanSteps(planMarkdown: string): Array<{
+  step: string;
+  status: "pending" | "completed";
+}> {
+  const steps: Array<{ step: string; status: "pending" | "completed" }> = [];
+  for (const line of planMarkdown.split(/\r?\n/u)) {
+    const match = line.match(/^\s*(?:[-*+]|\d+[.)])\s+(?:\[([ xX])\]\s+)?(.+?)\s*$/u);
+    if (!match) {
+      continue;
+    }
+    const step = normalizePlanStepText(match[2] ?? "");
+    if (step.length === 0) {
+      continue;
+    }
+    steps.push({
+      step,
+      status: match[1]?.toLowerCase() === "x" ? "completed" : "pending",
+    });
+  }
+  return steps;
+}
+
+function synthesizeCopilotPlanSteps(input: {
+  previousPlanMarkdown: string | undefined;
+  nextPlanMarkdown: string;
+}): Array<{
+  step: string;
+  status: "pending" | "inProgress" | "completed";
+}> {
+  const nextSteps = parseCopilotPlanSteps(input.nextPlanMarkdown);
+  if (nextSteps.length === 0) {
+    return [];
+  }
+
+  const previousStatusesByKey = new Map(
+    (input.previousPlanMarkdown ? parseCopilotPlanSteps(input.previousPlanMarkdown) : []).map((step) => [
+      planStepKey(step.step),
+      step.status,
+    ]),
+  );
+
+  let resolvedSteps: Array<{
+    step: string;
+    status: "pending" | "inProgress" | "completed";
+  }> = nextSteps.map((step) => ({
+    step: step.step,
+    status: previousStatusesByKey.get(planStepKey(step.step)) === "completed"
+      ? "completed" as const
+      : step.status,
+  }));
+
+  const hasExplicitCompleted = resolvedSteps.some((step) => step.status === "completed");
+  const firstPendingIndex = resolvedSteps.findIndex((step) => step.status === "pending");
+  if (hasExplicitCompleted && firstPendingIndex >= 0) {
+    resolvedSteps = resolvedSteps.map((step, index) =>
+      index === firstPendingIndex
+        ? { ...step, status: "inProgress" as const }
+        : step
+    );
+  }
+
+  return resolvedSteps;
 }
 
 function mapSupportedModelsById(models: ReadonlyArray<ModelInfo>) {
@@ -774,6 +847,7 @@ function createSessionRecord(input: {
     model: input.model,
     reasoningEffort: input.reasoningEffort,
     interactionMode: undefined,
+    latestPlanMarkdown: undefined,
     updatedAt: new Date().toISOString(),
     lastError: undefined,
     currentTurnId: undefined,
@@ -836,7 +910,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
       });
     };
 
-    const emitLatestProposedPlan = (record: ActiveCopilotSession) =>
+    const emitLatestPlanState = (record: ActiveCopilotSession) =>
       Effect.tryPromise({
         try: () => record.session.rpc.plan.read(),
         catch: (cause) =>
@@ -849,11 +923,31 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
       }).pipe(
         Effect.flatMap((plan) => {
           const planMarkdown = trimToUndefined(plan.content ?? undefined);
-          if (!plan.exists || !planMarkdown) {
+          const previousPlanMarkdown = record.latestPlanMarkdown;
+          record.latestPlanMarkdown = plan.exists ? planMarkdown : undefined;
+
+          if (!plan.exists || !planMarkdown || previousPlanMarkdown === planMarkdown) {
             return Effect.void;
           }
-          return Queue.offer(
-            runtimeEventQueue,
+
+          const runtimeEvents: ProviderRuntimeEvent[] = [];
+          const planSteps = synthesizeCopilotPlanSteps({
+            previousPlanMarkdown,
+            nextPlanMarkdown: planMarkdown,
+          });
+          if (planSteps.length > 0) {
+            runtimeEvents.push(
+              makeSyntheticEvent(
+                record.threadId,
+                "turn.plan.updated",
+                {
+                  plan: planSteps,
+                },
+                { turnId: currentSyntheticTurnId(record) },
+              ),
+            );
+          }
+          runtimeEvents.push(
             makeSyntheticEvent(
               record.threadId,
               "turn.proposed.completed",
@@ -862,7 +956,8 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
               },
               { turnId: currentSyntheticTurnId(record) },
             ),
-          ).pipe(Effect.asVoid);
+          );
+          return Queue.offerAll(runtimeEventQueue, runtimeEvents).pipe(Effect.asVoid);
         }),
       );
 
@@ -1024,16 +1119,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
             },
           ];
         case "session.plan_changed":
-          return [
-            {
-              ...base(),
-              type: "turn.plan.updated",
-              payload: {
-                explanation: `Plan ${event.data.operation}d`,
-                plan: [],
-              },
-            },
-          ];
+          return [];
         case "session.workspace_file_changed":
           return [
             {
@@ -1570,6 +1656,9 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
       if (event.type === "session.mode_changed") {
         record.interactionMode = toInteractionMode(event.data.newMode);
       }
+      if (event.type === "session.plan_changed" && event.data.operation === "delete") {
+        record.latestPlanMarkdown = undefined;
+      }
       if (event.type === "session.workspace_file_changed") {
         rememberWorkspaceFileChange(record, event.data.path);
       }
@@ -1595,7 +1684,7 @@ const makeCopilotAdapter = (options?: CopilotAdapterLiveOptions) =>
         void emitRuntimeEvents(runtimeEvents);
       }
       if (event.type === "session.plan_changed" && event.data.operation !== "delete") {
-        void Effect.runPromise(emitLatestProposedPlan(record)).catch((cause) => {
+        void Effect.runPromise(emitLatestPlanState(record)).catch((cause) => {
           void emitRuntimeEvents([
             makeSyntheticEvent(
               record.threadId,

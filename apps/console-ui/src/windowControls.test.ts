@@ -13,8 +13,8 @@ describe("resolveDesktopWindowControlsInsetPx", () => {
   });
 
   it("reserves right-side space for non-mac desktop environments", () => {
-    expect(resolveDesktopWindowControlsInsetPx(true, "Win32")).toBe(138);
-    expect(resolveDesktopWindowControlsInsetPx(true, "Linux x86_64")).toBe(138);
-    expect(resolveDesktopWindowControlsInsetPx(true, null)).toBe(138);
+    expect(resolveDesktopWindowControlsInsetPx(true, "Win32")).toBe(200);
+    expect(resolveDesktopWindowControlsInsetPx(true, "Linux x86_64")).toBe(200);
+    expect(resolveDesktopWindowControlsInsetPx(true, null)).toBe(200);
   });
 });

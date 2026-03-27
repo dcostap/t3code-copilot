@@ -187,7 +187,7 @@ planLayer("CopilotAdapterLive proposed plan events", (it) => {
       planSession.planReadImpl.mockReset();
       planSession.planReadImpl.mockResolvedValue({
         exists: true,
-        content: "# Ship it\n\n- first\n- second",
+        content: "# Ship it\n\n- [x] first\n- [ ] second\n- third",
         path: "/tmp/copilot-session-plan/plan.md",
       });
 
@@ -226,13 +226,17 @@ planLayer("CopilotAdapterLive proposed plan events", (it) => {
       assert.equal(events[0]?.type, "turn.plan.updated");
       if (events[0]?.type === "turn.plan.updated") {
         assert.equal(events[0].turnId, turn.turnId);
-        assert.equal(events[0].payload.explanation, "Plan updated");
+        assert.deepStrictEqual(events[0].payload.plan, [
+          { step: "first", status: "completed" },
+          { step: "second", status: "inProgress" },
+          { step: "third", status: "pending" },
+        ]);
       }
 
       assert.equal(events[1]?.type, "turn.proposed.completed");
       if (events[1]?.type === "turn.proposed.completed") {
         assert.equal(events[1].turnId, turn.turnId);
-        assert.equal(events[1].payload.planMarkdown, "# Ship it\n\n- first\n- second");
+        assert.equal(events[1].payload.planMarkdown, "# Ship it\n\n- [x] first\n- [ ] second\n- third");
       }
     }),
   );
