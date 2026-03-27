@@ -1752,6 +1752,33 @@ export function App() {
   const activeLayout = workspace.activeLayout;
   const activeTab = workspace.activeTab;
   const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
+  const transcriptBlocksByThreadId = useMemo(() => {
+    const blocksByThreadId = new Map<OrchestrationThread["id"], ReturnType<typeof threadToTranscriptBlocks>>();
+
+    for (const thread of consoleData.threads) {
+      const effectiveNow = (isThreadTurnRunning(thread.id) || pendingPromptSendStartedAtByThreadId[thread.id])
+        ? animationNowIso
+        : undefined;
+      blocksByThreadId.set(
+        thread.id,
+        threadToTranscriptBlocks(thread, {
+          resolveAttachmentPreviewUrl: (attachmentId) =>
+            `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
+          orchestrationEvents: getThreadEvents(thread.id),
+          ...(effectiveNow ? { now: effectiveNow } : {}),
+        }),
+      );
+    }
+
+    return blocksByThreadId;
+  }, [
+    attachmentPreviewBaseUrl,
+    animationNowIso,
+    consoleData.threads,
+    getThreadEvents,
+    isThreadTurnRunning,
+    pendingPromptSendStartedAtByThreadId,
+  ]);
 
   const paneViews = useMemo<ReadonlyArray<PaneView>>(() => {
     const activeProject = workspace.activeProject;
@@ -1803,12 +1830,7 @@ export function App() {
           ? animationNowIso
           : undefined;
         const blocks = thread
-          ? threadToTranscriptBlocks(thread, {
-              resolveAttachmentPreviewUrl: (attachmentId) =>
-                `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
-              orchestrationEvents: getThreadEvents(thread.id),
-              ...(effectiveNow ? { now: effectiveNow } : {}),
-            })
+          ? (transcriptBlocksByThreadId.get(thread.id) ?? [])
           : [];
         const pendingPromptSendStartedAt = pane.kind === "thread"
           ? pendingPromptSendStartedAtByThreadId[pane.threadId] ?? null
@@ -1852,12 +1874,10 @@ export function App() {
   }, [
     activeLayout,
     activeTab,
-    attachmentPreviewBaseUrl,
     composerAttachmentsByPaneId,
     composerDraftByPaneId,
     consoleData.threads,
     getPendingUserInputs,
-    getThreadEvents,
     isThreadTurnRunning,
     animationNowIso,
     pendingPromptSendStartedAtByThreadId,
@@ -1865,6 +1885,7 @@ export function App() {
     pendingUserInputAnswersByRequestId,
     pendingUserInputQuestionIndexByRequestId,
     projects,
+    transcriptBlocksByThreadId,
     workspace.activeProject,
   ]);
 
