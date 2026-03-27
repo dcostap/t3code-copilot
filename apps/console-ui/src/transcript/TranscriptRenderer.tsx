@@ -210,6 +210,21 @@ interface CommandWidgetLineContent {
   readonly statusClass?: string;
 }
 
+interface ParsedCommandWidgetText {
+  readonly glyph: string;
+  readonly prefix: string;
+  readonly command: string;
+  readonly commandRange?: {
+    readonly from: number;
+    readonly to: number;
+  };
+  readonly timingLabel?: string;
+  readonly counts?: {
+    readonly additions: string;
+    readonly deletions: string;
+  };
+}
+
 export type TranscriptRegion = "prompt" | "history";
 
 interface FocusPromptOptions {
@@ -419,7 +434,11 @@ class ImageAttachmentTileWidget extends WidgetType {
   }
 
   override eq(other: ImageAttachmentTileWidget) {
-    return JSON.stringify(this.attachment) === JSON.stringify(other.attachment);
+    return this.attachment.id === other.attachment.id
+      && this.attachment.name === other.attachment.name
+      && this.attachment.mimeType === other.attachment.mimeType
+      && this.attachment.sizeBytes === other.attachment.sizeBytes
+      && this.attachment.previewUrl === other.attachment.previewUrl;
   }
 
   override toDOM() {
@@ -1071,7 +1090,8 @@ class MarkdownTableWidget extends WidgetType {
   }
 
   override eq(other: MarkdownTableWidget) {
-    return JSON.stringify(this.content) === JSON.stringify(other.content);
+    return this.content.signature === other.content.signature
+      && this.content.cwd === other.content.cwd;
   }
 
   override destroy(dom: HTMLElement) {
@@ -1155,6 +1175,8 @@ class MarkdownTableWidget extends WidgetType {
 }
 
 class CodeBlockWidget extends WidgetType {
+  private readonly equalityKey: string;
+
   constructor(
     private readonly content: {
       signature: string;
@@ -1163,10 +1185,11 @@ class CodeBlockWidget extends WidgetType {
     },
   ) {
     super();
+    this.equalityKey = content.signature;
   }
 
   override eq(other: CodeBlockWidget) {
-    return JSON.stringify(this.content) === JSON.stringify(other.content);
+    return this.equalityKey === other.equalityKey;
   }
 
   override toDOM() {
@@ -1415,6 +1438,19 @@ function buildInlineDiffRows(file: FileDiffMetadata): InlineDiffFileData {
 }
 
 const inlineDiffCache = new Map<string, ReadonlyArray<InlineDiffFileData>>();
+const parsedCommandWidgetTextCache = new Map<string, ParsedCommandWidgetText | null>();
+const parsedCommandWidgetTextCacheLimit = 512;
+
+function setBoundedCacheEntry<K, V>(cache: Map<K, V>, key: K, value: V, limit: number) {
+  cache.set(key, value);
+  if (cache.size > limit) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey !== undefined) {
+      cache.delete(oldestKey);
+    }
+  }
+  return value;
+}
 
 export function parseInlineDiffFiles(
   unifiedDiff: string,
@@ -1494,20 +1530,7 @@ function buildCommandWidgetSummaryCopyText(content: {
   ].filter((part): part is string => typeof part === "string" && part.length > 0).join(" ");
 }
 
-function parseCommandWidgetText(text: string): {
-  glyph: string;
-  prefix: string;
-  command: string;
-  commandRange?: {
-    from: number;
-    to: number;
-  };
-  timingLabel?: string;
-  counts?: {
-    additions: string;
-    deletions: string;
-  };
-} | null {
+function parseCommandWidgetText(text: string): ParsedCommandWidgetText | null {
   const firstSpace = text.indexOf(" ");
   if (firstSpace <= 0) {
     return null;
@@ -1595,15 +1618,34 @@ function parseCommandWidgetText(text: string): {
   };
 }
 
+function getParsedCommandWidgetText(text: string) {
+  if (parsedCommandWidgetTextCache.has(text)) {
+    return parsedCommandWidgetTextCache.get(text) ?? null;
+  }
+  return setBoundedCacheEntry(
+    parsedCommandWidgetTextCache,
+    text,
+    parseCommandWidgetText(text),
+    parsedCommandWidgetTextCacheLimit,
+  );
+}
+
+function buildCommandWidgetLineEqualityKey(content: CommandWidgetLineContent) {
+  return JSON.stringify(content);
+}
+
 class CommandWidgetLine extends WidgetType {
+  private readonly equalityKey: string;
+
   constructor(
     private readonly content: CommandWidgetLineContent,
   ) {
     super();
+    this.equalityKey = buildCommandWidgetLineEqualityKey(content);
   }
 
   override eq(other: CommandWidgetLine) {
-    return JSON.stringify(this.content) === JSON.stringify(other.content);
+    return this.equalityKey === other.equalityKey;
   }
 
   override ignoreEvent(event: Event) {
@@ -2076,7 +2118,7 @@ function buildTranscriptDocument(
   const { lines: historyLines, widgetsByLineIndex } = flattenBlocks(blocks, pendingUserInputHighlight);
   const allLines: AnnotatedLine[] = [...historyLines];
 
-  let text = "";
+  const textParts: string[] = [];
   let offset = 0;
   const positioned: PositionedLine[] = [];
   const marks: PositionedMark[] = [];
@@ -2139,7 +2181,7 @@ function buildTranscriptDocument(
         });
       }
     }
-    text += line.text;
+    textParts.push(line.text);
 
     offset += line.text.length;
     const widget = widgetsByLineIndex.get(index);
@@ -2158,7 +2200,7 @@ function buildTranscriptDocument(
           defaultExpandedInlineDiffSignatures.set(line.commandWidgetSignature, line.inlineDiffLookup);
         }
       }
-      const parsed = parseCommandWidgetText(line.text);
+      const parsed = getParsedCommandWidgetText(line.text);
       if (parsed) {
         const statusClass = (line.extraClasses ?? []).find((entry) => entry.startsWith("cm-line-workItem"));
         const isRunning = statusClass === "cm-line-workItemRunning";
@@ -2232,13 +2274,15 @@ function buildTranscriptDocument(
       });
     }
     if (index < allLines.length - 1) {
-      text += "\n";
+      textParts.push("\n");
       offset += 1;
     }
   });
 
   replacements.push(...buildCodeBlockReplacements(allLines, positioned));
   replacements.push(...buildMarkdownTableReplacements(allLines, positioned, cwd));
+
+  const text = textParts.join("");
 
   return {
     text,
