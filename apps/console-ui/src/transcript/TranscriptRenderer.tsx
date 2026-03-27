@@ -73,6 +73,31 @@ interface TranscriptDocumentModel {
   readonly promptStart: number;
 }
 
+interface FlattenedBlockWidgetEntry {
+  readonly lineOffset: number;
+  readonly widget: WidgetType;
+  readonly side: -1 | 1;
+  readonly signature: string;
+}
+
+interface FlattenedBlockSegment {
+  readonly blockSignature: string;
+  readonly block: TranscriptBlock;
+  readonly lines: ReadonlyArray<AnnotatedLine>;
+  readonly widgetEntries: ReadonlyArray<FlattenedBlockWidgetEntry>;
+}
+
+interface FlattenedBlocksBuild {
+  readonly highlightSignature: string;
+  readonly segments: ReadonlyArray<FlattenedBlockSegment>;
+  readonly lines: ReadonlyArray<AnnotatedLine>;
+  readonly widgetsByLineIndex: ReadonlyMap<
+    number,
+    { widget: WidgetType; side: -1 | 1; signature: string }
+  >;
+  readonly firstChangedLineIndex: number;
+}
+
 interface PositionedWidget {
   readonly position: number;
   readonly side: -1 | 1;
@@ -2025,6 +2050,192 @@ function shouldInsertBlockGap(
   return true;
 }
 
+function getPendingHighlightSignature(
+  pendingUserInputHighlight?: {
+    readonly requestId: string;
+    readonly questionIndex: number;
+    readonly optionIndex?: number;
+  },
+) {
+  if (!pendingUserInputHighlight) {
+    return "";
+  }
+  return [
+    pendingUserInputHighlight.requestId,
+    pendingUserInputHighlight.questionIndex,
+    pendingUserInputHighlight.optionIndex ?? "",
+  ].join(":");
+}
+
+function applyPendingHighlightToLines(
+  lines: ReadonlyArray<AnnotatedLine>,
+  pendingUserInputHighlight?: {
+    readonly requestId: string;
+    readonly questionIndex: number;
+    readonly optionIndex?: number;
+  },
+) {
+  return lines.map((line) => {
+    const userInputRef = line.userInputRef;
+    const extraClasses = [...(line.extraClasses ?? [])];
+
+    if (
+      pendingUserInputHighlight
+      && userInputRef
+      && userInputRef.requestId === pendingUserInputHighlight.requestId
+      && userInputRef.questionIndex === pendingUserInputHighlight.questionIndex
+    ) {
+      extraClasses.push("cm-line-userInputActiveQuestion");
+      if (
+        userInputRef.optionIndex !== undefined
+        && pendingUserInputHighlight.optionIndex !== undefined
+        && userInputRef.optionIndex === pendingUserInputHighlight.optionIndex
+      ) {
+        extraClasses.push("cm-line-userInputActiveOption");
+      }
+    }
+
+    return extraClasses.length === 0 ? line : Object.assign({}, line, { extraClasses });
+  });
+}
+
+function buildFlattenedBlockSegment(
+  block: TranscriptBlock,
+  previousVisibleBlock: TranscriptBlock | null,
+  pendingUserInputHighlight?: {
+    readonly requestId: string;
+    readonly questionIndex: number;
+    readonly optionIndex?: number;
+  },
+): FlattenedBlockSegment {
+  const rawBlockLines = trimBlockBoundarySpacerLines(blockToLines(block));
+  const blockLines = applyPendingHighlightToLines(rawBlockLines, pendingUserInputHighlight);
+  const lines =
+    blockLines.length > 0 && shouldInsertBlockGap(previousVisibleBlock, block)
+      ? [{ text: "", kind: "blockGap" } satisfies AnnotatedLine, ...blockLines]
+      : blockLines;
+  const widgetEntries: FlattenedBlockWidgetEntry[] = [];
+
+  if (block.type === "user-message" && block.attachments && block.attachments.length > 0) {
+    const attachmentLineOffsets = [...lines]
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.kind === "attachmentPanel")
+      .map(({ index }) => index)
+      .slice(0, block.attachments.length);
+
+    attachmentLineOffsets.forEach((lineOffset, index) => {
+      const attachment = block.attachments?.[index];
+      if (!attachment) {
+        return;
+      }
+      widgetEntries.push({
+        lineOffset,
+        widget: new ImageAttachmentTileWidget(attachment),
+        side: 1,
+        signature: `${attachment.id}:${attachment.name}:${attachment.mimeType}:${attachment.sizeBytes}:${attachment.previewUrl ?? ""}`,
+      });
+    });
+  }
+
+  return {
+    blockSignature: JSON.stringify(block),
+    block,
+    lines,
+    widgetEntries,
+  };
+}
+
+function assembleFlattenedBlocks(
+  segments: ReadonlyArray<FlattenedBlockSegment>,
+) {
+  const allLines: AnnotatedLine[] = [];
+  const widgetsByLineIndex = new Map<
+    number,
+    { widget: WidgetType; side: -1 | 1; signature: string }
+  >();
+
+  for (const segment of segments) {
+    const startLineIndex = allLines.length;
+    allLines.push(...segment.lines);
+    for (const widgetEntry of segment.widgetEntries) {
+      widgetsByLineIndex.set(startLineIndex + widgetEntry.lineOffset, {
+        widget: widgetEntry.widget,
+        side: widgetEntry.side,
+        signature: widgetEntry.signature,
+      });
+    }
+  }
+
+  return {
+    lines: allLines,
+    widgetsByLineIndex,
+  };
+}
+
+function flattenBlocksIncremental(
+  blocks: ReadonlyArray<TranscriptBlock>,
+  pendingUserInputHighlight?: {
+    readonly requestId: string;
+    readonly questionIndex: number;
+    readonly optionIndex?: number;
+  },
+  previous?: FlattenedBlocksBuild | null,
+): FlattenedBlocksBuild {
+  const highlightSignature = getPendingHighlightSignature(pendingUserInputHighlight);
+  const previousSegments =
+    previous && previous.highlightSignature === highlightSignature
+      ? previous.segments
+      : [];
+  const comparableBlockCount = Math.min(previousSegments.length, blocks.length);
+  let reusablePrefixBlockCount = 0;
+
+  while (reusablePrefixBlockCount < comparableBlockCount) {
+    const previousSegment = previousSegments[reusablePrefixBlockCount];
+    if (!previousSegment || previousSegment.blockSignature !== JSON.stringify(blocks[reusablePrefixBlockCount])) {
+      break;
+    }
+    reusablePrefixBlockCount += 1;
+  }
+
+  if (previousSegments.length === blocks.length && reusablePrefixBlockCount === blocks.length && previous) {
+    return {
+      ...previous,
+      firstChangedLineIndex: previous.lines.length,
+    };
+  }
+
+  const segments = previousSegments.slice(0, reusablePrefixBlockCount);
+  let previousVisibleBlock: TranscriptBlock | null = null;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (segment && segment.lines.length > 0) {
+      previousVisibleBlock = segment.block;
+      break;
+    }
+  }
+
+  for (let index = reusablePrefixBlockCount; index < blocks.length; index += 1) {
+    const segment = buildFlattenedBlockSegment(blocks[index]!, previousVisibleBlock, pendingUserInputHighlight);
+    segments.push(segment);
+    if (segment.lines.length > 0) {
+      previousVisibleBlock = segment.block;
+    }
+  }
+
+  const assembled = assembleFlattenedBlocks(segments);
+  const firstChangedLineIndex = segments
+    .slice(0, reusablePrefixBlockCount)
+    .reduce((total, segment) => total + segment.lines.length, 0);
+
+  return {
+    highlightSignature,
+    segments,
+    lines: assembled.lines,
+    widgetsByLineIndex: assembled.widgetsByLineIndex,
+    firstChangedLineIndex,
+  };
+}
+
 export function flattenBlocks(
   blocks: ReadonlyArray<TranscriptBlock>,
   pendingUserInputHighlight?: {
@@ -2033,72 +2244,10 @@ export function flattenBlocks(
     readonly optionIndex?: number;
   },
 ) {
-  const allLines: AnnotatedLine[] = [];
-  const widgetsByLineIndex = new Map<
-    number,
-    { widget: WidgetType; side: -1 | 1; signature: string }
-  >();
-  let previousVisibleBlock: TranscriptBlock | null = null;
-
-  for (const block of blocks) {
-    const rawBlockLines = trimBlockBoundarySpacerLines(blockToLines(block));
-    if (rawBlockLines.length > 0 && shouldInsertBlockGap(previousVisibleBlock, block)) {
-      allLines.push({ text: "", kind: "blockGap" });
-    }
-    const blockLines = rawBlockLines.map((line) => {
-      let nextLine = line;
-
-      const userInputRef = nextLine.userInputRef;
-
-      const extraClasses = [...(nextLine.extraClasses ?? [])];
-      if (
-        pendingUserInputHighlight
-        && userInputRef
-        && userInputRef.requestId === pendingUserInputHighlight.requestId
-        && userInputRef.questionIndex === pendingUserInputHighlight.questionIndex
-      ) {
-        extraClasses.push("cm-line-userInputActiveQuestion");
-        if (
-          userInputRef.optionIndex !== undefined
-          && pendingUserInputHighlight.optionIndex !== undefined
-          && userInputRef.optionIndex === pendingUserInputHighlight.optionIndex
-        ) {
-          extraClasses.push("cm-line-userInputActiveOption");
-        }
-      }
-
-      return extraClasses.length === 0 ? nextLine : Object.assign({}, nextLine, { extraClasses });
-    });
-    const startLineIndex = allLines.length;
-    allLines.push(...blockLines);
-    if (blockLines.length > 0) {
-      previousVisibleBlock = block;
-    }
-
-    if (block.type === "user-message" && block.attachments && block.attachments.length > 0) {
-      const attachmentLineOffsets = [...blockLines]
-        .map((line, index) => ({ line, index }))
-        .filter(({ line }) => line.kind === "attachmentPanel")
-        .map(({ index }) => index)
-        .slice(0, block.attachments.length);
-
-      attachmentLineOffsets.forEach((lineOffset, index) => {
-        const attachment = block.attachments?.[index];
-        if (!attachment) {
-          return;
-        }
-        widgetsByLineIndex.set(startLineIndex + lineOffset, {
-          widget: new ImageAttachmentTileWidget(attachment),
-          side: 1,
-          signature: `${attachment.id}:${attachment.name}:${attachment.mimeType}:${attachment.sizeBytes}:${attachment.previewUrl ?? ""}`,
-        });
-      });
-    }
-  }
-
+  const flattened = flattenBlocksIncremental(blocks, pendingUserInputHighlight);
   return {
-    lines: allLines,
-    widgetsByLineIndex,
+    lines: flattened.lines,
+    widgetsByLineIndex: flattened.widgetsByLineIndex,
   };
 }
 
@@ -2114,8 +2263,10 @@ function buildTranscriptDocument(
     readonly questionIndex: number;
     readonly optionIndex?: number;
   },
-): TranscriptDocumentModel {
-  const { lines: historyLines, widgetsByLineIndex } = flattenBlocks(blocks, pendingUserInputHighlight);
+  previousFlattened?: FlattenedBlocksBuild | null,
+): { docModel: TranscriptDocumentModel; flattened: FlattenedBlocksBuild } {
+  const flattened = flattenBlocksIncremental(blocks, pendingUserInputHighlight, previousFlattened);
+  const { lines: historyLines, widgetsByLineIndex } = flattened;
   const allLines: AnnotatedLine[] = [...historyLines];
 
   const textParts: string[] = [];
@@ -2285,18 +2436,21 @@ function buildTranscriptDocument(
   const text = textParts.join("");
 
   return {
-    text,
-    historyLineCount: historyLines.length,
-    lines: positioned,
-    marks,
-    widgets,
-    replacements,
-    fileChangeWidgetSignatures,
-    inlineDiffLookupsBySignature,
-    inlineDiffContentBySignature,
-    defaultExpandedInlineDiffSignatures,
-    separatorStart: text.length,
-    promptStart: text.length,
+    docModel: {
+      text,
+      historyLineCount: historyLines.length,
+      lines: positioned,
+      marks,
+      widgets,
+      replacements,
+      fileChangeWidgetSignatures,
+      inlineDiffLookupsBySignature,
+      inlineDiffContentBySignature,
+      defaultExpandedInlineDiffSignatures,
+      separatorStart: text.length,
+      promptStart: text.length,
+    },
+    flattened,
   };
 }
 
@@ -3972,6 +4126,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const composerAttachmentsRef = useRef(composerAttachments);
     const expandedCommandSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const collapsedFileChangeSignaturesRef = useRef<ReadonlySet<string>>(new Set());
+    const flattenedBlocksRef = useRef<FlattenedBlocksBuild | null>(null);
     const appliedDecorationSignatureRef = useRef("");
     const appliedSearchDecorationSignatureRef = useRef("");
     const dragDepthRef = useRef(0);
@@ -4043,7 +4198,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
     }, [promptInputDisabled]);
 
-    const docModel = useMemo(
+    const docBuild = useMemo(
       () =>
         buildTranscriptDocument(
           blocks,
@@ -4053,9 +4208,11 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           cwd,
           projectRoot,
           pendingUserInputHighlight,
+          flattenedBlocksRef.current,
         ),
       [blocks, collapsedFileChangeSignatures, cwd, expandedCommandSignatures, pendingUserInputHighlight, projectRoot, resolvedInlineDiffBySignature],
     );
+    const docModel = docBuild.docModel;
     const compactPendingUserInputPrompt =
       pendingUserInputHighlight !== undefined && !shouldRenderPromptSeparator(docModel.historyLineCount);
     const searchMatches = useMemo(
@@ -4079,8 +4236,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const docModelRef = useRef(docModel);
 
     useEffect(() => {
+      flattenedBlocksRef.current = docBuild.flattened;
       docModelRef.current = docModel;
-    }, [docModel]);
+    }, [docBuild.flattened, docModel]);
 
     const setDraftValue = useCallback((nextDraft: string) => {
       draftRef.current = nextDraft;
