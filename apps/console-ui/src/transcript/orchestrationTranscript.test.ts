@@ -2077,6 +2077,146 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("does not append a finished-state for the current running assistant message when its turn id is null", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-running-null-turnid-message");
+    const messageId = MessageId.makeUnsafe("assistant-running-null-turnid-message");
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        activities: [],
+        proposedPlans: [],
+        checkpoints: [],
+        messages: [
+          {
+            id: messageId,
+            role: "assistant",
+            text: "Still working through the repro.",
+            attachments: [],
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-11T09:00:01.000Z",
+            updatedAt: "2026-03-11T09:00:15.000Z",
+          },
+        ],
+        latestTurn: {
+          turnId,
+          state: "running",
+          requestedAt: "2026-03-11T09:00:00.000Z",
+          startedAt: "2026-03-11T09:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: messageId,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: "2026-03-11T09:00:21.000Z",
+        },
+      },
+      { now: "2026-03-11T09:00:21.000Z" },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Still working through the repro.",
+        streaming: false,
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        now: "2026-03-11T09:00:21.000Z",
+      },
+    ]);
+  });
+
+  it("does not append a finished-state for reconstructed current running assistant chunks when their turn id is null", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-running-reconstructed-null-turnid-message");
+    const messageId = MessageId.makeUnsafe("assistant-running-reconstructed-null-turnid-message");
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        activities: [],
+        proposedPlans: [],
+        checkpoints: [],
+        messages: [
+          {
+            id: messageId,
+            role: "assistant",
+            text: "Still working through the repro.",
+            attachments: [],
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-11T09:00:01.000Z",
+            updatedAt: "2026-03-11T09:00:15.000Z",
+          },
+        ],
+        latestTurn: {
+          turnId,
+          state: "running",
+          requestedAt: "2026-03-11T09:00:00.000Z",
+          startedAt: "2026-03-11T09:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: messageId,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: "2026-03-11T09:00:21.000Z",
+        },
+      },
+      {
+        now: "2026-03-11T09:00:21.000Z",
+        orchestrationEvents: [
+          {
+            sequence: 1,
+            eventId: EventId.makeUnsafe("event-running-reconstructed-null-turnid-message"),
+            aggregateKind: "thread",
+            aggregateId: thread!.id,
+            occurredAt: "2026-03-11T09:00:15.000Z",
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "thread.message-sent",
+            payload: {
+              threadId: thread!.id,
+              messageId,
+              role: "assistant",
+              text: "Still working through the repro.",
+              turnId: null,
+              streaming: false,
+              createdAt: "2026-03-11T09:00:01.000Z",
+              updatedAt: "2026-03-11T09:00:15.000Z",
+            },
+          },
+        ],
+      },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Still working through the repro.",
+        streaming: false,
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-11T09:00:15.000Z",
+        now: "2026-03-11T09:00:21.000Z",
+      },
+    ]);
+  });
+
   it("does not append a duplicate finished-state to later non-message entries in a completed turn", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];

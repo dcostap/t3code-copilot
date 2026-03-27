@@ -1716,19 +1716,29 @@ function buildFinishedStateEntryForAssistantMessage(
   };
 }
 
+function isCurrentAssistantMessage(
+  thread: OrchestrationThread,
+  message: OrchestrationThread["messages"][number],
+) {
+  return (
+    thread.latestTurn?.assistantMessageId === message.id
+    || thread.latestTurn?.turnId === message.turnId
+  );
+}
+
 function shouldAppendFinishedState(
   thread: OrchestrationThread,
   message: OrchestrationThread["messages"][number],
 ) {
-  if (thread.latestTurn?.turnId === message.turnId && thread.latestTurn.state === "running") {
+  if (thread.latestTurn?.state === "running" && isCurrentAssistantMessage(thread, message)) {
     return false;
   }
 
   return (
     !message.streaming
     || (
-      thread.latestTurn?.turnId === message.turnId
-      && thread.latestTurn.state === "completed"
+      isCurrentAssistantMessage(thread, message)
+      && thread.latestTurn?.state === "completed"
     )
   );
 }
