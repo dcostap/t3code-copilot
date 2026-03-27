@@ -1013,11 +1013,23 @@ body {
     calc(100% - var(--project-editor-priority-width)),
     var(--project-sidebar-max-width)
   );
+  position: relative;
   display: flex;
   align-items: stretch;
   min-height: 46px;
-  background: rgba(15, 17, 21, 0.98);
+  background: transparent;
+  overflow: hidden;
+  isolation: isolate;
   -webkit-app-region: drag;
+}
+
+.project-topbar__background {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
 }
 
 .project-topbar__sidebarSpacer {
@@ -1025,6 +1037,8 @@ body {
   width: var(--project-sidebar-width);
   min-width: var(--project-sidebar-width);
   max-width: var(--project-sidebar-width);
+  position: relative;
+  z-index: 1;
 }
 
 .project-topbar__windowControlsSpacer {
@@ -1032,6 +1046,8 @@ body {
   width: var(--project-topbar-window-controls-inset);
   min-width: var(--project-topbar-window-controls-inset);
   max-width: var(--project-topbar-window-controls-inset);
+  position: relative;
+  z-index: 1;
 }
 
 .project-sidebar {
@@ -2167,7 +2183,9 @@ body {
   min-height: 46px;
   padding: 0 12px;
   overflow: hidden;
-  background: rgba(15, 17, 21, 0.98);
+  background: transparent;
+  position: relative;
+  z-index: 1;
 }
 
 .project-tabs__list {
@@ -2212,14 +2230,15 @@ body {
   -webkit-app-region: no-drag;
 }
 
-.project-tab--active {
-  background: rgba(35, 40, 45, 0.98);
-  color: #eef3f7;
-}
-
 .project-tab:hover {
   background: rgba(43, 49, 56, 0.99);
   color: #f5f9fc;
+}
+
+.project-tab--active,
+.project-tab--active:hover {
+  background: transparent;
+  color: #eef3f7;
 }
 
 .project-tab--create {

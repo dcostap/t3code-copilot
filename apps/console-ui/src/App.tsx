@@ -12,6 +12,7 @@ import {
   type CSSProperties,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -1181,6 +1182,56 @@ export function shouldRetainPendingPromptSend(input: {
   );
 }
 
+interface TopbarActiveTabCutout {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+function clampUnitInterval(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(Math.max(value, 0), 1);
+}
+
+function deriveTopbarActiveTabCutout(input: {
+  readonly topbarRect: DOMRect;
+  readonly tabRect: DOMRect;
+}): TopbarActiveTabCutout | null {
+  if (input.topbarRect.width <= 0 || input.topbarRect.height <= 0 || input.tabRect.width <= 0 || input.tabRect.height <= 0) {
+    return null;
+  }
+
+  const x = clampUnitInterval((input.tabRect.left - input.topbarRect.left) / input.topbarRect.width);
+  const y = clampUnitInterval((input.tabRect.top - input.topbarRect.top) / input.topbarRect.height);
+  const width = clampUnitInterval(input.tabRect.width / input.topbarRect.width);
+  const height = clampUnitInterval(input.tabRect.height / input.topbarRect.height);
+  return {
+    x,
+    y,
+    width: Math.min(width, 1 - x),
+    height: Math.min(height, 1 - y),
+  };
+}
+
+function areTopbarActiveTabCutoutsEqual(
+  left: TopbarActiveTabCutout | null,
+  right: TopbarActiveTabCutout | null,
+) {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return left.x === right.x
+    && left.y === right.y
+    && left.width === right.width
+    && left.height === right.height;
+}
+
 export function App() {
   const isDesktop = useMemo(isDesktopBridgeAvailable, []);
   const consoleData = useConsoleData();
@@ -1262,6 +1313,7 @@ export function App() {
   const [unreadThreadIds, setUnreadThreadIds] = useState<ReadonlySet<OrchestrationThread["id"]>>(
     () => readPersistedUnreadThreadIds<OrchestrationThread["id"]>(),
   );
+  const [topbarActiveTabCutout, setTopbarActiveTabCutout] = useState<TopbarActiveTabCutout | null>(null);
   const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
   const paneElementRefs = useRef<Record<string, HTMLElement | null>>({});
   const initializedPaneIdsRef = useRef<Record<string, true>>({});
@@ -1275,7 +1327,10 @@ export function App() {
   const lastManagedThreadRowSelectionIdRef = useRef<OrchestrationThread["id"] | null>(null);
   const pointerManagedThreadSelectionAnchorIdRef = useRef<OrchestrationThread["id"] | null>(null);
   const previousRunningByThreadIdRef = useRef<ReadonlyMap<OrchestrationThread["id"], boolean>>(new Map());
+  const topbarRef = useRef<HTMLDivElement | null>(null);
+  const topbarTabButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
+  const topbarMaskId = `project-topbar-mask-${useId().replaceAll(":", "")}`;
   const hasAnimatedTranscript = useMemo(
     () =>
       Object.keys(pendingPromptSendStartedAtByThreadId).length > 0
@@ -3295,9 +3350,85 @@ export function App() {
   const threadDeleteConfirmThread = threadDeleteConfirmId
     ? consoleData.threads.find((thread) => thread.id === threadDeleteConfirmId && thread.deletedAt === null) ?? null
     : null;
-  const showTopbarTabStrip = !!(workspace.activeProject && activeLayout && activeLayout.tabs.length > 1);
+  const showTopbarTabStrip = !!(workspace.activeProject && activeLayout && activeLayout.tabs.length > 0);
+  const setTopbarTabButtonRef = useCallback((tabId: string, element: HTMLButtonElement | null) => {
+    if (element) {
+      topbarTabButtonRefs.current.set(tabId, element);
+      return;
+    }
+    topbarTabButtonRefs.current.delete(tabId);
+  }, []);
+
+  useEffect(() => {
+    if (!showTopbarTabStrip || !activeLayout?.activeTabId) {
+      setTopbarActiveTabCutout((currentCutout) => currentCutout === null ? currentCutout : null);
+      return;
+    }
+
+    const topbarElement = topbarRef.current;
+    const activeTabElement = topbarTabButtonRefs.current.get(activeLayout.activeTabId) ?? null;
+    if (!topbarElement || !activeTabElement) {
+      setTopbarActiveTabCutout((currentCutout) => currentCutout === null ? currentCutout : null);
+      return;
+    }
+
+    const syncCutout = () => {
+      const nextCutout = deriveTopbarActiveTabCutout({
+        topbarRect: topbarElement.getBoundingClientRect(),
+        tabRect: activeTabElement.getBoundingClientRect(),
+      });
+      setTopbarActiveTabCutout((currentCutout) =>
+        areTopbarActiveTabCutoutsEqual(currentCutout, nextCutout) ? currentCutout : nextCutout
+      );
+    };
+
+    syncCutout();
+    const frameHandle = window.requestAnimationFrame(syncCutout);
+    const handleWindowResize = () => syncCutout();
+    window.addEventListener("resize", handleWindowResize);
+
+    if (typeof ResizeObserver === "undefined") {
+      return () => {
+        window.cancelAnimationFrame(frameHandle);
+        window.removeEventListener("resize", handleWindowResize);
+      };
+    }
+
+    const resizeObserver = new ResizeObserver(() => syncCutout());
+    resizeObserver.observe(topbarElement);
+    resizeObserver.observe(activeTabElement);
+    return () => {
+      window.cancelAnimationFrame(frameHandle);
+      window.removeEventListener("resize", handleWindowResize);
+      resizeObserver.disconnect();
+    };
+  }, [activeLayout, showTopbarTabStrip]);
+
   const topbar = (
-    <div className="project-topbar" style={topbarStyle}>
+    <div className="project-topbar" style={topbarStyle} ref={topbarRef}>
+      <svg
+        aria-hidden="true"
+        className="project-topbar__background"
+        viewBox="0 0 1 1"
+        preserveAspectRatio="none"
+        focusable="false"
+      >
+        <defs>
+          <mask id={topbarMaskId} maskUnits="objectBoundingBox" maskContentUnits="objectBoundingBox">
+            <rect x="0" y="0" width="1" height="1" fill="white" />
+            {topbarActiveTabCutout ? (
+              <rect
+                x={topbarActiveTabCutout.x}
+                y={topbarActiveTabCutout.y}
+                width={topbarActiveTabCutout.width}
+                height={topbarActiveTabCutout.height}
+                fill="black"
+              />
+            ) : null}
+          </mask>
+        </defs>
+        <rect x="0" y="0" width="1" height="1" fill="rgba(15, 17, 21, 0.98)" mask={`url(#${topbarMaskId})`} />
+      </svg>
       <div className="project-topbar__sidebarSpacer" />
       {workspace.activeProject && activeLayout ? (
         <div className="project-tabs">
@@ -3310,6 +3441,7 @@ export function App() {
                   role="tab"
                   aria-selected={tab.id === activeLayout.activeTabId}
                   className={`project-tab${tab.id === activeLayout.activeTabId ? " project-tab--active" : ""}`}
+                  ref={(element) => setTopbarTabButtonRef(tab.id, element)}
                   onClick={() => {
                     workspace.activateTab(workspace.activeProject!.id, tab.id);
                     focusPanePrompt(tab.activePaneId);
