@@ -27,7 +27,6 @@ export type LineKind =
   | "userPromptSeparator"
   | "workGroupSeparator"
   | "workGroupHeader"
-  | "workGroupFooter"
   | "fileChangeSummary"
   | "planSeparator"
   | "planHeader"
@@ -69,6 +68,7 @@ export interface AnnotatedLine {
   readonly kind: LineKind;
   readonly extraClasses?: ReadonlyArray<string>;
   readonly commandWidgetSignature?: string;
+  readonly timingLabel?: string;
   readonly commandWidgetOutputLines?: ReadonlyArray<string>;
   readonly inlineUnifiedDiff?: string;
   readonly inlineDiffLookup?: InlineDiffLookup;
@@ -157,6 +157,8 @@ export interface WorkGroupItem {
   readonly kind: "tool" | "command" | "file-change";
   readonly label: string;
   readonly status: "running" | "done" | "error" | "declined";
+  readonly startedAt?: string;
+  readonly endedAt?: string;
   readonly detail?: string;
   readonly command?: string;
   readonly exitCode?: number;
@@ -980,10 +982,10 @@ function userPromptToLines(
   options: { attachmentCount?: number } = {},
 ): AnnotatedLine[] {
   const contentLines = text.length > 0 ? wrapLines(text, "userMessage") : [];
-  const attachmentLines: AnnotatedLine[] = Array.from(
-    { length: options.attachmentCount ?? 0 },
-    () => ({ text: "", kind: "attachmentPanel" as const }),
-  );
+  const attachmentLines: AnnotatedLine[] =
+    (options.attachmentCount ?? 0) > 0
+      ? [{ text: "", kind: "attachmentPanel" as const }]
+      : [];
   const bodyLines = [...contentLines, ...attachmentLines];
 
   if (bodyLines.length > 0) {
@@ -1013,50 +1015,40 @@ function formatElapsedDuration(ms: number) {
   return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
 
-function formatWorkGroupFooter(block: WorkGroupBlock) {
-  const startedAtMs = Date.parse(block.startedAt);
-  const referenceAtMs =
-    block.status === "running" && block.now
-      ? Date.parse(block.now)
-      : Date.parse(block.endedAt);
-  const elapsedLabel = formatElapsedDuration(referenceAtMs - startedAtMs);
-
-  switch (block.status) {
-    case "running":
-      return `running for ${elapsedLabel}`;
-    case "error":
-      return `failed after ${elapsedLabel}`;
-    case "declined":
-      return `declined after ${elapsedLabel}`;
-    default:
-      return `completed in ${elapsedLabel}`;
+function formatElapsedCompactDuration(ms: number) {
+  const safeMs = Number.isFinite(ms) ? Math.max(0, ms) : 0;
+  const totalSeconds = Math.max(1, Math.floor(safeMs / 1_000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
   }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m`;
+  }
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    return `${totalHours}h`;
+  }
+  return `${Math.floor(totalHours / 24)}d`;
 }
 
-function finishedWorkGroupFooterLines(block: WorkGroupBlock): AnnotatedLine[] {
-  const startedAtMs = Date.parse(block.startedAt);
-  const endedAtMs = Date.parse(block.endedAt);
-  if (
-    Number.isFinite(startedAtMs)
-    && Number.isFinite(endedAtMs)
-    && endedAtMs - startedAtMs <= 1_000
-  ) {
-    return [];
+function workItemTimingLabel(item: WorkGroupItem) {
+  if (item.status === "running" || !item.startedAt || !item.endedAt) {
+    return undefined;
   }
 
-  return [
-    {
-      text: capitalizeInlineLabel(formatWorkGroupFooter(block)),
-      kind: "workingLine",
-    },
-  ];
-}
-
-function capitalizeInlineLabel(value: string) {
-  if (value.length === 0) {
-    return value;
+  const startedAtMs = Date.parse(item.startedAt);
+  const endedAtMs = Date.parse(item.endedAt);
+  if (!Number.isFinite(startedAtMs) || !Number.isFinite(endedAtMs)) {
+    return undefined;
   }
-  return `${value[0]!.toUpperCase()}${value.slice(1)}`;
+
+  const elapsedMs = endedAtMs - startedAtMs;
+  if (elapsedMs < 3_000) {
+    return undefined;
+  }
+
+  return formatElapsedCompactDuration(elapsedMs);
 }
 
 function commandWidgetGlyph(item: WorkGroupItem, _now?: string) {
@@ -1218,6 +1210,7 @@ function executionWorkGroupLine(
     kind: "commandExec",
     extraClasses: [workItemStatusClass(item), "cm-line-commandWidget"],
     commandWidgetSignature: options.signature,
+    ...(options.timingLabel ? { timingLabel: options.timingLabel } : {}),
     ...(outputLines.length > 0
       ? { commandWidgetOutputLines: outputLines }
       : {}),
@@ -1280,6 +1273,7 @@ function fileActivityWorkGroupLine(
     kind: "commandExec",
     extraClasses: [workItemStatusClass(item), "cm-line-commandWidget"],
     commandWidgetSignature: options.signature,
+    ...(options.timingLabel ? { timingLabel: options.timingLabel } : {}),
     ...(item.kind === "file-change" && item.inlineUnifiedDiff
       ? {
           inlineUnifiedDiff: item.inlineUnifiedDiff,
@@ -1294,40 +1288,31 @@ function fileActivityWorkGroupLine(
 }
 
 function executionWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
-  const lastItemIndex = block.items.length - 1;
-  const timingLabel = capitalizeInlineLabel(formatWorkGroupFooter(block));
-
   return [
     ...block.items.flatMap((item, index) => {
+      const timingLabel = workItemTimingLabel(item);
       return [
         executionWorkGroupLine(item, {
           signature:
             `${block.startedAt}:${index}:${item.kind}:`
             + `${item.command ?? item.detail ?? item.changedFiles?.join("|") ?? item.label}`,
-          ...(index === lastItemIndex && block.status !== "running" && block.status !== "done"
-            ? { timingLabel }
-            : {}),
+          ...(timingLabel ? { timingLabel } : {}),
           ...(block.now ? { now: block.now } : {}),
         }),
       ];
     }),
-    ...(block.status === "done" ? finishedWorkGroupFooterLines(block) : []),
     { text: "", kind: "workGroupSeparator" },
   ];
 }
 
 function fileActivityWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
-  const lastItemIndex = block.items.length - 1;
-  const timingLabel = capitalizeInlineLabel(formatWorkGroupFooter(block));
-
   return [
     ...block.items.flatMap((item, index) => {
+      const timingLabel = workItemTimingLabel(item);
       const lines: AnnotatedLine[] = [
         fileActivityWorkGroupLine(item, {
           signature: `${block.startedAt}:${index}:${item.detail ?? item.changedFiles?.join("|") ?? item.label}`,
-          ...(index === lastItemIndex && block.status !== "running" && block.status !== "done"
-            ? { timingLabel }
-            : {}),
+          ...(timingLabel ? { timingLabel } : {}),
           ...(block.now ? { now: block.now } : {}),
         }),
       ];
@@ -1338,7 +1323,6 @@ function fileActivityWorkGroupToLines(block: WorkGroupBlock): AnnotatedLine[] {
 
       return lines;
     }),
-    ...(block.status === "done" ? finishedWorkGroupFooterLines(block) : []),
     { text: "", kind: "workGroupSeparator" },
   ];
 }

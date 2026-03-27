@@ -252,7 +252,7 @@ describe("blockToLines", () => {
     expect(lines[0]?.text).toContain("src/example.ts");
   });
 
-  it("shows elapsed timing only on the last command in a completed edit batch", () => {
+  it("shows compact elapsed timing on each completed edit item", () => {
     const lines = blockToLines({
       type: "work-group",
       title: "File change",
@@ -264,6 +264,8 @@ describe("blockToLines", () => {
           kind: "file-change",
           label: "File change",
           status: "done",
+          startedAt: "2026-03-13T10:57:31.912Z",
+          endedAt: "2026-03-13T10:57:35.912Z",
           changedFiles: ["src/one.ts"],
           additions: 2,
           deletions: 1,
@@ -274,6 +276,8 @@ describe("blockToLines", () => {
           kind: "file-change",
           label: "File change",
           status: "done",
+          startedAt: "2026-03-13T10:57:40.000Z",
+          endedAt: "2026-03-13T10:58:50.000Z",
           changedFiles: ["src/two.ts"],
           additions: 4,
           deletions: 0,
@@ -285,10 +289,10 @@ describe("blockToLines", () => {
 
     expect(lines[0]?.kind).toBe("commandExec");
     expect(lines[0]?.text).toContain("src/one.ts");
-    expect(lines[0]?.text).not.toContain("Completed in");
+    expect(lines[0]?.text).toContain("4s");
     expect(lines[1]?.kind).toBe("commandExec");
     expect(lines[1]?.text).toContain("src/two.ts");
-    expect(lines[1]?.text).not.toContain("Completed in");
+    expect(lines[1]?.text).toContain("1m");
     expect(lines[2]).toEqual({ text: "", kind: "workGroupSeparator" });
   });
 
@@ -371,7 +375,7 @@ describe("blockToLines", () => {
     );
   });
 
-  it("adds elapsed timing only to the last command in a completed command batch", () => {
+  it("shows compact elapsed timing on each completed command item", () => {
     const lines = blockToLines({
       type: "work-group",
       title: "Command run",
@@ -383,25 +387,29 @@ describe("blockToLines", () => {
           kind: "command",
           label: "Command run",
           status: "done",
+          startedAt: "2026-03-13T12:00:00.000Z",
+          endedAt: "2026-03-13T12:00:04.400Z",
           command: "Get-Location",
         },
         {
           kind: "command",
           label: "Command run",
           status: "done",
+          startedAt: "2026-03-13T12:10:00.000Z",
+          endedAt: "2026-03-13T14:15:00.000Z",
           command: "git status --short",
         },
       ],
     });
 
     expect(lines[0]?.text).toContain("Get-Location");
-    expect(lines[0]?.text).not.toContain("Completed in");
+    expect(lines[0]?.text).toContain("4s");
     expect(lines[1]?.text).toContain("git status --short");
-    expect(lines[1]?.text).not.toContain("Completed in");
+    expect(lines[1]?.text).toContain("2h");
     expect(lines[2]).toEqual({ text: "", kind: "workGroupSeparator" });
   });
 
-  it("omits done work-group footers at exactly one second", () => {
+  it("omits compact elapsed timing for work under three seconds", () => {
     const lines = blockToLines({
       type: "work-group",
       title: "Command run",
@@ -413,6 +421,8 @@ describe("blockToLines", () => {
           kind: "command",
           label: "Command run",
           status: "done",
+          startedAt: "2026-03-13T12:00:00.000Z",
+          endedAt: "2026-03-13T12:00:02.999Z",
           command: "Get-Location",
         },
       ],
@@ -426,7 +436,7 @@ describe("blockToLines", () => {
     ]);
   });
 
-  it("keeps done work-group footers once they exceed one second", () => {
+  it("shows compact elapsed timing once work reaches three seconds", () => {
     const lines = blockToLines({
       type: "work-group",
       title: "Command run",
@@ -438,12 +448,20 @@ describe("blockToLines", () => {
           kind: "command",
           label: "Command run",
           status: "done",
+          startedAt: "2026-03-13T12:00:00.000Z",
+          endedAt: "2026-03-13T12:03:01.100Z",
           command: "Get-Location",
         },
       ],
     });
 
-    expect(lines[1]).toEqual({ text: "Completed in 1.1s", kind: "workingLine" });
+    expect(lines).toEqual([
+      expect.objectContaining({
+        kind: "commandExec",
+        text: expect.stringContaining("3m"),
+      }),
+      { text: "", kind: "workGroupSeparator" },
+    ]);
   });
 
   it("renders tool work groups as command widgets without pinning optional output layout", () => {

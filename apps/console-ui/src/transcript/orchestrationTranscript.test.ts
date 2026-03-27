@@ -319,6 +319,8 @@ describe("threadToTranscriptBlocks", () => {
             kind: "tool",
             label: "Search workspace",
             status: "done",
+            startedAt: "2026-03-11T09:00:00.000Z",
+            endedAt: "2026-03-11T09:00:02.000Z",
             detail: expect.any(String),
           }),
         ],
@@ -565,6 +567,8 @@ describe("threadToTranscriptBlocks", () => {
             kind: "tool",
             label: "Web search",
             status: "done",
+            startedAt: "2026-03-11T09:00:00.000Z",
+            endedAt: "2026-03-11T09:00:03.000Z",
             detail: "First search matched the issue tracker.",
           },
         ],
@@ -584,6 +588,8 @@ describe("threadToTranscriptBlocks", () => {
             kind: "tool",
             label: "Web search",
             status: "done",
+            startedAt: "2026-03-11T09:00:02.000Z",
+            endedAt: "2026-03-11T09:00:04.000Z",
             detail: "Second search matched the docs page.",
           },
         ],
@@ -661,6 +667,8 @@ describe("threadToTranscriptBlocks", () => {
             kind: "tool",
             label: "Context7 Query Docs",
             status: "done",
+            startedAt: "2026-03-18T14:35:35.334Z",
+            endedAt: "2026-03-18T14:35:38.000Z",
             detail: "Custom select queries in Exposed.",
           },
         ],
@@ -782,12 +790,16 @@ describe("threadToTranscriptBlocks", () => {
             kind: "command",
             label: "Command run",
             status: "done",
+            startedAt: "2026-03-13T12:00:00.000Z",
+            endedAt: "2026-03-13T12:00:00.200Z",
             command: "Get-Location",
           },
           {
             kind: "command",
             label: "Command run",
             status: "done",
+            startedAt: "2026-03-13T12:00:00.100Z",
+            endedAt: "2026-03-13T12:00:00.300Z",
             command: "git status --short",
           },
         ],
@@ -861,6 +873,8 @@ describe("threadToTranscriptBlocks", () => {
             kind: "command",
             label: "Powershell",
             status: "running",
+            startedAt: "2026-03-22T10:00:01.000Z",
+            endedAt: "2026-03-22T10:00:01.000Z",
             command: "Start-Sleep -Seconds 10",
           },
         ],
@@ -938,6 +952,8 @@ describe("threadToTranscriptBlocks", () => {
             kind: "command",
             label: "Powershell",
             status: "running",
+            startedAt: "2026-03-22T10:00:01.000Z",
+            endedAt: "2026-03-22T10:00:01.000Z",
             command: "Start-Sleep -Seconds 10; Write-Output 'Slept 10 seconds'",
             detail: "Start-Sleep -Seconds 10; Write-Output 'Slept 10 seconds'",
           },
@@ -1003,6 +1019,8 @@ describe("threadToTranscriptBlocks", () => {
             kind: "command",
             label: "Powershell",
             status: "done",
+            startedAt: "2026-03-22T10:00:10.200Z",
+            endedAt: "2026-03-22T10:00:10.200Z",
             command: "Start-Sleep -Seconds 10",
             detail: "Start-Sleep -Seconds 10",
             exitCode: 0,
@@ -1094,6 +1112,8 @@ describe("threadToTranscriptBlocks", () => {
             kind: "file-change",
             label: "File change",
             status: "done",
+            startedAt: "2026-03-13T10:57:31.912Z",
+            endedAt: "2026-03-13T10:57:31.931Z",
             changedFiles: ["src/example.ts"],
             additions: 2,
             deletions: 1,
@@ -1917,6 +1937,146 @@ describe("threadToTranscriptBlocks", () => {
     ]);
   });
 
+  it("does not append a finished-state for a non-streaming assistant message while the latest turn is still running", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-running-non-streaming-message");
+    const messageId = MessageId.makeUnsafe("assistant-running-non-streaming-message");
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        activities: [],
+        proposedPlans: [],
+        checkpoints: [],
+        messages: [
+          {
+            id: messageId,
+            role: "assistant",
+            text: "I'm troubleshooting the timeout issue.",
+            attachments: [],
+            turnId,
+            streaming: false,
+            createdAt: "2026-03-11T09:00:01.000Z",
+            updatedAt: "2026-03-11T09:00:15.000Z",
+          },
+        ],
+        latestTurn: {
+          turnId,
+          state: "running",
+          requestedAt: "2026-03-11T09:00:00.000Z",
+          startedAt: "2026-03-11T09:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: messageId,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: "2026-03-11T09:00:21.000Z",
+        },
+      },
+      { now: "2026-03-11T09:00:21.000Z" },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "I'm troubleshooting the timeout issue.",
+        streaming: false,
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        now: "2026-03-11T09:00:21.000Z",
+      },
+    ]);
+  });
+
+  it("does not append a finished-state for reconstructed assistant chunks while the latest turn is still running", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const turnId = TurnId.makeUnsafe("turn-running-reconstructed-non-streaming-message");
+    const messageId = MessageId.makeUnsafe("assistant-running-reconstructed-non-streaming-message");
+
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        activities: [],
+        proposedPlans: [],
+        checkpoints: [],
+        messages: [
+          {
+            id: messageId,
+            role: "assistant",
+            text: "I'm troubleshooting the timeout issue.",
+            attachments: [],
+            turnId,
+            streaming: false,
+            createdAt: "2026-03-11T09:00:01.000Z",
+            updatedAt: "2026-03-11T09:00:15.000Z",
+          },
+        ],
+        latestTurn: {
+          turnId,
+          state: "running",
+          requestedAt: "2026-03-11T09:00:00.000Z",
+          startedAt: "2026-03-11T09:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: messageId,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: "2026-03-11T09:00:21.000Z",
+        },
+      },
+      {
+        now: "2026-03-11T09:00:21.000Z",
+        orchestrationEvents: [
+          {
+            sequence: 1,
+            eventId: EventId.makeUnsafe("event-running-reconstructed-non-streaming-message"),
+            aggregateKind: "thread",
+            aggregateId: thread!.id,
+            occurredAt: "2026-03-11T09:00:15.000Z",
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "thread.message-sent",
+            payload: {
+              threadId: thread!.id,
+              messageId,
+              role: "assistant",
+              text: "I'm troubleshooting the timeout issue.",
+              turnId,
+              streaming: false,
+              createdAt: "2026-03-11T09:00:01.000Z",
+              updatedAt: "2026-03-11T09:00:15.000Z",
+            },
+          },
+        ],
+      },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "I'm troubleshooting the timeout issue.",
+        streaming: false,
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-11T09:00:15.000Z",
+        now: "2026-03-11T09:00:21.000Z",
+      },
+    ]);
+  });
+
   it("does not append a duplicate finished-state to later non-message entries in a completed turn", () => {
     const snapshot = buildTestSnapshot();
     const thread = snapshot.threads[0];
@@ -2101,11 +2261,116 @@ describe("threadToTranscriptBlocks", () => {
             kind: "command",
             label: "Powershell",
             status: "done",
+            startedAt: "2026-03-22T10:00:22.000Z",
+            endedAt: "2026-03-22T10:00:22.000Z",
             command: "Start-Sleep -Seconds 10",
             detail: "Start-Sleep -Seconds 10",
             exitCode: 0,
           },
         ],
+      },
+    ]);
+  });
+
+  it("keeps a new running command work-group running when older finished-state blocks exist in history", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    expect(thread!.latestTurn).toBeDefined();
+
+    const turnId = TurnId.makeUnsafe("turn-running-after-history-finished");
+    const messageId = MessageId.makeUnsafe("assistant-history-finished-before-running-command");
+    const derived = threadToTranscriptBlocks(
+      {
+        ...thread!,
+        checkpoints: [],
+        proposedPlans: [],
+        messages: [
+          {
+            id: messageId,
+            role: "assistant",
+            text: "Earlier turn done.",
+            attachments: [],
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-22T10:00:20.000Z",
+            updatedAt: "2026-03-22T10:00:21.000Z",
+          },
+        ],
+        activities: [
+          {
+            id: EventId.makeUnsafe("activity-running-command-after-history-finished"),
+            tone: "tool",
+            kind: "tool.started",
+            summary: "Powershell started",
+            payload: {
+              itemType: "command_execution",
+              title: "Powershell",
+              status: "completed",
+              data: {
+                arguments: {
+                  command: "Start-Sleep -Seconds 20",
+                },
+              },
+            },
+            turnId,
+            sequence: 1,
+            createdAt: "2026-03-22T10:00:22.000Z",
+          },
+        ],
+        latestTurn: {
+          ...thread!.latestTurn!,
+          turnId,
+          state: "running",
+          requestedAt: "2026-03-22T10:00:22.000Z",
+          startedAt: "2026-03-22T10:00:22.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: {
+          ...thread!.session!,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: "2026-03-22T10:00:24.000Z",
+        },
+      },
+      { now: "2026-03-22T10:00:24.000Z" },
+    );
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "Earlier turn done.",
+        streaming: false,
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-22T10:00:20.000Z",
+        finishedAt: "2026-03-22T10:00:21.000Z",
+      },
+      {
+        type: "work-group",
+        title: "Powershell",
+        status: "running",
+        startedAt: "2026-03-22T10:00:22.000Z",
+        endedAt: "2026-03-22T10:00:22.000Z",
+        now: "2026-03-22T10:00:24.000Z",
+        pulseOriginAt: "2026-03-22T10:00:22.000Z",
+        items: [
+          {
+            kind: "command",
+            label: "Powershell",
+            status: "running",
+            startedAt: "2026-03-22T10:00:22.000Z",
+            endedAt: "2026-03-22T10:00:22.000Z",
+            command: "Start-Sleep -Seconds 20",
+          },
+        ],
+      },
+      {
+        type: "working-state",
+        startedAt: "2026-03-22T10:00:22.000Z",
+        now: "2026-03-22T10:00:24.000Z",
       },
     ]);
   });
@@ -2179,6 +2444,8 @@ describe("threadToTranscriptBlocks", () => {
             kind: "file-change",
             label: "File change",
             status: "done",
+            startedAt: "2026-03-13T10:57:31.931Z",
+            endedAt: "2026-03-13T10:57:31.931Z",
             changedFiles: ["src/example.ts"],
             inlineDiffLookup: {
               threadId: thread!.id,
@@ -3769,6 +4036,76 @@ describe("threadToTranscriptBlocks", () => {
         type: "finished-state",
         startedAt: "2026-03-11T09:00:01.000Z",
         finishedAt: "2026-03-11T09:00:05.200Z",
+      },
+    ]);
+  });
+
+  it("keeps one finished-state across assistant message chunks even when provider turn ids drift", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0];
+    expect(thread).toBeDefined();
+    const firstTurnId = TurnId.makeUnsafe("turn-multi-assistant-drift-a");
+    const secondTurnId = TurnId.makeUnsafe("turn-multi-assistant-drift-b");
+    const secondMessageId = MessageId.makeUnsafe("assistant-message-after-drift");
+
+    const derived = threadToTranscriptBlocks({
+      ...thread!,
+      proposedPlans: [],
+      checkpoints: [],
+      activities: [],
+      messages: [
+        {
+          id: MessageId.makeUnsafe("assistant-message-before-drift"),
+          role: "assistant",
+          text: "First provider chunk.",
+          attachments: [],
+          turnId: firstTurnId,
+          streaming: false,
+          createdAt: "2026-03-11T09:00:01.000Z",
+          updatedAt: "2026-03-11T09:00:02.000Z",
+        },
+        {
+          id: secondMessageId,
+          role: "assistant",
+          text: "Second provider chunk.",
+          attachments: [],
+          turnId: secondTurnId,
+          streaming: false,
+          createdAt: "2026-03-11T09:00:03.000Z",
+          updatedAt: "2026-03-11T09:00:04.000Z",
+        },
+      ],
+      latestTurn: {
+        turnId: secondTurnId,
+        state: "completed",
+        requestedAt: "2026-03-11T09:00:00.000Z",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        completedAt: "2026-03-11T09:00:04.000Z",
+        assistantMessageId: secondMessageId,
+      },
+      session: {
+        ...thread!.session!,
+        status: "ready",
+        activeTurnId: null,
+        updatedAt: "2026-03-11T09:00:04.000Z",
+      },
+    });
+
+    expect(derived).toEqual([
+      {
+        type: "assistant-text",
+        text: "First provider chunk.",
+        streaming: false,
+      },
+      {
+        type: "assistant-text",
+        text: "Second provider chunk.",
+        streaming: false,
+      },
+      {
+        type: "finished-state",
+        startedAt: "2026-03-11T09:00:01.000Z",
+        finishedAt: "2026-03-11T09:00:04.000Z",
       },
     ]);
   });

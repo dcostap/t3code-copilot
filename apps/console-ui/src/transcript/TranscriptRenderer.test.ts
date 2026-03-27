@@ -52,7 +52,6 @@ describe("flattenBlocks", () => {
       "body",
       "blockGap",
       "commandExec",
-      "workingLine",
     ]);
   });
 

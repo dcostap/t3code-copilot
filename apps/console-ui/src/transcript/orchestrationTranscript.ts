@@ -57,9 +57,11 @@ interface TimelineEntry {
 
 interface AssistantPhaseEntryState {
   readonly id: string;
-  readonly turnId: string | null;
+  turnId: string | null;
   readonly entryIds: string[];
   readonly finishedEntries: TimelineEntry[];
+  hasAssistantMessageContent: boolean;
+  firstContentCreatedAt: string | null;
   pendingClose: boolean;
 }
 
@@ -977,6 +979,8 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
       kind: "file-change",
       label,
       status,
+      startedAt: activity.createdAt,
+      endedAt: activity.createdAt,
       mergeKey: itemId
         ? `file-change:id:${itemId}`
         : `file-change:path:${(fileChangeStats?.changedFiles ?? changedFiles).join("|")}`,
@@ -992,6 +996,8 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
       kind: "command",
       label,
       status,
+      startedAt: activity.createdAt,
+      endedAt: activity.createdAt,
       mergeKey: itemId
         ? `command:id:${itemId}`
         : `command:text:${command ?? label}`,
@@ -1011,6 +1017,8 @@ function activityToWorkItem(activity: OrchestrationThreadActivity): PendingWorkI
     kind: "tool",
     label,
     status,
+    startedAt: activity.createdAt,
+    endedAt: activity.createdAt,
     mergeKey: itemId
       ? `${itemType ?? "tool"}:id:${itemId}`
       : itemType === "web_search" && webSearchQuery
@@ -1049,6 +1057,8 @@ function mergeWorkItems(previous: PendingWorkItem, next: PendingWorkItem): Pendi
   const changedFiles = previous.changedFiles || next.changedFiles
     ? uniqueStrings([...(previous.changedFiles ?? []), ...(next.changedFiles ?? [])])
     : null;
+  const startedAt = previous.startedAt ?? next.startedAt;
+  const endedAt = next.endedAt ?? previous.endedAt;
   const detail =
     isWebSearchWorkItem(previous)
       ? next.detail ?? previous.detail
@@ -1059,6 +1069,8 @@ function mergeWorkItems(previous: PendingWorkItem, next: PendingWorkItem): Pendi
   return {
     ...previous,
     ...next,
+    ...(startedAt ? { startedAt } : {}),
+    ...(endedAt ? { endedAt } : {}),
     ...(detail ? { detail } : {}),
     ...(changedFiles ? { changedFiles } : {}),
   };
@@ -1358,11 +1370,11 @@ function mergeAssistantPhaseFinishedEntry(
     return null;
   }
 
-  let startedAt = finishedBlocks[0]!.startedAt;
+  let startedAt = phase.firstContentCreatedAt ?? finishedBlocks[0]!.startedAt;
   let finishedAt = finishedBlocks[0]!.finishedAt;
 
   for (const block of finishedBlocks.slice(1)) {
-    if (block.startedAt.localeCompare(startedAt) < 0) {
+    if (!phase.firstContentCreatedAt && block.startedAt.localeCompare(startedAt) < 0) {
       startedAt = block.startedAt;
     }
     if (block.finishedAt.localeCompare(finishedAt) > 0) {
@@ -1394,6 +1406,8 @@ function normalizeAssistantPhaseEntries(
       turnId,
       entryIds: [],
       finishedEntries: [],
+      hasAssistantMessageContent: false,
+      firstContentCreatedAt: null,
       pendingClose: false,
     };
     nextPhaseIndex += 1;
@@ -1404,6 +1418,8 @@ function normalizeAssistantPhaseEntries(
   const getOrCreateCurrentPhase = (turnId: string | null) => {
     if (!currentPhase) {
       currentPhase = createPhase(turnId);
+    } else if (currentPhase.turnId === null && turnId !== null) {
+      currentPhase.turnId = turnId;
     }
     return currentPhase;
   };
@@ -1426,7 +1442,7 @@ function normalizeAssistantPhaseEntries(
     });
 
     if (!finishedStateEntry) {
-      if (shouldResetAssistantPhaseForEntry(currentPhase, phaseTurnId)) {
+      if (shouldResetAssistantPhaseForEntry(currentPhase, phaseTurnId, entry)) {
         currentPhase = null;
       }
 
@@ -1453,6 +1469,12 @@ function normalizeAssistantPhaseEntries(
 
     if (phaseContentEntry) {
       const phase = getOrCreateCurrentPhase(phaseTurnId);
+      if (isAssistantMessageEntry(entry)) {
+        phase.hasAssistantMessageContent = true;
+      }
+      if (!phase.firstContentCreatedAt) {
+        phase.firstContentCreatedAt = entry.createdAt;
+      }
       phase.entryIds.push(entry.id);
       phaseIdByEntryId.set(entry.id, phase.id);
     }
@@ -1496,6 +1518,26 @@ function normalizeAssistantPhaseEntries(
   return normalizedEntries;
 }
 
+function shouldResetAssistantPhaseForEntry(
+  currentPhase: AssistantPhaseEntryState | null,
+  phaseTurnId: string | null,
+  entry: TimelineEntry,
+) {
+  if (!currentPhase || currentPhase.pendingClose || phaseTurnId === currentPhase.turnId) {
+    return false;
+  }
+
+  if (currentPhase.finishedEntries.length > 0) {
+    return !isAssistantMessageEntry(entry);
+  }
+
+  if (currentPhase.hasAssistantMessageContent && !isUserMessageEntry(entry)) {
+    return false;
+  }
+
+  return !isAssistantMessageEntry(entry);
+}
+
 function isAssistantBoundaryActivity(activity: OrchestrationThreadActivity) {
   return activity.kind === "user-input.requested" || activity.kind === "approval.requested";
 }
@@ -1512,17 +1554,6 @@ function closesAssistantBoundaryActivity(activity: OrchestrationThreadActivity) 
       activity.kind === "provider.approval.respond.failed"
       && (asString(payload?.detail)?.includes("Unknown pending permission request") ?? false)
     );
-}
-
-function shouldResetAssistantPhaseForEntry(
-  currentPhase: AssistantPhaseEntryState | null,
-  phaseTurnId: string | null,
-) {
-  if (!currentPhase) {
-    return false;
-  }
-
-  return !currentPhase.pendingClose && phaseTurnId !== currentPhase.turnId;
 }
 
 function buildAssistantBoundaryMap(
@@ -1689,6 +1720,10 @@ function shouldAppendFinishedState(
   thread: OrchestrationThread,
   message: OrchestrationThread["messages"][number],
 ) {
+  if (thread.latestTurn?.turnId === message.turnId && thread.latestTurn.state === "running") {
+    return false;
+  }
+
   return (
     !message.streaming
     || (
@@ -1748,17 +1783,21 @@ function createFinishedStateBlock(
 }
 
 function resolveTranscriptFinishedAt(thread: OrchestrationThread, blocks: ReadonlyArray<TranscriptBlock>): string | null {
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index];
-    if (block?.type === "finished-state") {
-      return block.finishedAt;
-    }
+  if (thread.latestTurn?.state === "running" || thread.session?.status === "running") {
+    return null;
   }
 
   if (thread.latestTurn?.state === "completed") {
     return thread.latestTurn.completedAt
       ?? thread.session?.updatedAt
       ?? thread.updatedAt;
+  }
+
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block?.type === "finished-state") {
+      return block.finishedAt;
+    }
   }
 
   return null;

@@ -12,6 +12,9 @@ import {
   type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type SyntheticEvent as ReactSyntheticEvent,
+  type WheelEvent as ReactWheelEvent,
 } from "react";
 import { parsePatchFiles, type FileDiffMetadata } from "@pierre/diffs";
 import { defaultKeymap } from "@codemirror/commands";
@@ -176,6 +179,28 @@ interface PromptCaretBox {
   readonly width: number;
   readonly height: number;
   readonly text: string;
+}
+
+interface AttachmentViewerImage {
+  readonly name: string;
+  readonly src: string;
+}
+
+interface AttachmentViewerNaturalSize {
+  readonly width: number;
+  readonly height: number;
+}
+
+interface AttachmentViewerPan {
+  readonly x: number;
+  readonly y: number;
+}
+
+interface AttachmentViewerDragState {
+  readonly pointerId: number;
+  readonly startPan: AttachmentViewerPan;
+  readonly startX: number;
+  readonly startY: number;
 }
 
 interface PromptCaretMeasureElements {
@@ -376,9 +401,15 @@ function formatAttachmentSize(sizeBytes: number) {
   return `${sizeBytes} B`;
 }
 
-function attachmentBadgeLabel(mimeType: string) {
-  const subtype = mimeType.split("/")[1]?.trim().toUpperCase();
-  return subtype && subtype.length <= 5 ? subtype : "IMG";
+function applyAttachmentPreviewDataset(
+  element: HTMLElement,
+  attachment: Pick<TranscriptImageAttachment, "name" | "previewUrl">,
+) {
+  if (!attachment.previewUrl) {
+    return;
+  }
+  element.dataset.attachmentViewerName = attachment.name;
+  element.dataset.attachmentViewerSrc = attachment.previewUrl;
 }
 
 function createAttachmentTileDom(
@@ -390,23 +421,18 @@ function createAttachmentTileDom(
 ) {
   const tile = document.createElement("div");
   tile.className = "attachment-tile";
-  tile.title = `${attachment.name} (${attachment.mimeType}, ${formatAttachmentSize(attachment.sizeBytes)})`;
+  tile.title = `${attachment.name} (${formatAttachmentSize(attachment.sizeBytes)})`;
 
   const media =
-    attachment.previewUrl && variant === "history"
-      ? document.createElement("a")
+    attachment.previewUrl
+      ? document.createElement("button")
       : document.createElement("div");
   media.className = "attachment-tile__media";
-  if (media instanceof HTMLAnchorElement && attachment.previewUrl) {
-    media.href = attachment.previewUrl;
-    media.target = "_blank";
-    media.rel = "noreferrer";
+  if (media instanceof HTMLButtonElement) {
+    media.type = "button";
+    media.setAttribute("aria-label", `Open ${attachment.name}`);
+    applyAttachmentPreviewDataset(media, attachment);
   }
-
-  const fallback = document.createElement("div");
-  fallback.className = "attachment-tile__fallback";
-  fallback.textContent = attachmentBadgeLabel(attachment.mimeType);
-  media.append(fallback);
 
   if (attachment.previewUrl) {
     const image = document.createElement("img");
@@ -414,13 +440,6 @@ function createAttachmentTileDom(
     image.alt = attachment.name;
     image.loading = "lazy";
     image.src = attachment.previewUrl;
-    image.addEventListener("load", () => {
-      fallback.hidden = true;
-    });
-    image.addEventListener("error", () => {
-      image.hidden = true;
-      fallback.hidden = false;
-    });
     media.append(image);
   }
 
@@ -433,7 +452,7 @@ function createAttachmentTileDom(
 
   const detail = document.createElement("div");
   detail.className = "attachment-tile__detail";
-  detail.textContent = `${attachment.mimeType} · ${formatAttachmentSize(attachment.sizeBytes)}`;
+  detail.textContent = formatAttachmentSize(attachment.sizeBytes);
 
   meta.append(name, detail);
   tile.append(media, meta);
@@ -453,22 +472,118 @@ function createAttachmentTileDom(
   return tile;
 }
 
-class ImageAttachmentTileWidget extends WidgetType {
-  constructor(private readonly attachment: TranscriptImageAttachment) {
+function createAttachmentPanelDom(
+  attachments: ReadonlyArray<TranscriptImageAttachment>,
+  variant: "history" | "composer",
+) {
+  const panel = document.createElement("div");
+  panel.className = `attachment-panel attachment-panel--${variant}`;
+  for (const attachment of attachments) {
+    panel.append(createAttachmentTileDom(attachment, variant));
+  }
+  return panel;
+}
+
+function buildAttachmentPanelSignature(
+  attachments: ReadonlyArray<TranscriptImageAttachment>,
+) {
+  return attachments
+    .map((attachment) =>
+      `${attachment.id}:${attachment.name}:${attachment.mimeType}:${attachment.sizeBytes}:${attachment.previewUrl ?? ""}`)
+    .join("|");
+}
+
+class ImageAttachmentPanelWidget extends WidgetType {
+  constructor(private readonly attachments: ReadonlyArray<TranscriptImageAttachment>) {
     super();
   }
 
-  override eq(other: ImageAttachmentTileWidget) {
-    return this.attachment.id === other.attachment.id
-      && this.attachment.name === other.attachment.name
-      && this.attachment.mimeType === other.attachment.mimeType
-      && this.attachment.sizeBytes === other.attachment.sizeBytes
-      && this.attachment.previewUrl === other.attachment.previewUrl;
+  override eq(other: ImageAttachmentPanelWidget) {
+    if (this.attachments.length !== other.attachments.length) {
+      return false;
+    }
+    return this.attachments.every((attachment, index) => {
+      const nextAttachment = other.attachments[index];
+      if (!nextAttachment) {
+        return false;
+      }
+      return attachment.id === nextAttachment.id
+        && attachment.name === nextAttachment.name
+        && attachment.mimeType === nextAttachment.mimeType
+        && attachment.sizeBytes === nextAttachment.sizeBytes
+        && attachment.previewUrl === nextAttachment.previewUrl;
+    });
   }
 
   override toDOM() {
-    return createAttachmentTileDom(this.attachment, "history");
+    return createAttachmentPanelDom(this.attachments, "history");
   }
+}
+
+function resolveAttachmentViewerFitScale(
+  naturalSize: AttachmentViewerNaturalSize,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  if (naturalSize.width <= 0 || naturalSize.height <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
+    return 1;
+  }
+  const availableWidth = Math.max(1, viewportWidth - 96);
+  const availableHeight = Math.max(1, viewportHeight - 96);
+  return Math.min(1, availableWidth / naturalSize.width, availableHeight / naturalSize.height);
+}
+
+function resolveAttachmentViewerPanLimits(
+  scale: number,
+  naturalSize: AttachmentViewerNaturalSize,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  const availableWidth = Math.max(1, viewportWidth - 96);
+  const availableHeight = Math.max(1, viewportHeight - 96);
+  const scaledWidth = naturalSize.width * scale;
+  const scaledHeight = naturalSize.height * scale;
+  return {
+    maxX: Math.max(0, (scaledWidth - availableWidth) / 2),
+    maxY: Math.max(0, (scaledHeight - availableHeight) / 2),
+  };
+}
+
+function canPanAttachmentViewer(
+  scale: number,
+  naturalSize: AttachmentViewerNaturalSize,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  if (naturalSize.width <= 0 || naturalSize.height <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
+    return false;
+  }
+  const { maxX, maxY } = resolveAttachmentViewerPanLimits(scale, naturalSize, viewportWidth, viewportHeight);
+  return maxX > 0 || maxY > 0;
+}
+
+function clampAttachmentViewerPan(
+  pan: AttachmentViewerPan,
+  scale: number,
+  naturalSize: AttachmentViewerNaturalSize,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  if (naturalSize.width <= 0 || naturalSize.height <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
+    return pan;
+  }
+
+  const { maxX, maxY } = resolveAttachmentViewerPanLimits(
+    scale,
+    naturalSize,
+    viewportWidth,
+    viewportHeight,
+  );
+
+  return {
+    x: Math.min(maxX, Math.max(-maxX, pan.x)),
+    y: Math.min(maxY, Math.max(-maxY, pan.y)),
+  };
 }
 
 async function copyTextToClipboard(text: string) {
@@ -1555,7 +1670,7 @@ function buildCommandWidgetSummaryCopyText(content: {
   ].filter((part): part is string => typeof part === "string" && part.length > 0).join(" ");
 }
 
-function parseCommandWidgetText(text: string): ParsedCommandWidgetText | null {
+function parseCommandWidgetText(text: string, timingLabel?: string): ParsedCommandWidgetText | null {
   const firstSpace = text.indexOf(" ");
   if (firstSpace <= 0) {
     return null;
@@ -1572,7 +1687,7 @@ function parseCommandWidgetText(text: string): ParsedCommandWidgetText | null {
   let command = prefixAndCommand.slice(firstDivider + 2);
   let rawCommandStart = firstSpace + 1 + firstDivider + 2;
   let rawCommandEnd = text.length;
-  let timingLabel: string | undefined;
+  let resolvedTimingLabel = timingLabel;
   let counts:
     | {
         additions: string;
@@ -1586,15 +1701,23 @@ function parseCommandWidgetText(text: string): ParsedCommandWidgetText | null {
     counts = prefixCounts.counts;
   }
 
-  for (const marker of ["  Finished in ", "  Completed in ", "  Running for ", "  Failed after ", "  Declined after "]) {
-    const timingIndex = command.lastIndexOf(marker);
-    if (timingIndex === -1) {
-      continue;
+  if (timingLabel) {
+    const timingSuffix = `  ${timingLabel}`;
+    if (command.endsWith(timingSuffix)) {
+      command = command.slice(0, -timingSuffix.length);
+      rawCommandEnd -= timingSuffix.length;
     }
-    timingLabel = command.slice(timingIndex + 2);
-    command = command.slice(0, timingIndex);
-    rawCommandEnd = rawCommandStart + timingIndex;
-    break;
+  } else {
+    for (const marker of ["  Finished in ", "  Completed in ", "  Running for ", "  Failed after ", "  Declined after "]) {
+      const timingIndex = command.lastIndexOf(marker);
+      if (timingIndex === -1) {
+        continue;
+      }
+      resolvedTimingLabel = command.slice(timingIndex + 2);
+      command = command.slice(0, timingIndex);
+      rawCommandEnd = rawCommandStart + timingIndex;
+      break;
+    }
   }
 
   if (!counts) {
@@ -1638,19 +1761,20 @@ function parseCommandWidgetText(text: string): ParsedCommandWidgetText | null {
     prefix,
     command,
     ...(commandRange ? { commandRange } : {}),
-    ...(timingLabel ? { timingLabel } : {}),
+    ...(resolvedTimingLabel ? { timingLabel: resolvedTimingLabel } : {}),
     ...(counts ? { counts } : {}),
   };
 }
 
-function getParsedCommandWidgetText(text: string) {
-  if (parsedCommandWidgetTextCache.has(text)) {
-    return parsedCommandWidgetTextCache.get(text) ?? null;
+function getParsedCommandWidgetText(text: string, timingLabel?: string) {
+  const cacheKey = `${timingLabel ?? ""}\u0000${text}`;
+  if (parsedCommandWidgetTextCache.has(cacheKey)) {
+    return parsedCommandWidgetTextCache.get(cacheKey) ?? null;
   }
   return setBoundedCacheEntry(
     parsedCommandWidgetTextCache,
-    text,
-    parseCommandWidgetText(text),
+    cacheKey,
+    parseCommandWidgetText(text, timingLabel),
     parsedCommandWidgetTextCacheLimit,
   );
 }
@@ -2050,6 +2174,29 @@ function shouldInsertBlockGap(
   return true;
 }
 
+function shouldShowMessageTurnSeparator(
+  previousBlock: TranscriptBlock | null,
+  nextBlock: TranscriptBlock,
+) {
+  if (!previousBlock) {
+    return false;
+  }
+
+  if (previousBlock.type === "user-message") {
+    return true;
+  }
+
+  if (previousBlock.type === "finished-state") {
+    return true;
+  }
+
+  if (previousBlock.type === "assistant-text" && nextBlock.type !== "finished-state") {
+    return true;
+  }
+
+  return false;
+}
+
 function getPendingHighlightSignature(
   pendingUserInputHighlight?: {
     readonly requestId: string;
@@ -2112,7 +2259,16 @@ function buildFlattenedBlockSegment(
   const blockLines = applyPendingHighlightToLines(rawBlockLines, pendingUserInputHighlight);
   const lines =
     blockLines.length > 0 && shouldInsertBlockGap(previousVisibleBlock, block)
-      ? [{ text: "", kind: "blockGap" } satisfies AnnotatedLine, ...blockLines]
+      ? [
+          {
+            text: "",
+            kind: "blockGap",
+            ...(shouldShowMessageTurnSeparator(previousVisibleBlock, block)
+              ? { extraClasses: ["cm-line-messageTurnSeparator"] }
+              : {}),
+          } satisfies AnnotatedLine,
+          ...blockLines,
+        ]
       : blockLines;
   const widgetEntries: FlattenedBlockWidgetEntry[] = [];
 
@@ -2120,21 +2276,17 @@ function buildFlattenedBlockSegment(
     const attachmentLineOffsets = [...lines]
       .map((line, index) => ({ line, index }))
       .filter(({ line }) => line.kind === "attachmentPanel")
-      .map(({ index }) => index)
-      .slice(0, block.attachments.length);
+      .map(({ index }) => index);
+    const attachmentLineOffset = attachmentLineOffsets[0];
 
-    attachmentLineOffsets.forEach((lineOffset, index) => {
-      const attachment = block.attachments?.[index];
-      if (!attachment) {
-        return;
-      }
+    if (attachmentLineOffset !== undefined) {
       widgetEntries.push({
-        lineOffset,
-        widget: new ImageAttachmentTileWidget(attachment),
+        lineOffset: attachmentLineOffset,
+        widget: new ImageAttachmentPanelWidget(block.attachments),
         side: 1,
-        signature: `${attachment.id}:${attachment.name}:${attachment.mimeType}:${attachment.sizeBytes}:${attachment.previewUrl ?? ""}`,
+        signature: buildAttachmentPanelSignature(block.attachments),
       });
-    });
+    }
   }
 
   return {
@@ -2351,7 +2503,7 @@ function buildTranscriptDocument(
           defaultExpandedInlineDiffSignatures.set(line.commandWidgetSignature, line.inlineDiffLookup);
         }
       }
-      const parsed = getParsedCommandWidgetText(line.text);
+      const parsed = getParsedCommandWidgetText(line.text, line.timingLabel);
       if (parsed) {
         const statusClass = (line.extraClasses ?? []).find((entry) => entry.startsWith("cm-line-workItem"));
         const isRunning = statusClass === "cm-line-workItemRunning";
@@ -2807,11 +2959,6 @@ function buildEditorTheme() {
         fontSize: "12px",
         paddingTop: "2px",
       },
-      ".cm-line-workGroupFooter": {
-        color: "#9fa7af",
-        fontSize: "12px",
-        paddingTop: "2px",
-      },
       ".cm-line-fileChangeSummary": {
         color: "#d7dde3",
       },
@@ -2908,7 +3055,7 @@ function buildEditorTheme() {
         color: "#d6dbe0",
       },
       ".cm-line-attachmentPanel": {
-        paddingLeft: "2ch",
+        paddingLeft: "0.5ch",
       },
       ".cm-line-promptStart": {
         position: "relative",
@@ -2971,6 +3118,20 @@ function buildEditorTheme() {
         top: "50%",
         borderTop: "1px solid rgba(127, 201, 109, 0.465)",
         transform: "translateY(-50%)",
+      },
+      ".cm-line-blockGap.cm-line-messageTurnSeparator": {
+        position: "relative",
+        overflow: "visible",
+      },
+      ".cm-line-blockGap.cm-line-messageTurnSeparator::after": {
+        content: '""',
+        position: "absolute",
+        left: "-17px",
+        right: "-17px",
+        top: "0.95rem",
+        borderTop: "1px solid rgba(153, 164, 174, 0.165)",
+        pointerEvents: "none",
+        userSelect: "none",
       },
       ".cm-line-userMessage": { color: "#e0e4e8" },
       ".cm-line-toolCall": { color: "#5aa8f3" },
@@ -4106,6 +4267,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const surfaceRef = useRef<HTMLDivElement | null>(null);
     const editorRef = useRef<HTMLDivElement | null>(null);
     const viewRef = useRef<EditorView | null>(null);
+    const attachmentViewerCanvasRef = useRef<HTMLDivElement | null>(null);
     const syncingViewRef = useRef(false);
     const submittingRef = useRef(false);
     const activeRegionRef = useRef<TranscriptRegion>("prompt");
@@ -4144,6 +4306,22 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const [searchVisible, setSearchVisible] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(-1);
+    const [attachmentViewerImage, setAttachmentViewerImage] = useState<AttachmentViewerImage | null>(null);
+    const [attachmentViewerNaturalSize, setAttachmentViewerNaturalSize] = useState<AttachmentViewerNaturalSize>({
+      width: 0,
+      height: 0,
+    });
+    const [attachmentViewerScale, setAttachmentViewerScale] = useState<number | null>(null);
+    const [attachmentViewerPan, setAttachmentViewerPan] = useState<AttachmentViewerPan>({ x: 0, y: 0 });
+    const [attachmentViewerDragging, setAttachmentViewerDragging] = useState(false);
+    const attachmentViewerScaleRef = useRef<number | null>(null);
+    const attachmentViewerPanRef = useRef<AttachmentViewerPan>({ x: 0, y: 0 });
+    const attachmentViewerNaturalSizeRef = useRef<AttachmentViewerNaturalSize>({
+      width: 0,
+      height: 0,
+    });
+    const attachmentViewerFitScaleRef = useRef(1);
+    const attachmentViewerDragStateRef = useRef<AttachmentViewerDragState | null>(null);
     const useNativePromptCaret = useMemo(
       () =>
         shouldUseNativePromptCaret(
@@ -4189,6 +4367,55 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     ]);
 
     useEffect(() => {
+      attachmentViewerScaleRef.current = attachmentViewerScale;
+      attachmentViewerPanRef.current = attachmentViewerPan;
+      attachmentViewerNaturalSizeRef.current = attachmentViewerNaturalSize;
+    }, [attachmentViewerNaturalSize, attachmentViewerPan, attachmentViewerScale]);
+
+    const closeAttachmentViewer = useCallback(() => {
+      attachmentViewerDragStateRef.current = null;
+      setAttachmentViewerDragging(false);
+      setAttachmentViewerImage(null);
+      setAttachmentViewerNaturalSize({ width: 0, height: 0 });
+      setAttachmentViewerScale(null);
+      setAttachmentViewerPan({ x: 0, y: 0 });
+      attachmentViewerScaleRef.current = null;
+      attachmentViewerPanRef.current = { x: 0, y: 0 };
+      attachmentViewerNaturalSizeRef.current = { width: 0, height: 0 };
+      attachmentViewerFitScaleRef.current = 1;
+    }, []);
+
+    const openAttachmentViewer = useCallback((src: string, name: string) => {
+      attachmentViewerDragStateRef.current = null;
+      setAttachmentViewerDragging(false);
+      setAttachmentViewerImage({ src, name });
+      setAttachmentViewerNaturalSize({ width: 0, height: 0 });
+      setAttachmentViewerScale(null);
+      setAttachmentViewerPan({ x: 0, y: 0 });
+      attachmentViewerScaleRef.current = null;
+      attachmentViewerPanRef.current = { x: 0, y: 0 };
+      attachmentViewerNaturalSizeRef.current = { width: 0, height: 0 };
+      attachmentViewerFitScaleRef.current = 1;
+    }, []);
+
+    const updateAttachmentViewerScaleAndPan = useCallback((
+      nextScale: number,
+      nextPan: AttachmentViewerPan,
+    ) => {
+      const clampedPan = clampAttachmentViewerPan(
+        nextPan,
+        nextScale,
+        attachmentViewerNaturalSizeRef.current,
+        window.innerWidth,
+        window.innerHeight,
+      );
+      attachmentViewerScaleRef.current = nextScale;
+      attachmentViewerPanRef.current = clampedPan;
+      setAttachmentViewerScale(nextScale);
+      setAttachmentViewerPan(clampedPan);
+    }, []);
+
+    useEffect(() => {
       if (!promptInputDisabled) {
         return;
       }
@@ -4197,6 +4424,93 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         textarea.blur();
       }
     }, [promptInputDisabled]);
+
+    useEffect(() => {
+      if (!attachmentViewerImage) {
+        return;
+      }
+
+      const handleKeyDown = (event: KeyboardEvent) => {
+        if (event.key !== "Escape") {
+          return;
+        }
+        event.preventDefault();
+        closeAttachmentViewer();
+      };
+
+      window.addEventListener("keydown", handleKeyDown);
+      return () => {
+        window.removeEventListener("keydown", handleKeyDown);
+      };
+    }, [attachmentViewerImage, closeAttachmentViewer]);
+
+    useEffect(() => {
+      const surface = surfaceRef.current;
+      if (!surface) {
+        return undefined;
+      }
+
+      const handleAttachmentPreviewClick = (event: MouseEvent) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+        const previewTrigger = target.closest<HTMLElement>("[data-attachment-viewer-src]");
+        const src = previewTrigger?.dataset.attachmentViewerSrc;
+        const name = previewTrigger?.dataset.attachmentViewerName;
+        if (!src || !name) {
+          return;
+        }
+        event.preventDefault();
+        openAttachmentViewer(src, name);
+      };
+
+      surface.addEventListener("click", handleAttachmentPreviewClick);
+      return () => {
+        surface.removeEventListener("click", handleAttachmentPreviewClick);
+      };
+    }, [openAttachmentViewer]);
+
+    useEffect(() => {
+      if (!attachmentViewerImage || attachmentViewerScaleRef.current === null) {
+        return;
+      }
+
+      const handleResize = () => {
+        const currentScale = attachmentViewerScaleRef.current;
+        if (currentScale === null) {
+          return;
+        }
+        const nextFitScale = resolveAttachmentViewerFitScale(
+          attachmentViewerNaturalSizeRef.current,
+          window.innerWidth,
+          window.innerHeight,
+        );
+        const shouldSnapToFit = Math.abs(currentScale - attachmentViewerFitScaleRef.current) < 0.001;
+        attachmentViewerFitScaleRef.current = nextFitScale;
+        if (shouldSnapToFit) {
+          attachmentViewerScaleRef.current = nextFitScale;
+          attachmentViewerPanRef.current = { x: 0, y: 0 };
+          setAttachmentViewerScale(nextFitScale);
+          setAttachmentViewerPan({ x: 0, y: 0 });
+          return;
+        }
+        const clampedPan = clampAttachmentViewerPan(
+          attachmentViewerPanRef.current,
+          currentScale,
+          attachmentViewerNaturalSizeRef.current,
+          window.innerWidth,
+          window.innerHeight,
+        );
+        attachmentViewerPanRef.current = clampedPan;
+        setAttachmentViewerPan(clampedPan);
+      };
+
+      window.addEventListener("resize", handleResize);
+      return () => {
+        window.removeEventListener("resize", handleResize);
+      };
+    }, [attachmentViewerImage]);
 
     const docBuild = useMemo(
       () =>
@@ -5314,6 +5628,124 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       handleIncomingFiles(Array.from(event.dataTransfer.files));
     }, [handleIncomingFiles]);
 
+    const handleAttachmentViewerImageLoad = useCallback((event: ReactSyntheticEvent<HTMLImageElement>) => {
+      const image = event.currentTarget;
+      const naturalSize = {
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+      };
+      const fitScale = resolveAttachmentViewerFitScale(
+        naturalSize,
+        window.innerWidth,
+        window.innerHeight,
+      );
+      attachmentViewerNaturalSizeRef.current = naturalSize;
+      attachmentViewerFitScaleRef.current = fitScale;
+      attachmentViewerScaleRef.current = fitScale;
+      attachmentViewerPanRef.current = { x: 0, y: 0 };
+      setAttachmentViewerNaturalSize(naturalSize);
+      setAttachmentViewerScale(fitScale);
+      setAttachmentViewerPan({ x: 0, y: 0 });
+    }, []);
+
+    const handleAttachmentViewerWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
+      if (attachmentViewerScaleRef.current === null || attachmentViewerNaturalSizeRef.current.width <= 0) {
+        return;
+      }
+      event.preventDefault();
+      const currentScale = attachmentViewerScaleRef.current;
+      const minScale = attachmentViewerFitScaleRef.current;
+      const maxScale = 8;
+      const nextScale = Math.min(
+        maxScale,
+        Math.max(minScale, currentScale * Math.exp(-event.deltaY * 0.0015)),
+      );
+      if (Math.abs(nextScale - currentScale) < 0.0001) {
+        return;
+      }
+      const canvasRect = event.currentTarget.getBoundingClientRect();
+      const relativeX = event.clientX - (canvasRect.left + canvasRect.width / 2);
+      const relativeY = event.clientY - (canvasRect.top + canvasRect.height / 2);
+      const currentPan = attachmentViewerPanRef.current;
+      const worldX = (relativeX - currentPan.x) / currentScale;
+      const worldY = (relativeY - currentPan.y) / currentScale;
+      updateAttachmentViewerScaleAndPan(nextScale, {
+        x: relativeX - worldX * nextScale,
+        y: relativeY - worldY * nextScale,
+      });
+    }, [updateAttachmentViewerScaleAndPan]);
+
+    const handleAttachmentViewerPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0 || attachmentViewerScaleRef.current === null) {
+        return;
+      }
+      if (!canPanAttachmentViewer(
+        attachmentViewerScaleRef.current,
+        attachmentViewerNaturalSizeRef.current,
+        window.innerWidth,
+        window.innerHeight,
+      )) {
+        return;
+      }
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      attachmentViewerDragStateRef.current = {
+        pointerId: event.pointerId,
+        startPan: attachmentViewerPanRef.current,
+        startX: event.clientX,
+        startY: event.clientY,
+      };
+      setAttachmentViewerDragging(true);
+    }, []);
+
+    const handleAttachmentViewerPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+      const dragState = attachmentViewerDragStateRef.current;
+      if (!dragState || dragState.pointerId !== event.pointerId || attachmentViewerScaleRef.current === null) {
+        return;
+      }
+      event.preventDefault();
+      const nextPan = {
+        x: dragState.startPan.x + (event.clientX - dragState.startX),
+        y: dragState.startPan.y + (event.clientY - dragState.startY),
+      };
+      const clampedPan = clampAttachmentViewerPan(
+        nextPan,
+        attachmentViewerScaleRef.current,
+        attachmentViewerNaturalSizeRef.current,
+        window.innerWidth,
+        window.innerHeight,
+      );
+      attachmentViewerPanRef.current = clampedPan;
+      setAttachmentViewerPan(clampedPan);
+    }, []);
+
+    const handleAttachmentViewerPointerEnd = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+      const dragState = attachmentViewerDragStateRef.current;
+      if (dragState?.pointerId !== event.pointerId) {
+        return;
+      }
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      attachmentViewerDragStateRef.current = null;
+      setAttachmentViewerDragging(false);
+    }, []);
+
+    const handleAttachmentViewerDoubleClick = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      updateAttachmentViewerScaleAndPan(1, { x: 0, y: 0 });
+    }, [updateAttachmentViewerScaleAndPan]);
+
+    const attachmentViewerCanPan =
+      attachmentViewerScale !== null
+      && typeof window !== "undefined"
+      && canPanAttachmentViewer(
+        attachmentViewerScale,
+        attachmentViewerNaturalSize,
+        window.innerWidth,
+        window.innerHeight,
+      );
+
     return (
       <div
         ref={surfaceRef}
@@ -5394,20 +5826,28 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             <div className="attachment-panel attachment-panel--composer">
               {composerAttachments.map((attachment) => (
                 <div className="attachment-tile" key={attachment.id}>
-                  <div className="attachment-tile__media">
-                    <div className="attachment-tile__fallback" hidden>
-                      {attachmentBadgeLabel(attachment.mimeType)}
-                    </div>
-                    <img
-                      className="attachment-tile__image"
-                      alt={attachment.name}
-                      src={attachment.previewUrl}
-                    />
-                  </div>
+                  {attachment.previewUrl ? (
+                    <button
+                      type="button"
+                      className="attachment-tile__media"
+                      aria-label={`Open ${attachment.name}`}
+                      data-attachment-viewer-name={attachment.name}
+                      data-attachment-viewer-src={attachment.previewUrl}
+                    >
+                      <img
+                        className="attachment-tile__image"
+                        alt={attachment.name}
+                        draggable={false}
+                        src={attachment.previewUrl}
+                      />
+                    </button>
+                  ) : (
+                    <div className="attachment-tile__media attachment-tile__media--empty" />
+                  )}
                   <div className="attachment-tile__meta">
                     <div className="attachment-tile__name">{attachment.name}</div>
                     <div className="attachment-tile__detail">
-                      {attachment.mimeType} · {formatAttachmentSize(attachment.sizeBytes)}
+                      {formatAttachmentSize(attachment.sizeBytes)}
                     </div>
                   </div>
                   <button
@@ -5461,6 +5901,69 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             </div>
           </div>
         </div>
+        {attachmentViewerImage ? (
+          <div
+            className="image-viewer"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Image viewer: ${attachmentViewerImage.name}`}
+            onClick={(event) => {
+              if (event.target === event.currentTarget) {
+                closeAttachmentViewer();
+              }
+            }}
+          >
+            <div className="image-viewer__header">
+              <div className="image-viewer__label">{attachmentViewerImage.name}</div>
+            </div>
+            <div
+              ref={attachmentViewerCanvasRef}
+              className="image-viewer__canvas"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) {
+                  closeAttachmentViewer();
+                }
+              }}
+            >
+              <div
+                className={`image-viewer__surface${
+                  attachmentViewerCanPan ? " image-viewer__surface--pannable" : ""
+                }${attachmentViewerDragging ? " image-viewer__surface--dragging" : ""}`}
+                onDoubleClick={handleAttachmentViewerDoubleClick}
+                onPointerCancel={handleAttachmentViewerPointerEnd}
+                onPointerDown={handleAttachmentViewerPointerDown}
+                onPointerMove={handleAttachmentViewerPointerMove}
+                onPointerUp={handleAttachmentViewerPointerEnd}
+                onWheel={handleAttachmentViewerWheel}
+              >
+                <img
+                  className={`image-viewer__image${attachmentViewerScale === null ? " image-viewer__image--hidden" : ""}`}
+                  alt={attachmentViewerImage.name}
+                  draggable={false}
+                  onDragStart={(event) => {
+                    event.preventDefault();
+                  }}
+                  onLoad={handleAttachmentViewerImageLoad}
+                  src={attachmentViewerImage.src}
+                  style={{
+                    width:
+                      attachmentViewerNaturalSize.width > 0
+                        ? `${attachmentViewerNaturalSize.width}px`
+                        : undefined,
+                    height:
+                      attachmentViewerNaturalSize.height > 0
+                        ? `${attachmentViewerNaturalSize.height}px`
+                        : undefined,
+                    transform:
+                      attachmentViewerScale === null
+                        ? undefined
+                        : `translate(${attachmentViewerPan.x}px, ${attachmentViewerPan.y}px) scale(${attachmentViewerScale})`,
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
     );
   },
