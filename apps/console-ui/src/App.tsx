@@ -1,6 +1,7 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   type CodexReasoningEffort,
+  type OrchestrationEvent,
   type OrchestrationProject,
   type OrchestrationThread,
   type ProviderKind,
@@ -10,6 +11,8 @@ import {
 } from "@t3tools/contracts";
 import {
   type CSSProperties,
+  memo,
+  startTransition,
   useCallback,
   useEffect,
   useId,
@@ -78,6 +81,7 @@ import {
   type TranscriptRendererHandle,
   threadToTranscriptBlocks,
 } from "./transcript";
+import type { InlineDiffLookup } from "./transcript/TranscriptBlock";
 import { useConsoleData, type PendingConsoleThread } from "./consoleData/useConsoleData";
 import { formatProviderModelSelectionLabel } from "./providerModelLabels";
 import {
@@ -300,7 +304,6 @@ interface PaneView {
   readonly pendingUserInput: ReturnType<ReturnType<typeof useConsoleData>["getPendingUserInputs"]>[number] | null;
   readonly pendingQuestionIndex: number;
   readonly pendingQuestion: ReturnType<ReturnType<typeof useConsoleData>["getPendingUserInputs"]>[number]["questions"][number] | null;
-  readonly pendingQuestionOptionIndex: number | null;
   readonly draftAnswers: Record<string, string>;
   readonly cwd: string | null;
   readonly interactionMode: "default" | "plan";
@@ -309,8 +312,127 @@ interface PaneView {
   readonly modelOptions: ProviderModelOptions | undefined;
 }
 
+interface ConversationPaneTranscriptProps {
+  readonly paneView: PaneView;
+  readonly pendingQuestionDraft: string | undefined;
+  readonly paletteOpen: boolean;
+  readonly hasBlockingModal: boolean;
+  readonly initialScrollOffsetFromBottom: number | null;
+  readonly submitDisabled: boolean;
+  readonly registerPaneHandle: (paneId: string, handle: TranscriptRendererHandle | null) => void;
+  readonly setComposerDraftForPane: (paneId: string, value: string) => void;
+  readonly handleAddImageFilesForPane: (paneId: string, files: ReadonlyArray<File>) => void;
+  readonly handleRemoveImageForPane: (paneId: string, attachmentId: string) => void;
+  readonly handlePaneScrollOffsetChange: (paneId: string, offsetFromBottom: number) => void;
+  readonly getTurnDiff: ReturnType<typeof useConsoleData>["getTurnDiff"];
+  readonly handleSubmit: (paneView: PaneView, value: string) => Promise<void>;
+}
+
+const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
+  paneView,
+  pendingQuestionDraft,
+  paletteOpen,
+  hasBlockingModal,
+  initialScrollOffsetFromBottom,
+  submitDisabled,
+  registerPaneHandle,
+  setComposerDraftForPane,
+  handleAddImageFilesForPane,
+  handleRemoveImageForPane,
+  handlePaneScrollOffsetChange,
+  getTurnDiff,
+  handleSubmit,
+}: ConversationPaneTranscriptProps) {
+  const pendingQuestionOptionIndex = useMemo(() => {
+    const pendingQuestion = paneView.pendingQuestion;
+    if (!pendingQuestion) {
+      return null;
+    }
+    const pendingQuestionDraftAnswer =
+      paneView.draftAnswers[pendingQuestion.id] ?? null;
+    const pendingQuestionOptionShortcut = pendingQuestionDraft
+      ? resolvePendingUserInputShortcut(pendingQuestionDraft, pendingQuestion.options)
+      : null;
+    const pendingQuestionAnsweredOptionIndex = pendingQuestionDraftAnswer
+      ? pendingQuestion.options.findIndex((option) => option.label === pendingQuestionDraftAnswer)
+      : -1;
+    return pendingQuestionOptionShortcut?.optionIndex
+      ?? (pendingQuestionAnsweredOptionIndex >= 0 ? pendingQuestionAnsweredOptionIndex : null);
+  }, [paneView.draftAnswers, paneView.pendingQuestion, pendingQuestionDraft]);
+
+  const handleTranscriptRef = useCallback((handle: TranscriptRendererHandle | null) => {
+    registerPaneHandle(paneView.pane.id, handle);
+  }, [paneView.pane.id, registerPaneHandle]);
+
+  const handleAddImages = useCallback((files: ReadonlyArray<File>) => {
+    handleAddImageFilesForPane(paneView.pane.id, files);
+  }, [handleAddImageFilesForPane, paneView.pane.id]);
+
+  const handleDraftChange = useCallback((value: string) => {
+    setComposerDraftForPane(paneView.pane.id, value);
+  }, [paneView.pane.id, setComposerDraftForPane]);
+
+  const handleRemoveImage = useCallback((attachmentId: string) => {
+    handleRemoveImageForPane(paneView.pane.id, attachmentId);
+  }, [handleRemoveImageForPane, paneView.pane.id]);
+
+  const handleScrollOffsetChange = useCallback((offsetFromBottom: number) => {
+    handlePaneScrollOffsetChange(paneView.pane.id, offsetFromBottom);
+  }, [handlePaneScrollOffsetChange, paneView.pane.id]);
+
+  const handleResolveInlineDiff = useCallback((lookup: InlineDiffLookup) =>
+    getTurnDiff({
+      threadId: lookup.threadId as ThreadId,
+      fromTurnCount: lookup.fromTurnCount,
+      toTurnCount: lookup.toTurnCount,
+    }),
+  [getTurnDiff]);
+
+  const handleTranscriptSubmit = useCallback((value: string) => handleSubmit(paneView, value), [handleSubmit, paneView]);
+
+  return (
+    <TranscriptRenderer
+      ref={handleTranscriptRef}
+      blocks={paneView.blocks}
+      composerAttachments={paneView.attachments}
+      cwd={paneView.cwd}
+      projectRoot={paneView.project.workspaceRoot}
+      paneActive={paneView.isActive}
+      interactionMode={paneView.interactionMode}
+      promptFocusDisabled={paletteOpen || hasBlockingModal}
+      promptInputDisabled={hasBlockingModal}
+      {...(paneView.pendingUserInput && paneView.pendingQuestion
+        ? {
+            pendingUserInputHighlight: {
+              requestId: paneView.pendingUserInput.requestId,
+              questionIndex: paneView.pendingQuestionIndex,
+              ...(pendingQuestionOptionIndex !== null
+                ? { optionIndex: pendingQuestionOptionIndex }
+                : {}),
+            },
+          }
+        : {})}
+      onAddImageFiles={handleAddImages}
+      onDraftChange={handleDraftChange}
+      onRemoveImage={handleRemoveImage}
+      initialScrollOffsetFromBottom={initialScrollOffsetFromBottom}
+      onScrollOffsetFromBottomChange={handleScrollOffsetChange}
+      resolveInlineDiff={handleResolveInlineDiff}
+      onSubmit={handleTranscriptSubmit}
+      submitDisabled={submitDisabled}
+    />
+  );
+});
+
 interface PaneScrollState {
   readonly offsetFromBottom: number;
+}
+
+interface TranscriptBlocksCacheEntry {
+  readonly thread: OrchestrationThread;
+  readonly events: ReadonlyArray<OrchestrationEvent>;
+  readonly effectiveNow?: string;
+  readonly blocks: ReturnType<typeof threadToTranscriptBlocks>;
 }
 
 interface ThreadStatusDescriptor {
@@ -1242,6 +1364,18 @@ function areTopbarActiveTabCutoutsEqual(
     && left.radiusY === right.radiusY;
 }
 
+function arePaneDraftMapsEqual(left: Record<string, string>, right: Record<string, string>) {
+  if (left === right) {
+    return true;
+  }
+  const leftEntries = Object.entries(left);
+  const rightEntries = Object.entries(right);
+  if (leftEntries.length !== rightEntries.length) {
+    return false;
+  }
+  return leftEntries.every(([paneId, value]) => right[paneId] === value);
+}
+
 function formatSvgUnit(value: number) {
   return Number(value.toFixed(6));
 }
@@ -1345,6 +1479,8 @@ export function App() {
   const paneElementRefs = useRef<Record<string, HTMLElement | null>>({});
   const initializedPaneIdsRef = useRef<Record<string, true>>({});
   const hasInitiallyFocusedPromptRef = useRef(false);
+  const draftSyncTimeoutRef = useRef<number | null>(null);
+  const composerDraftByPaneIdRef = useRef(composerDraftByPaneId);
   const composerAttachmentsRef = useRef(composerAttachmentsByPaneId);
   const projectPathInputRef = useRef<HTMLInputElement | null>(null);
   const duplicateProjectConfirmPrimaryActionRef = useRef<HTMLButtonElement | null>(null);
@@ -1356,6 +1492,7 @@ export function App() {
   const previousRunningByThreadIdRef = useRef<ReadonlyMap<OrchestrationThread["id"], boolean>>(new Map());
   const topbarRef = useRef<HTMLDivElement | null>(null);
   const topbarTabButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  composerDraftByPaneIdRef.current = composerDraftByPaneId;
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
   const topbarMaskId = `project-topbar-mask-${useId().replaceAll(":", "")}`;
   const hasAnimatedTranscript = useMemo(
@@ -1386,6 +1523,14 @@ export function App() {
   useEffect(() => {
     persistPaneDrafts(composerDraftByPaneId);
   }, [composerDraftByPaneId]);
+
+  useEffect(() => () => {
+    if (draftSyncTimeoutRef.current !== null) {
+      window.clearTimeout(draftSyncTimeoutRef.current);
+      draftSyncTimeoutRef.current = null;
+    }
+    persistPaneDrafts(composerDraftByPaneIdRef.current);
+  }, []);
 
   useEffect(() => {
     persistArchivedProjectIds(archivedProjectIds);
@@ -1535,12 +1680,13 @@ export function App() {
       const next = Object.fromEntries(Object.entries(existing).filter(([paneId]) => livePaneIdSet.has(paneId)));
       return Object.keys(next).length === Object.keys(existing).length ? existing : next;
     });
-    setComposerDraftByPaneId((existing) => {
-      const next = Object.fromEntries(
-        Object.entries(existing).filter(([paneId, value]) => liveDraftPaneIds.has(paneId) && value.length > 0),
-      );
-      return Object.keys(next).length === Object.keys(existing).length ? existing : next;
-    });
+    const nextDrafts = Object.fromEntries(
+      Object.entries(composerDraftByPaneIdRef.current).filter(([paneId, value]) => liveDraftPaneIds.has(paneId) && value.length > 0),
+    );
+    if (!arePaneDraftMapsEqual(composerDraftByPaneIdRef.current, nextDrafts)) {
+      composerDraftByPaneIdRef.current = nextDrafts;
+      setComposerDraftByPaneId((existing) => arePaneDraftMapsEqual(existing, nextDrafts) ? existing : nextDrafts);
+    }
 
     for (const paneId of Object.keys(initializedPaneIdsRef.current)) {
       if (!livePaneIdSet.has(paneId)) {
@@ -1765,9 +1911,48 @@ export function App() {
     focusPanePrompt(workspace.activePaneId);
   }, [focusPanePrompt, paletteOpen, workspace.activePaneId]);
 
-  const setComposerDraftForPane = useCallback((paneId: string, value: string) => {
-    setComposerDraftByPaneId((existing) => (existing[paneId] === value ? existing : { ...existing, [paneId]: value }));
+  const registerPaneHandle = useCallback((paneId: string, handle: TranscriptRendererHandle | null) => {
+    if (!handle) {
+      delete paneRefs.current[paneId];
+      return;
+    }
+    paneRefs.current[paneId] = handle;
+    if (!initializedPaneIdsRef.current[paneId]) {
+      initializedPaneIdsRef.current[paneId] = true;
+      const persistedDraft = composerDraftByPaneIdRef.current[paneId];
+      if (persistedDraft) {
+        handle.insertPromptText(persistedDraft);
+      }
+    }
   }, []);
+
+  const flushComposerDraftState = useCallback(() => {
+    const nextDrafts = composerDraftByPaneIdRef.current;
+    setComposerDraftByPaneId((existing) => arePaneDraftMapsEqual(existing, nextDrafts) ? existing : nextDrafts);
+  }, []);
+
+  const scheduleComposerDraftStateSync = useCallback(() => {
+    if (draftSyncTimeoutRef.current !== null) {
+      window.clearTimeout(draftSyncTimeoutRef.current);
+    }
+    draftSyncTimeoutRef.current = window.setTimeout(() => {
+      draftSyncTimeoutRef.current = null;
+      startTransition(() => {
+        flushComposerDraftState();
+      });
+    }, 60);
+  }, [flushComposerDraftState]);
+
+  const setComposerDraftForPane = useCallback((paneId: string, value: string) => {
+    if (composerDraftByPaneIdRef.current[paneId] === value) {
+      return;
+    }
+    composerDraftByPaneIdRef.current = {
+      ...composerDraftByPaneIdRef.current,
+      [paneId]: value,
+    };
+    scheduleComposerDraftStateSync();
+  }, [scheduleComposerDraftStateSync]);
 
   const handleAddImageFilesForPane = useCallback((paneId: string, files: ReadonlyArray<File>) => {
     if (files.length === 0) {
@@ -1831,27 +2016,61 @@ export function App() {
     });
   }, []);
 
+  const handlePaneScrollOffsetChange = useCallback((paneId: string, offsetFromBottom: number) => {
+    setPaneScrollStateByPaneId((existing) => {
+      const current = existing[paneId];
+      if (current?.offsetFromBottom === offsetFromBottom) {
+        return existing;
+      }
+      return {
+        ...existing,
+        [paneId]: { offsetFromBottom },
+      };
+    });
+  }, []);
+
   const activeLayout = workspace.activeLayout;
   const activeTab = workspace.activeTab;
   const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
+  const transcriptBlocksCacheRef = useRef<Map<OrchestrationThread["id"], TranscriptBlocksCacheEntry>>(new Map());
   const transcriptBlocksByThreadId = useMemo(() => {
     const blocksByThreadId = new Map<OrchestrationThread["id"], ReturnType<typeof threadToTranscriptBlocks>>();
+    const nextCache = new Map<OrchestrationThread["id"], TranscriptBlocksCacheEntry>();
 
     for (const thread of consoleData.threads) {
+      const events = getThreadEvents(thread.id);
       const effectiveNow = (isThreadTurnRunning(thread.id) || pendingPromptSendStartedAtByThreadId[thread.id])
         ? animationNowIso
         : undefined;
-      blocksByThreadId.set(
-        thread.id,
-        threadToTranscriptBlocks(thread, {
-          resolveAttachmentPreviewUrl: (attachmentId) =>
-            `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
-          orchestrationEvents: getThreadEvents(thread.id),
-          ...(effectiveNow ? { now: effectiveNow } : {}),
-        }),
-      );
+      const cached = transcriptBlocksCacheRef.current.get(thread.id);
+      if (
+        cached
+        && cached.thread === thread
+        && cached.events === events
+        && cached.effectiveNow === effectiveNow
+      ) {
+        nextCache.set(thread.id, cached);
+        blocksByThreadId.set(thread.id, cached.blocks);
+        continue;
+      }
+
+      const blocks = threadToTranscriptBlocks(thread, {
+        resolveAttachmentPreviewUrl: (attachmentId) =>
+          `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
+        orchestrationEvents: events,
+        ...(effectiveNow ? { now: effectiveNow } : {}),
+      });
+      const nextEntry: TranscriptBlocksCacheEntry = {
+        thread,
+        events,
+        ...(effectiveNow ? { effectiveNow } : {}),
+        blocks,
+      };
+      nextCache.set(thread.id, nextEntry);
+      blocksByThreadId.set(thread.id, blocks);
     }
 
+    transcriptBlocksCacheRef.current = nextCache;
     return blocksByThreadId;
   }, [
     attachmentPreviewBaseUrl,
@@ -1884,21 +2103,6 @@ export function App() {
           ? pendingUserInputQuestionIndexByRequestId[pendingUserInput.requestId] ?? 0
           : 0;
         const pendingQuestion = pendingUserInput?.questions[pendingQuestionIndex] ?? null;
-        const pendingQuestionDraftAnswer = pendingQuestion
-          ? (
-              pendingUserInputAnswersByRequestId[pendingUserInput?.requestId ?? ""]?.[pendingQuestion.id]
-                ?? null
-            )
-          : null;
-        const pendingQuestionDraft = composerDraftByPaneId[pane.id] ?? "";
-        const pendingQuestionOptionShortcut = pendingQuestion
-          ? resolvePendingUserInputShortcut(pendingQuestionDraft, pendingQuestion.options)
-          : null;
-        const pendingQuestionAnsweredOptionIndex = pendingQuestion && pendingQuestionDraftAnswer
-          ? pendingQuestion.options.findIndex((option) => option.label === pendingQuestionDraftAnswer)
-          : -1;
-        const pendingQuestionOptionIndex = pendingQuestionOptionShortcut?.optionIndex
-          ?? (pendingQuestionAnsweredOptionIndex >= 0 ? pendingQuestionAnsweredOptionIndex : null);
         const provider: ProviderKind = thread?.provider
           ?? pendingThread?.provider
           ?? (pane.kind === "draft" ? pane.setup.selectedProvider : "codex");
@@ -1942,7 +2146,6 @@ export function App() {
           pendingUserInput,
           pendingQuestionIndex,
           pendingQuestion,
-          pendingQuestionOptionIndex,
           draftAnswers: pendingUserInput ? (pendingUserInputAnswersByRequestId[pendingUserInput.requestId] ?? {}) : {},
           cwd: thread
             ? resolveThreadCwd(thread, projects)
@@ -1957,7 +2160,6 @@ export function App() {
     activeLayout,
     activeTab,
     composerAttachmentsByPaneId,
-    composerDraftByPaneId,
     consoleData.threads,
     getPendingUserInputs,
     isThreadTurnRunning,
@@ -2029,14 +2231,12 @@ export function App() {
       delete next[paneView.pane.id];
       return next;
     });
-    setComposerDraftByPaneId((existing) => {
-      if (!(paneView.pane.id in existing)) {
-        return existing;
-      }
-      const next = { ...existing };
-      delete next[paneView.pane.id];
-      return next;
-    });
+    if (paneView.pane.id in composerDraftByPaneIdRef.current) {
+      const nextDrafts = { ...composerDraftByPaneIdRef.current };
+      delete nextDrafts[paneView.pane.id];
+      composerDraftByPaneIdRef.current = nextDrafts;
+      flushComposerDraftState();
+    }
     setPendingDraftPaneIds((existing) => {
       if (!existing.has(paneView.pane.id)) {
         return existing;
@@ -2071,7 +2271,7 @@ export function App() {
     });
     setSubmitError(null);
     focusPanePrompt(paneView.pane.id);
-  }, [focusPanePrompt, pendingThreadByPaneId, workspace]);
+  }, [flushComposerDraftState, focusPanePrompt, pendingThreadByPaneId, workspace]);
 
   const handleCreateDraftTab = useCallback(() => {
     const projectId = workspace.activeProject?.id ?? workspace.projectViews[0]?.project.id ?? null;
@@ -2131,7 +2331,7 @@ export function App() {
     const projectView = workspace.projectViews.find((candidate) => candidate.project.id === thread.projectId) ?? null;
     const reusableDraftPane = findReusableDraftPaneForThreadOpen({
       layout: projectView?.layout ?? null,
-      draftsByPaneId: composerDraftByPaneId,
+      draftsByPaneId: composerDraftByPaneIdRef.current,
       attachmentsByPaneId: composerAttachmentsByPaneId,
       pendingDraftPaneIds,
     });
@@ -2156,7 +2356,6 @@ export function App() {
     }
   }, [
     composerAttachmentsByPaneId,
-    composerDraftByPaneId,
     consoleData.threads,
     focusPanePrompt,
     highlightPane,
@@ -2718,11 +2917,12 @@ export function App() {
           ...existing,
           [paneView.pane.id]: [],
         }));
-        setComposerDraftByPaneId((existing) => {
-          const next = { ...existing };
-          delete next[paneView.pane.id];
-          return next;
-        });
+        if (paneView.pane.id in composerDraftByPaneIdRef.current) {
+          const nextDrafts = { ...composerDraftByPaneIdRef.current };
+          delete nextDrafts[paneView.pane.id];
+          composerDraftByPaneIdRef.current = nextDrafts;
+          flushComposerDraftState();
+        }
         setSubmitError(null);
         return;
       }
@@ -2771,7 +2971,7 @@ export function App() {
         });
       }
     }
-  }, [createThread, respondToUserInput, submitPrompt, workspace]);
+  }, [createThread, flushComposerDraftState, respondToUserInput, submitPrompt, workspace]);
 
   const paletteThreadPickerGroups = useMemo<ReadonlyArray<{
     readonly projectCommand: AppPaletteCommand;
@@ -3810,65 +4010,15 @@ export function App() {
                         }}
                       >
                           {dropAllowed ? (
-                            <div className="conversation-pane__dropOverlay" aria-hidden="true" />
-                          ) : null}
-                          <div className="transcript-shell">
-                          <TranscriptRenderer
-                            ref={(handle) => {
-                              if (!handle) {
-                                delete paneRefs.current[paneView.pane.id];
-                                return;
-                              }
-                              paneRefs.current[paneView.pane.id] = handle;
-                              if (!initializedPaneIdsRef.current[paneView.pane.id]) {
-                                initializedPaneIdsRef.current[paneView.pane.id] = true;
-                                const persistedDraft = composerDraftByPaneId[paneView.pane.id];
-                                if (persistedDraft) {
-                                  handle.insertPromptText(persistedDraft);
-                                }
-                              }
-                            }}
-                            blocks={paneView.blocks}
-                            composerAttachments={paneView.attachments}
-                            cwd={paneView.cwd}
-                            projectRoot={paneView.project.workspaceRoot}
-                            paneActive={paneView.isActive}
-                            interactionMode={paneView.interactionMode}
-                            promptFocusDisabled={paletteOpen || hasBlockingModal}
-                            promptInputDisabled={hasBlockingModal}
-                            {...(paneView.pendingUserInput && paneView.pendingQuestion
-                                ? {
-                                    pendingUserInputHighlight: {
-                                      requestId: paneView.pendingUserInput.requestId,
-                                      questionIndex: paneView.pendingQuestionIndex,
-                                      ...(paneView.pendingQuestionOptionIndex !== null
-                                        ? { optionIndex: paneView.pendingQuestionOptionIndex }
-                                        : {}),
-                                    },
-                                  }
-                                : {})}
-                            onAddImageFiles={(files) => handleAddImageFilesForPane(paneView.pane.id, files)}
-                            onDraftChange={(value) => setComposerDraftForPane(paneView.pane.id, value)}
-                            onRemoveImage={(attachmentId) => handleRemoveImageForPane(paneView.pane.id, attachmentId)}
+                          <div className="conversation-pane__dropOverlay" aria-hidden="true" />
+                        ) : null}
+                        <div className="transcript-shell">
+                          <ConversationPaneTranscript
+                            paneView={paneView}
+                            pendingQuestionDraft={paneView.pendingQuestion ? (composerDraftByPaneId[paneView.pane.id] ?? "") : undefined}
+                            paletteOpen={paletteOpen}
+                            hasBlockingModal={hasBlockingModal}
                             initialScrollOffsetFromBottom={paneScrollStateByPaneId[paneView.pane.id]?.offsetFromBottom ?? null}
-                            onScrollOffsetFromBottomChange={(offsetFromBottom) =>
-                              setPaneScrollStateByPaneId((existing) => {
-                                const current = existing[paneView.pane.id];
-                                if (current?.offsetFromBottom === offsetFromBottom) {
-                                  return existing;
-                                }
-                                return {
-                                  ...existing,
-                                  [paneView.pane.id]: { offsetFromBottom },
-                                };
-                              })}
-                            resolveInlineDiff={(lookup) =>
-                              getTurnDiff({
-                                threadId: lookup.threadId as ThreadId,
-                                fromTurnCount: lookup.fromTurnCount,
-                                toTurnCount: lookup.toTurnCount,
-                              })}
-                            onSubmit={(value) => handleSubmit(paneView, value)}
                             submitDisabled={
                               pendingDraftPaneIds.has(paneView.pane.id)
                               || paneView.pendingPromptSendStartedAt !== null
@@ -3876,8 +4026,15 @@ export function App() {
                                 ? !canSubmitPromptForThread(paneView.threadId, paneView.pendingThread)
                                 : false)
                             }
+                            registerPaneHandle={registerPaneHandle}
+                            setComposerDraftForPane={setComposerDraftForPane}
+                            handleAddImageFilesForPane={handleAddImageFilesForPane}
+                            handleRemoveImageForPane={handleRemoveImageForPane}
+                            handlePaneScrollOffsetChange={handlePaneScrollOffsetChange}
+                            getTurnDiff={getTurnDiff}
+                            handleSubmit={handleSubmit}
                           />
-                          </div>
+                        </div>
                           <footer className="status-line" title={getPaneFooterText(paneView)}>
                             {renderPaneFooter(paneView)}
                           </footer>

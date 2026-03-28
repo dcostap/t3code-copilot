@@ -38,6 +38,7 @@ interface ConsoleSearchConfig {
 
 const EMPTY_THREADS: ReadonlyArray<OrchestrationThread> = [];
 const EMPTY_PENDING_USER_INPUTS: ReadonlyArray<ConsolePendingUserInput> = [];
+const EMPTY_THREAD_EVENTS: ReadonlyArray<OrchestrationEvent> = [];
 
 export interface ConsolePendingUserInput {
   readonly requestId: string;
@@ -860,14 +861,30 @@ export function useConsoleData(): ConsoleDataState {
     if (!snapshot || !thread) return null;
     return snapshot.projects.find((entry: OrchestrationProject) => entry.id === thread.projectId) ?? null;
   }, [snapshot, thread]);
+  const threadEventsById = useMemo(() => {
+    const grouped = new Map<string, OrchestrationEvent[]>();
+
+    for (const event of orchestrationEvents) {
+      if (event.aggregateKind !== "thread") {
+        continue;
+      }
+      const current = grouped.get(event.aggregateId);
+      if (current) {
+        current.push(event);
+      } else {
+        grouped.set(event.aggregateId, [event]);
+      }
+    }
+
+    return grouped as ReadonlyMap<string, ReadonlyArray<OrchestrationEvent>>;
+  }, [orchestrationEvents]);
+
   const getThreadEvents = useCallback(
     (threadId: string | null) =>
       threadId
-        ? orchestrationEvents.filter(
-            (event) => event.aggregateKind === "thread" && event.aggregateId === threadId,
-          )
-        : [],
-    [orchestrationEvents],
+        ? (threadEventsById.get(threadId) ?? EMPTY_THREAD_EVENTS)
+        : EMPTY_THREAD_EVENTS,
+    [threadEventsById],
   );
 
   const pendingUserInputs = useMemo(() => derivePendingUserInputs(thread), [thread]);

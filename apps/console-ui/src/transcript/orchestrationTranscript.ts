@@ -600,7 +600,7 @@ function deriveResolvedUserInputsByRequestId(
 ): ReadonlyMap<string, ResolvedUserInputRecord> {
   const resolvedByRequestId = new Map<string, ResolvedUserInputRecord>();
 
-  for (const activity of [...activities].toSorted(compareActivitiesByOrder)) {
+  for (const activity of activities) {
     const payload = asRecord(activity.payload);
     const requestId = asString(payload?.requestId);
     if (!requestId) {
@@ -663,7 +663,7 @@ function deriveRequestedUserInputQuestionsByRequestId(
 ): ReadonlyMap<string, ReadonlyArray<UserInputQuestion>> {
   const questionsByRequestId = new Map<string, ReadonlyArray<UserInputQuestion>>();
 
-  for (const activity of [...activities].toSorted(compareActivitiesByOrder)) {
+  for (const activity of activities) {
     if (activity.kind !== "user-input.requested") {
       continue;
     }
@@ -684,10 +684,11 @@ function deriveRequestedUserInputQuestionsByRequestId(
 function deriveFallbackUserInputResolutions(
   thread: OrchestrationThread,
   requestedQuestionsByRequestId: ReadonlyMap<string, ReadonlyArray<UserInputQuestion>>,
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): DerivedFallbackUserInputResolutions {
   const staleFailureByRequestId = new Map<string, string>();
 
-  for (const activity of [...thread.activities].toSorted(compareActivitiesByOrder)) {
+  for (const activity of activities) {
     const payload = asRecord(activity.payload);
     const requestId = asString(payload?.requestId);
     if (!requestId) {
@@ -1561,7 +1562,7 @@ function buildAssistantBoundaryMap(
 ) {
   const boundariesByTurnId = new Map<string, string[]>();
 
-  for (const activity of activities.toSorted(compareActivitiesByOrder)) {
+  for (const activity of activities) {
     if (!activity.turnId || !isAssistantBoundaryActivity(activity)) {
       continue;
     }
@@ -2021,6 +2022,7 @@ function appendFinishedStateToLatestTurnEntries(
 function appendPendingBoundaryFinishedStateToLatestTurnEntries(
   thread: OrchestrationThread,
   entries: TimelineEntry[],
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
 ) {
   const latestTurn = thread.latestTurn;
   if (latestTurn?.state !== "running" || !hasOpenPendingUserInputRequest(thread.activities)) {
@@ -2035,7 +2037,7 @@ function appendPendingBoundaryFinishedStateToLatestTurnEntries(
   let phaseStartedAt = runningStartedAt;
   const openBoundariesByRequestId = new Map<string, { phaseStartedAt: string; requestedAt: string }>();
 
-  for (const activity of [...thread.activities].toSorted(compareActivitiesByOrder)) {
+  for (const activity of activities) {
     const isInRunningTurn = activity.createdAt.localeCompare(runningStartedAt) >= 0;
     if (!isInRunningTurn) {
       continue;
@@ -2154,11 +2156,13 @@ export function threadToTranscriptBlocks(
   thread: OrchestrationThread,
   options: TranscriptBlockOptions = {},
 ): TranscriptBlock[] {
-  const requestedUserInputQuestionsByRequestId = deriveRequestedUserInputQuestionsByRequestId(thread.activities);
-  const explicitResolvedUserInputsByRequestId = deriveResolvedUserInputsByRequestId(thread.activities);
+  const sortedActivities = thread.activities.toSorted(compareActivitiesByOrder);
+  const requestedUserInputQuestionsByRequestId = deriveRequestedUserInputQuestionsByRequestId(sortedActivities);
+  const explicitResolvedUserInputsByRequestId = deriveResolvedUserInputsByRequestId(sortedActivities);
   const fallbackUserInputResolutions = deriveFallbackUserInputResolutions(
     thread,
     requestedUserInputQuestionsByRequestId,
+    sortedActivities,
   );
   const resolvedUserInputsByRequestId = new Map(explicitResolvedUserInputsByRequestId);
   for (const [requestId, resolved] of fallbackUserInputResolutions.answersByRequestId) {
@@ -2168,7 +2172,7 @@ export function threadToTranscriptBlocks(
   }
   const hiddenToolWorkItemIds = deriveHiddenToolWorkItemIds(thread.activities);
   const pendingUserInputOpen = hasOpenPendingUserInputRequest(thread.activities);
-  const assistantBoundariesByTurnId = buildAssistantBoundaryMap(thread.activities);
+  const assistantBoundariesByTurnId = buildAssistantBoundaryMap(sortedActivities);
   const checkpointsByAssistantMessageId = new Map(
     thread.checkpoints
       .filter((checkpoint) => checkpoint.assistantMessageId !== null)
@@ -2343,14 +2347,16 @@ export function threadToTranscriptBlocks(
     }
   };
 
+  const entriesSortedByCreatedAt = entries.toSorted(compareByCreatedAt);
   const sortedEntries = normalizeAssistantPhaseEntries(
     thread,
     appendFinishedStateToLatestTurnEntries(
       thread,
       appendPendingBoundaryFinishedStateToLatestTurnEntries(
         thread,
-        entries.toSorted(compareByCreatedAt),
-      ).toSorted(compareByCreatedAt),
+        entriesSortedByCreatedAt,
+        sortedActivities,
+      ),
     ).toSorted(compareByCreatedAt),
   );
 

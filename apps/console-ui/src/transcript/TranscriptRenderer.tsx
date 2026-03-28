@@ -243,6 +243,10 @@ interface CommandWidgetLineContent {
   readonly glyph: string;
   readonly prefix: string;
   readonly command: string;
+  readonly commandRange?: {
+    readonly from: number;
+    readonly to: number;
+  };
   readonly timingLabel?: string;
   readonly counts?: {
     additions: string;
@@ -1578,6 +1582,7 @@ function buildInlineDiffRows(file: FileDiffMetadata): InlineDiffFileData {
 }
 
 const inlineDiffCache = new Map<string, ReadonlyArray<InlineDiffFileData>>();
+const inlineDiffCacheLimit = 256;
 const parsedCommandWidgetTextCache = new Map<string, ParsedCommandWidgetText | null>();
 const parsedCommandWidgetTextCacheLimit = 512;
 
@@ -1620,12 +1625,60 @@ export function parseInlineDiffFiles(
         })
       : files;
     const inlineFiles = filteredFiles.map((file) => buildInlineDiffRows(file));
-    inlineDiffCache.set(cacheKey, inlineFiles);
-    return inlineFiles;
+    return setBoundedCacheEntry(inlineDiffCache, cacheKey, inlineFiles, inlineDiffCacheLimit);
   } catch {
-    inlineDiffCache.set(cacheKey, []);
-    return [];
+    return setBoundedCacheEntry(inlineDiffCache, cacheKey, [], inlineDiffCacheLimit);
   }
+}
+
+function hashNumber(hash: number, value: number) {
+  return Math.imul((hash ^ value) >>> 0, 16777619) >>> 0;
+}
+
+function hashString(hash: number, value: string) {
+  let nextHash = hash;
+  for (let index = 0; index < value.length; index += 1) {
+    nextHash = hashNumber(nextHash, value.charCodeAt(index));
+  }
+  return nextHash;
+}
+
+function hashBoolean(hash: number, value: boolean) {
+  return hashNumber(hash, value ? 1 : 0);
+}
+
+function hashOptionalString(hash: number, value?: string) {
+  return value === undefined ? hashNumber(hash, 0) : hashString(hashNumber(hash, 1), value);
+}
+
+function hashStringArray(hash: number, values?: ReadonlyArray<string>) {
+  let nextHash = hashNumber(hash, values?.length ?? 0);
+  for (const value of values ?? []) {
+    nextHash = hashString(nextHash, value);
+  }
+  return nextHash;
+}
+
+function hashInlineDiffFiles(hash: number, files?: ReadonlyArray<InlineDiffFileData>) {
+  let nextHash = hashNumber(hash, files?.length ?? 0);
+  for (const file of files ?? []) {
+    nextHash = hashString(nextHash, file.path);
+    nextHash = hashOptionalString(nextHash, file.previousPath);
+    nextHash = hashNumber(nextHash, file.additions);
+    nextHash = hashNumber(nextHash, file.deletions);
+    nextHash = hashNumber(nextHash, file.hunks.length);
+    for (const hunk of file.hunks) {
+      nextHash = hashString(nextHash, hunk.header);
+      nextHash = hashNumber(nextHash, hunk.rows.length);
+      for (const row of hunk.rows) {
+        nextHash = hashString(nextHash, row.kind);
+        nextHash = hashNumber(nextHash, row.oldLineNumber ?? -1);
+        nextHash = hashNumber(nextHash, row.newLineNumber ?? -1);
+        nextHash = hashString(nextHash, row.text);
+      }
+    }
+  }
+  return nextHash;
 }
 
 function extractCommandWidgetCounts(value: string):
@@ -1780,7 +1833,31 @@ function getParsedCommandWidgetText(text: string, timingLabel?: string) {
 }
 
 function buildCommandWidgetLineEqualityKey(content: CommandWidgetLineContent) {
-  return JSON.stringify(content);
+  let hash = 2166136261;
+  hash = hashString(hash, content.signature);
+  hash = hashString(hash, content.glyph);
+  hash = hashString(hash, content.prefix);
+  hash = hashString(hash, content.command);
+  hash = hashOptionalString(hash, content.timingLabel);
+  hash = hashOptionalString(
+    hash,
+    content.commandRange ? `${content.commandRange.from}:${content.commandRange.to}` : undefined,
+  );
+  hash = hashOptionalString(
+    hash,
+    content.counts ? `${content.counts.additions}:${content.counts.deletions}` : undefined,
+  );
+  hash = hashInlineDiffFiles(hash, content.inlineDiffFiles);
+  hash = hashOptionalString(hash, content.rawInlineDiff);
+  hash = hashOptionalString(hash, content.inlineDiffStateMessage);
+  hash = hashOptionalString(hash, content.inlineDiffStateClass);
+  hash = hashStringArray(hash, content.outputLines);
+  hash = hashBoolean(hash, content.expanded);
+  hash = hashBoolean(hash, content.hasHiddenExpansionContent);
+  hash = hashBoolean(hash, content.isFileChange);
+  hash = hashBoolean(hash, content.isRunning);
+  hash = hashOptionalString(hash, content.statusClass);
+  return hash.toString(36);
 }
 
 class CommandWidgetLine extends WidgetType {
@@ -2606,39 +2683,149 @@ function buildTranscriptDocument(
   };
 }
 
-function buildDecorations(
+function createLineDecorationRange(line: PositionedLine) {
+  return Decoration.line({
+    class: [`cm-line-${line.kind}`, ...(line.extraClasses ?? [])].join(" "),
+  }).range(line.from);
+}
+
+function createMarkDecorationRange(mark: PositionedMark) {
+  return Decoration.mark({
+    class: `cm-codeToken ${mark.className}${mark.link ? " cm-inlineLink" : ""}`,
+  }).range(mark.from, mark.to);
+}
+
+function createWidgetDecorationRange({ position, side, widget }: PositionedWidget) {
+  return Decoration.widget({ widget, side }).range(position);
+}
+
+function createReplacementDecorationRange({ from, to, widget }: PositionedReplacement) {
+  return Decoration.replace({ widget, block: true }).range(from, to);
+}
+
+function createPromptLineDecorationRange(from: number) {
+  return Decoration.line({ class: "cm-line-promptStart" }).range(from);
+}
+
+type DecorationRange = ReturnType<typeof createLineDecorationRange>;
+
+interface BuiltDecorationState {
+  readonly lineRanges: ReadonlyArray<DecorationRange>;
+  readonly markRanges: ReadonlyArray<DecorationRange>;
+  readonly widgetRanges: ReadonlyArray<DecorationRange>;
+  readonly replacementRanges: ReadonlyArray<DecorationRange>;
+  readonly promptLineRange?: DecorationRange;
+  readonly set: DecorationSet;
+}
+
+interface AppliedDecorationInputs {
+  readonly expandedCommandSignatures: ReadonlySet<string>;
+  readonly collapsedFileChangeSignatures: ReadonlySet<string>;
+  readonly resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>;
+  readonly cwd: string | null;
+  readonly projectRoot: string | null;
+  readonly highlightSignature: string;
+}
+
+function buildDecorationState(
   lines: ReadonlyArray<PositionedLine>,
   marks: ReadonlyArray<PositionedMark>,
   widgets: ReadonlyArray<PositionedWidget>,
   replacements: ReadonlyArray<PositionedReplacement>,
 ) {
-  const ranges = lines.map((line) =>
-    Decoration.line({
-      class: [`cm-line-${line.kind}`, ...(line.extraClasses ?? [])].join(" "),
-    }).range(line.from),
-  );
-  ranges.push(
-    ...marks.map((mark) =>
-      Decoration.mark({
-        class: `cm-codeToken ${mark.className}${mark.link ? " cm-inlineLink" : ""}`,
-      }).range(mark.from, mark.to),
-    ),
-  );
-  ranges.push(
-    ...widgets.map(({ position, side, widget }) =>
-      Decoration.widget({ widget, side }).range(position),
-    ),
-  );
-  ranges.push(
-    ...replacements.map(({ from, to, widget }) =>
-      Decoration.replace({ widget, block: true }).range(from, to),
-    ),
-  );
+  const lineRanges = lines.map(createLineDecorationRange);
+  const markRanges = marks.map(createMarkDecorationRange);
+  const widgetRanges = widgets.map(createWidgetDecorationRange);
+  const replacementRanges = replacements.map(createReplacementDecorationRange);
   const promptLine = lines.find((line) => line.kind === "promptInput");
-  if (promptLine) {
-    ranges.push(Decoration.line({ class: "cm-line-promptStart" }).range(promptLine.from));
+  const promptLineRange = promptLine ? createPromptLineDecorationRange(promptLine.from) : undefined;
+  const ranges = [
+    ...lineRanges,
+    ...markRanges,
+    ...widgetRanges,
+    ...replacementRanges,
+    ...(promptLineRange ? [promptLineRange] : []),
+  ];
+  return {
+    lineRanges,
+    markRanges,
+    widgetRanges,
+    replacementRanges,
+    ...(promptLineRange ? { promptLineRange } : {}),
+    set: Decoration.set(ranges, true),
+  };
+}
+
+function countReusablePrefix<T>(
+  values: ReadonlyArray<T>,
+  isReusable: (value: T) => boolean,
+) {
+  let count = 0;
+  while (count < values.length && isReusable(values[count]!)) {
+    count += 1;
   }
-  return Decoration.set(ranges, true);
+  return count;
+}
+
+function buildDecorationStateIncremental(
+  docModel: TranscriptDocumentModel,
+  previousDocModel: TranscriptDocumentModel,
+  previousDecorationState: BuiltDecorationState,
+  firstChangedLineIndex: number,
+) {
+  const reusableLineCount = Math.min(
+    firstChangedLineIndex,
+    previousDocModel.lines.length,
+    previousDecorationState.lineRanges.length,
+    docModel.lines.length,
+  );
+  const boundaryFrom = docModel.lines[reusableLineCount]?.from ?? docModel.promptStart;
+  const reusableMarkCount = Math.min(
+    countReusablePrefix(docModel.marks, (mark) => mark.to <= boundaryFrom),
+    previousDecorationState.markRanges.length,
+  );
+  const reusableWidgetCount = Math.min(
+    countReusablePrefix(docModel.widgets, (widget) => widget.position < boundaryFrom),
+    previousDecorationState.widgetRanges.length,
+  );
+  const reusableReplacementCount = Math.min(
+    countReusablePrefix(docModel.replacements, (replacement) => replacement.to <= boundaryFrom),
+    previousDecorationState.replacementRanges.length,
+  );
+
+  const lineRanges = [
+    ...previousDecorationState.lineRanges.slice(0, reusableLineCount),
+    ...docModel.lines.slice(reusableLineCount).map(createLineDecorationRange),
+  ];
+  const markRanges = [
+    ...previousDecorationState.markRanges.slice(0, reusableMarkCount),
+    ...docModel.marks.slice(reusableMarkCount).map(createMarkDecorationRange),
+  ];
+  const widgetRanges = [
+    ...previousDecorationState.widgetRanges.slice(0, reusableWidgetCount),
+    ...docModel.widgets.slice(reusableWidgetCount).map(createWidgetDecorationRange),
+  ];
+  const replacementRanges = [
+    ...previousDecorationState.replacementRanges.slice(0, reusableReplacementCount),
+    ...docModel.replacements.slice(reusableReplacementCount).map(createReplacementDecorationRange),
+  ];
+  const promptLine = docModel.lines.find((line) => line.kind === "promptInput");
+  const promptLineRange = promptLine ? createPromptLineDecorationRange(promptLine.from) : undefined;
+  const ranges = [
+    ...lineRanges,
+    ...markRanges,
+    ...widgetRanges,
+    ...replacementRanges,
+    ...(promptLineRange ? [promptLineRange] : []),
+  ];
+  return {
+    lineRanges,
+    markRanges,
+    widgetRanges,
+    replacementRanges,
+    ...(promptLineRange ? { promptLineRange } : {}),
+    set: Decoration.set(ranges, true),
+  } satisfies BuiltDecorationState;
 }
 
 function buildSearchDecorations(
@@ -2658,26 +2845,67 @@ function buildSearchDecorations(
 }
 
 function buildDecorationSignature(docModel: TranscriptDocumentModel) {
-  const lineSignature = docModel.lines
-    .map((line) => `${line.from}:${line.kind}:${(line.extraClasses ?? []).join(",")}`)
-    .join("|");
-  const markSignature = docModel.marks
-    .map((mark) => `${mark.from}:${mark.to}:${mark.className}`)
-    .join("|");
-  const widgetSignature = docModel.widgets
-    .map((widget) => `${widget.position}:${widget.side}:${widget.signature}`)
-    .join("|");
-  const replacementSignature = docModel.replacements
-    .map((replacement) => `${replacement.from}:${replacement.to}:${replacement.signature}`)
-    .join("|");
-  return `${docModel.promptStart}::${lineSignature}::${markSignature}::${widgetSignature}::${replacementSignature}`;
+  let hash = 2166136261;
+  hash = hashNumber(hash, docModel.promptStart);
+  hash = hashNumber(hash, docModel.lines.length);
+  for (const line of docModel.lines) {
+    hash = hashNumber(hash, line.from);
+    hash = hashNumber(hash, line.to);
+    hash = hashString(hash, line.kind);
+    hash = hashStringArray(hash, line.extraClasses);
+    hash = hashOptionalString(hash, line.commandWidgetSignature);
+  }
+  hash = hashNumber(hash, docModel.marks.length);
+  for (const mark of docModel.marks) {
+    hash = hashNumber(hash, mark.from);
+    hash = hashNumber(hash, mark.to);
+    hash = hashString(hash, mark.className);
+    hash = hashOptionalString(hash, mark.link ? `${mark.link.kind}:${mark.link.target}` : undefined);
+  }
+  hash = hashNumber(hash, docModel.widgets.length);
+  for (const widget of docModel.widgets) {
+    hash = hashNumber(hash, widget.position);
+    hash = hashNumber(hash, widget.side);
+    hash = hashString(hash, widget.signature);
+  }
+  hash = hashNumber(hash, docModel.replacements.length);
+  for (const replacement of docModel.replacements) {
+    hash = hashNumber(hash, replacement.from);
+    hash = hashNumber(hash, replacement.to);
+    hash = hashString(hash, replacement.signature);
+  }
+  return hash.toString(36);
 }
 
 function buildSearchDecorationSignature(
   searchMatches: ReadonlyArray<TranscriptSearchMatch>,
   activeSearchMatchIndex: number,
 ) {
-  return `${searchMatches.map((match) => `${match.from}:${match.to}`).join("|")}::${activeSearchMatchIndex}`;
+  let hash = hashNumber(2166136261, activeSearchMatchIndex);
+  hash = hashNumber(hash, searchMatches.length);
+  for (const match of searchMatches) {
+    hash = hashNumber(hash, match.from);
+    hash = hashNumber(hash, match.to);
+  }
+  return hash.toString(36);
+}
+
+function buildAppliedDecorationInputs(
+  expandedCommandSignatures: ReadonlySet<string>,
+  collapsedFileChangeSignatures: ReadonlySet<string>,
+  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>,
+  cwd: string | null | undefined,
+  projectRoot: string | null | undefined,
+  highlightSignature: string,
+): AppliedDecorationInputs {
+  return {
+    expandedCommandSignatures,
+    collapsedFileChangeSignatures,
+    resolvedInlineDiffBySignature,
+    cwd: cwd ?? null,
+    projectRoot: projectRoot ?? null,
+    highlightSignature,
+  };
 }
 
 function computeMinimalDocChange(currentText: string, nextText: string) {
@@ -4289,6 +4517,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const expandedCommandSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const collapsedFileChangeSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const flattenedBlocksRef = useRef<FlattenedBlocksBuild | null>(null);
+    const appliedDocModelRef = useRef<TranscriptDocumentModel | null>(null);
+    const appliedDecorationStateRef = useRef<BuiltDecorationState | null>(null);
+    const appliedDecorationInputsRef = useRef<AppliedDecorationInputs | null>(null);
     const appliedDecorationSignatureRef = useRef("");
     const appliedSearchDecorationSignatureRef = useRef("");
     const dragDepthRef = useRef(0);
@@ -4547,6 +4778,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         ? searchMatches[resolvedActiveSearchMatchIndex] ?? null
         : null;
     const initialDocModelRef = useRef(docModel);
+    const initialDecorationStateRef = useRef(
+      buildDecorationState(
+        docModel.lines,
+        docModel.marks,
+        docModel.widgets,
+        docModel.replacements,
+      ),
+    );
     const docModelRef = useRef(docModel);
 
     useEffect(() => {
@@ -5267,17 +5506,15 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           buildEditorTheme(),
           decorationsCompartment.of(
             EditorView.decorations.of(
-              buildDecorations(
-                initialDocModel.lines,
-                initialDocModel.marks,
-                initialDocModel.widgets,
-                initialDocModel.replacements,
-              ),
+              initialDecorationStateRef.current.set,
             ),
           ),
           searchDecorationsField,
           EditorView.updateListener.of((update) => {
-            if (syncingViewRef.current) {
+            if (
+              syncingViewRef.current
+              || update.transactions.some((transaction) => transaction.annotation(syncAnnotation))
+            ) {
               return;
             }
 
@@ -5439,6 +5676,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       });
       appliedDecorationSignatureRef.current = buildDecorationSignature(initialDocModel);
       appliedSearchDecorationSignatureRef.current = buildSearchDecorationSignature([], -1);
+      appliedDocModelRef.current = initialDocModel;
+      appliedDecorationStateRef.current = initialDecorationStateRef.current;
 
       return () => {
         cancelled = true;
@@ -5480,41 +5719,75 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       const shouldPinToBottom = isConversationScrollNearBottom(view);
       const minimalDocChange = isTextStable ? null : computeMinimalDocChange(currentText, docModel.text);
       const nextDoc = Text.of(docModel.text.split("\n"));
+      const appliedDocModel = appliedDocModelRef.current;
+      const appliedDecorationState = appliedDecorationStateRef.current;
+      const appliedDecorationInputs = appliedDecorationInputsRef.current;
+      const canReuseDecorationPrefix =
+        appliedDocModel !== null
+        && appliedDecorationState !== null
+        && appliedDecorationInputs !== null
+        && docBuild.flattened.firstChangedLineIndex > 0
+        && appliedDecorationInputs.expandedCommandSignatures === expandedCommandSignatures
+        && appliedDecorationInputs.collapsedFileChangeSignatures === collapsedFileChangeSignatures
+        && appliedDecorationInputs.resolvedInlineDiffBySignature === resolvedInlineDiffBySignature
+        && appliedDecorationInputs.cwd === (cwd ?? null)
+        && appliedDecorationInputs.projectRoot === (projectRoot ?? null)
+        && appliedDecorationInputs.highlightSignature === docBuild.flattened.highlightSignature;
+      const nextDecorationState =
+        canReuseDecorationPrefix && appliedDocModel !== null && appliedDecorationState !== null
+          ? buildDecorationStateIncremental(
+              docModel,
+              appliedDocModel,
+              appliedDecorationState,
+              docBuild.flattened.firstChangedLineIndex,
+            )
+          : buildDecorationState(
+              docModel.lines,
+              docModel.marks,
+              docModel.widgets,
+              docModel.replacements,
+            );
 
       syncingViewRef.current = true;
-      const syncedHistorySelection =
-        activeRegionRef.current === "history"
-          ? resolveHistorySelectionForDocument(nextDoc, docModel.promptStart, historySelectionRef.current)
-          : null;
-      if (syncedHistorySelection) {
-        historySelectionRef.current = syncedHistorySelection;
-      }
-      view.dispatch({
-        ...(minimalDocChange ? { changes: minimalDocChange } : {}),
-        ...(syncedHistorySelection
-          ? {
-              selection: EditorSelection.range(
-                syncedHistorySelection.anchor,
-                syncedHistorySelection.head,
-              ),
-            }
-          : {}),
-        effects: [
-          decorationsCompartment.reconfigure(
-            EditorView.decorations.of(
-              buildDecorations(
-                docModel.lines,
-                docModel.marks,
-                docModel.widgets,
-                docModel.replacements,
-              ),
+      try {
+        const syncedHistorySelection =
+          activeRegionRef.current === "history"
+            ? resolveHistorySelectionForDocument(nextDoc, docModel.promptStart, historySelectionRef.current)
+            : null;
+        if (syncedHistorySelection) {
+          historySelectionRef.current = syncedHistorySelection;
+        }
+        view.dispatch({
+          ...(minimalDocChange ? { changes: minimalDocChange } : {}),
+          ...(syncedHistorySelection
+            ? {
+                selection: EditorSelection.range(
+                  syncedHistorySelection.anchor,
+                  syncedHistorySelection.head,
+                ),
+              }
+            : {}),
+          effects: [
+            decorationsCompartment.reconfigure(
+              EditorView.decorations.of(nextDecorationState.set),
             ),
-          ),
-          setPromptStartEffect.of(docModel.promptStart),
-        ],
-        annotations: syncAnnotation.of(true),
-      });
-      syncingViewRef.current = false;
+            setPromptStartEffect.of(docModel.promptStart),
+          ],
+          annotations: syncAnnotation.of(true),
+        });
+        appliedDocModelRef.current = docModel;
+        appliedDecorationStateRef.current = nextDecorationState;
+        appliedDecorationInputsRef.current = buildAppliedDecorationInputs(
+          expandedCommandSignatures,
+          collapsedFileChangeSignatures,
+          resolvedInlineDiffBySignature,
+          cwd,
+          projectRoot,
+          docBuild.flattened.highlightSignature,
+        );
+      } finally {
+        syncingViewRef.current = false;
+      }
       appliedDecorationSignatureRef.current = nextDecorationSignature;
 
       if (shouldPinToBottom) {
@@ -5523,7 +5796,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           onScrollOffsetFromBottomChangeRef.current?.(0);
         });
       }
-    }, [docModel]);
+    }, [collapsedFileChangeSignatures, cwd, docBuild.flattened.firstChangedLineIndex, docBuild.flattened.highlightSignature, docModel, expandedCommandSignatures, projectRoot, resolvedInlineDiffBySignature]);
 
     useEffect(() => {
       const view = viewRef.current;
