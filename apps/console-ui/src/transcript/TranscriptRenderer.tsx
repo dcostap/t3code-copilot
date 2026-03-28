@@ -4316,9 +4316,15 @@ export function findTranscriptSearchMatches(
     return [];
   }
 
-  const boundedText = text.slice(0, searchTo);
-  const haystack = boundedText.toLocaleLowerCase();
+  const haystack = text.slice(0, searchTo).toLocaleLowerCase();
   const needle = query.toLocaleLowerCase();
+  return findTranscriptSearchMatchesInHaystack(haystack, needle);
+}
+
+function findTranscriptSearchMatchesInHaystack(
+  haystack: string,
+  needle: string,
+): ReadonlyArray<TranscriptSearchMatch> {
   if (needle.length === 0) {
     return [];
   }
@@ -4498,6 +4504,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const attachmentViewerCanvasRef = useRef<HTMLDivElement | null>(null);
     const syncingViewRef = useRef(false);
     const submittingRef = useRef(false);
+    const promptLayoutSyncFrameRef = useRef<number | null>(null);
     const activeRegionRef = useRef<TranscriptRegion>("prompt");
     const historySelectionRef = useRef<StoredSelection | null>(null);
     const draftRef = useRef("");
@@ -4757,12 +4764,19 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const docModel = docBuild.docModel;
     const compactPendingUserInputPrompt =
       pendingUserInputHighlight !== undefined && !shouldRenderPromptSeparator(docModel.historyLineCount);
+    const searchHaystack = useMemo(
+      () =>
+        searchVisible && docModel.promptStart > 0
+          ? docModel.text.slice(0, docModel.promptStart).toLocaleLowerCase()
+          : "",
+      [docModel.promptStart, docModel.text, searchVisible],
+    );
     const searchMatches = useMemo(
       () =>
         searchVisible
-          ? findTranscriptSearchMatches(docModel.text, searchQuery, docModel.promptStart)
+          ? findTranscriptSearchMatchesInHaystack(searchHaystack, searchQuery.toLocaleLowerCase())
           : [],
-      [docModel.promptStart, docModel.text, searchQuery, searchVisible],
+      [searchHaystack, searchQuery, searchVisible],
     );
     const resolvedActiveSearchMatchIndex =
       searchMatches.length === 0
@@ -4872,10 +4886,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       paneActiveRef.current = paneActive;
       const textarea = promptTextareaRef.current;
       if (!paneActive && textarea && document.activeElement === textarea) {
+        setPromptSelectionValue(
+          textarea.selectionStart ?? draftRef.current.length,
+          textarea.selectionEnd ?? draftRef.current.length,
+        );
         textarea.blur();
       }
       syncPromptCaretBox(textarea);
-    }, [paneActive, syncPromptCaretBox]);
+    }, [paneActive, setPromptSelectionValue, syncPromptCaretBox]);
 
     const clearHistorySelection = useCallback(() => {
       if (typeof window === "undefined") {
@@ -4952,23 +4970,41 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       };
       applyAutosize();
       restoreScrollPositionSnapshots(scrollSnapshots);
-      syncPromptCaretBox(textarea);
-    }, [syncPromptCaretBox]);
+    }, []);
+
+    const schedulePromptLayoutSync = useCallback((textarea = promptTextareaRef.current) => {
+      if (!textarea) {
+        return;
+      }
+      if (promptLayoutSyncFrameRef.current !== null) {
+        cancelAnimationFrame(promptLayoutSyncFrameRef.current);
+      }
+      promptLayoutSyncFrameRef.current = requestAnimationFrame(() => {
+        promptLayoutSyncFrameRef.current = null;
+        autosizePromptInput(textarea);
+        syncPromptSelection(textarea);
+      });
+    }, [autosizePromptInput, syncPromptSelection]);
 
     const setDraftValue = useCallback((nextDraft: string, textarea = promptTextareaRef.current) => {
       draftRef.current = nextDraft;
       if (textarea && textarea.value !== nextDraft) {
         textarea.value = nextDraft;
       }
-      if (textarea) {
-        autosizePromptInput(textarea);
-      }
       onDraftChangeRef.current?.(nextDraft);
-    }, [autosizePromptInput]);
+    }, []);
 
     useLayoutEffect(() => {
       autosizePromptInput();
-    }, [autosizePromptInput]);
+      syncPromptCaretBox();
+    }, [autosizePromptInput, syncPromptCaretBox]);
+
+    useEffect(() => () => {
+      if (promptLayoutSyncFrameRef.current !== null) {
+        cancelAnimationFrame(promptLayoutSyncFrameRef.current);
+        promptLayoutSyncFrameRef.current = null;
+      }
+    }, []);
 
     const insertTextIntoDraft = useCallback((text: string) => {
       preparePromptInteraction();
@@ -4989,9 +5025,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         nextTextarea.focus({ preventScroll: true });
         nextTextarea.setSelectionRange(nextCursor, nextCursor);
-        syncPromptCaretBox(nextTextarea);
+        autosizePromptInput(nextTextarea);
+        syncPromptSelection(nextTextarea);
       });
-    }, [preparePromptInteraction, setDraftValue, setPromptSelectionValue, syncPromptCaretBox]);
+    }, [autosizePromptInput, preparePromptInteraction, setDraftValue, setPromptSelectionValue, syncPromptSelection]);
 
     const deletePromptText = useCallback((direction: "backward" | "forward") => {
       preparePromptInteraction();
@@ -5026,15 +5063,16 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         textarea.focus({ preventScroll: true });
         textarea.setSelectionRange(deleteFrom, deleteFrom);
-        syncPromptCaretBox(textarea);
+        autosizePromptInput(textarea);
+        syncPromptSelection(textarea);
       });
-    }, [preparePromptInteraction, setDraftValue, setPromptSelectionValue, syncPromptCaretBox]);
+    }, [autosizePromptInput, preparePromptInteraction, setDraftValue, setPromptSelectionValue, syncPromptSelection]);
 
     const handlePromptInputChange = useCallback((event: ReactChangeEvent<HTMLTextAreaElement>) => {
       preparePromptInteraction();
       setDraftValue(event.target.value, event.target);
-      syncPromptSelection(event.target);
-    }, [preparePromptInteraction, setDraftValue, syncPromptSelection]);
+      schedulePromptLayoutSync(event.target);
+    }, [preparePromptInteraction, schedulePromptLayoutSync, setDraftValue]);
 
     const submitDraft = useCallback(async () => {
       const value = draftRef.current.trim();
@@ -5055,10 +5093,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
 
       requestAnimationFrame(() => {
+        const textarea = promptTextareaRef.current;
+        if (textarea) {
+          autosizePromptInput(textarea);
+        }
         focusPromptInput();
       });
       return true;
-    }, [focusPromptInput, setDraftValue]);
+    }, [autosizePromptInput, focusPromptInput, setDraftValue]);
 
     const selectAllHistoryText = useCallback(() => {
       if (typeof window === "undefined" || typeof document === "undefined") {
@@ -5103,9 +5145,17 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       syncPromptSelection(event.currentTarget);
     }, [syncPromptSelection]);
 
-    const handlePromptInputBlur = useCallback(() => {
+    const handlePromptInputBlur = useCallback((event: { currentTarget: HTMLTextAreaElement }) => {
+      setPromptSelectionValue(
+        event.currentTarget.selectionStart ?? draftRef.current.length,
+        event.currentTarget.selectionEnd ?? draftRef.current.length,
+      );
+      if (promptLayoutSyncFrameRef.current !== null) {
+        cancelAnimationFrame(promptLayoutSyncFrameRef.current);
+        promptLayoutSyncFrameRef.current = null;
+      }
       applyPromptCaretBox(null);
-    }, [applyPromptCaretBox]);
+    }, [applyPromptCaretBox, setPromptSelectionValue]);
 
     const handlePromptInputScroll = useCallback((event: { currentTarget: HTMLTextAreaElement }) => {
       syncPromptCaretBox(event.currentTarget);
@@ -5282,22 +5332,20 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       if (!view) {
         return;
       }
+      view.dispatch({
+        effects: EditorView.scrollIntoView(activeSearchMatch.from, { y: "start" }),
+        annotations: syncAnnotation.of(true),
+      });
       requestAnimationFrame(() => {
-        view.dispatch({
-          effects: EditorView.scrollIntoView(activeSearchMatch.from, { y: "start" }),
-          annotations: syncAnnotation.of(true),
-        });
-        requestAnimationFrame(() => {
-          const activeMatchElement = editorRef.current?.querySelector(".cm-transcriptSearchMatch--active");
-          if (!(activeMatchElement instanceof HTMLElement)) {
-            return;
-          }
-          keepSearchMatchWithinViewport(
-            view,
-            activeMatchElement,
-            searchOverlayRef.current?.offsetHeight ?? 0,
-          );
-        });
+        const activeMatchElement = editorRef.current?.querySelector(".cm-transcriptSearchMatch--active");
+        if (!(activeMatchElement instanceof HTMLElement)) {
+          return;
+        }
+        keepSearchMatchWithinViewport(
+          view,
+          activeMatchElement,
+          searchOverlayRef.current?.offsetHeight ?? 0,
+        );
       });
     }, [activeSearchMatch, searchVisible]);
 
