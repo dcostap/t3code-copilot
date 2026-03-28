@@ -4027,6 +4027,41 @@ export function prefixCopiedUserMessageStarts(
   return prefixCopiedLinesInOrder(text, selectedSegments, USER_MESSAGE_COPY_PREFIX);
 }
 
+const pendingConversationScrollRestoreFrames = new WeakMap<HTMLElement, {
+  primary?: number;
+  secondary?: number;
+}>();
+
+function clearPendingConversationScrollRestoreFrames(scrollContainer: HTMLElement) {
+  const pending = pendingConversationScrollRestoreFrames.get(scrollContainer);
+  if (pending?.primary !== undefined) {
+    cancelAnimationFrame(pending.primary);
+  }
+  if (pending?.secondary !== undefined) {
+    cancelAnimationFrame(pending.secondary);
+  }
+  pendingConversationScrollRestoreFrames.delete(scrollContainer);
+}
+
+function restoreConversationScrollPositionIfNeeded(
+  scrollContainer: HTMLElement,
+  scrollTop: number,
+  scrollLeft: number,
+) {
+  const needsTopRestore = Math.abs(scrollContainer.scrollTop - scrollTop) > 0.5;
+  const needsLeftRestore = Math.abs(scrollContainer.scrollLeft - scrollLeft) > 0.5;
+  if (!needsTopRestore && !needsLeftRestore) {
+    return false;
+  }
+  if (needsTopRestore) {
+    scrollContainer.scrollTop = scrollTop;
+  }
+  if (needsLeftRestore) {
+    scrollContainer.scrollLeft = scrollLeft;
+  }
+  return true;
+}
+
 function preserveConversationScrollPosition(view: EditorView, update: () => void) {
   const scrollContainer = getConversationScrollContainer(view);
   if (!scrollContainer) {
@@ -4035,15 +4070,21 @@ function preserveConversationScrollPosition(view: EditorView, update: () => void
   }
 
   const { scrollTop, scrollLeft } = scrollContainer;
+  clearPendingConversationScrollRestoreFrames(scrollContainer);
   update();
-  requestAnimationFrame(() => {
-    scrollContainer.scrollTop = scrollTop;
-    scrollContainer.scrollLeft = scrollLeft;
-    requestAnimationFrame(() => {
-      scrollContainer.scrollTop = scrollTop;
-      scrollContainer.scrollLeft = scrollLeft;
+  const primary = requestAnimationFrame(() => {
+    const didRestore = restoreConversationScrollPositionIfNeeded(scrollContainer, scrollTop, scrollLeft);
+    if (!didRestore) {
+      pendingConversationScrollRestoreFrames.delete(scrollContainer);
+      return;
+    }
+    const secondary = requestAnimationFrame(() => {
+      restoreConversationScrollPositionIfNeeded(scrollContainer, scrollTop, scrollLeft);
+      pendingConversationScrollRestoreFrames.delete(scrollContainer);
     });
+    pendingConversationScrollRestoreFrames.set(scrollContainer, { secondary });
   });
+  pendingConversationScrollRestoreFrames.set(scrollContainer, { primary });
 }
 
 function isConversationScrollNearBottom(view: EditorView, thresholdPx = 24) {
