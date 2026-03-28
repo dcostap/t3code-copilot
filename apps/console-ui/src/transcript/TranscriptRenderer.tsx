@@ -4533,7 +4533,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       ReadonlyMap<string, InlineDiffResolutionState>
     >(() => new Map());
     const [isDraggingImages, setIsDraggingImages] = useState(false);
-    const [draft, setDraft] = useState("");
     const [searchVisible, setSearchVisible] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(-1);
@@ -4570,7 +4569,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const searchReturnRegionRef = useRef<TranscriptRegion>("prompt");
 
     useEffect(() => {
-      draftRef.current = draft;
       onSubmitRef.current = onSubmit;
       onDraftChangeRef.current = onDraftChange;
       onScrollOffsetFromBottomChangeRef.current = onScrollOffsetFromBottomChange;
@@ -4585,7 +4583,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     }, [
       collapsedFileChangeSignatures,
       composerAttachments,
-      draft,
       expandedCommandSignatures,
       initialScrollOffsetFromBottom,
       onDraftChange,
@@ -4793,12 +4790,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       docModelRef.current = docModel;
     }, [docBuild.flattened, docModel]);
 
-    const setDraftValue = useCallback((nextDraft: string) => {
-      draftRef.current = nextDraft;
-      setDraft(nextDraft);
-      onDraftChangeRef.current?.(nextDraft);
-    }, []);
-
     const setPromptSelectionValue = useCallback((anchorOffset: number, headOffset: number) => {
       promptSelectionRef.current = { anchorOffset, headOffset };
     }, []);
@@ -4936,8 +4927,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       collapsePromptSelectionToCaret();
     }, [collapsePromptSelectionToCaret]);
 
-    const autosizePromptInput = useCallback(() => {
-      const textarea = promptTextareaRef.current;
+    const autosizePromptInput = useCallback((textarea = promptTextareaRef.current) => {
       if (!textarea) {
         return;
       }
@@ -4965,9 +4955,20 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       syncPromptCaretBox(textarea);
     }, [syncPromptCaretBox]);
 
+    const setDraftValue = useCallback((nextDraft: string, textarea = promptTextareaRef.current) => {
+      draftRef.current = nextDraft;
+      if (textarea && textarea.value !== nextDraft) {
+        textarea.value = nextDraft;
+      }
+      if (textarea) {
+        autosizePromptInput(textarea);
+      }
+      onDraftChangeRef.current?.(nextDraft);
+    }, [autosizePromptInput]);
+
     useLayoutEffect(() => {
       autosizePromptInput();
-    }, [autosizePromptInput, draft]);
+    }, [autosizePromptInput]);
 
     const insertTextIntoDraft = useCallback((text: string) => {
       preparePromptInteraction();
@@ -5031,7 +5032,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
     const handlePromptInputChange = useCallback((event: ReactChangeEvent<HTMLTextAreaElement>) => {
       preparePromptInteraction();
-      setDraftValue(event.target.value);
+      setDraftValue(event.target.value, event.target);
       syncPromptSelection(event.target);
     }, [preparePromptInteraction, setDraftValue, syncPromptSelection]);
 
@@ -6148,7 +6149,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                       ? "transcript-prompt__input--nativeCaret"
                       : "transcript-prompt__input--customCaret"
                   }`}
-                  value={draft}
+                  defaultValue=""
                   rows={2}
                   spellCheck={false}
                   autoCorrect="off"
