@@ -101,6 +101,12 @@ interface FlattenedBlocksBuild {
   readonly firstChangedLineIndex: number;
 }
 
+interface TranscriptDocumentBuildState {
+  readonly docModel: TranscriptDocumentModel;
+  readonly flattened: FlattenedBlocksBuild;
+  readonly inputs: AppliedDecorationInputs;
+}
+
 interface PositionedWidget {
   readonly position: number;
   readonly side: -1 | 1;
@@ -2500,6 +2506,79 @@ export function flattenBlocks(
   };
 }
 
+function countReusablePositionedPrefix<T>(
+  values: ReadonlyArray<T>,
+  isReusable: (value: T) => boolean,
+) {
+  let count = 0;
+  while (count < values.length && isReusable(values[count]!)) {
+    count += 1;
+  }
+  return count;
+}
+
+function transcriptDocumentInputsMatch(
+  left: AppliedDecorationInputs,
+  right: AppliedDecorationInputs,
+) {
+  return (
+    left.expandedCommandSignatures === right.expandedCommandSignatures
+    && left.collapsedFileChangeSignatures === right.collapsedFileChangeSignatures
+    && left.resolvedInlineDiffBySignature === right.resolvedInlineDiffBySignature
+    && left.cwd === right.cwd
+    && left.projectRoot === right.projectRoot
+    && left.highlightSignature === right.highlightSignature
+  );
+}
+
+function collectCommandWidgetMetadata(
+  line: AnnotatedLine,
+  expandedCommandSignatures: ReadonlySet<string>,
+  collapsedFileChangeSignatures: ReadonlySet<string>,
+  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>,
+  fileChangeWidgetSignatures: Set<string>,
+  inlineDiffLookupsBySignature: Map<string, InlineDiffLookup>,
+  inlineDiffContentBySignature: Map<string, string>,
+  defaultExpandedInlineDiffSignatures: Map<string, InlineDiffLookup>,
+) {
+  const isFileChangeWidget =
+    line.commandWidgetSignature !== undefined
+    && (
+      line.inlineUnifiedDiff !== undefined
+      || line.inlineDiffLookup !== undefined
+      || line.inlineDiffChangedFiles !== undefined
+    );
+  if (isFileChangeWidget && line.commandWidgetSignature) {
+    fileChangeWidgetSignatures.add(line.commandWidgetSignature);
+  }
+  const isExpandedCommand =
+    line.commandWidgetSignature !== undefined
+    && (
+      isFileChangeWidget
+        ? !collapsedFileChangeSignatures.has(line.commandWidgetSignature)
+        : expandedCommandSignatures.has(line.commandWidgetSignature)
+    );
+  if (line.commandWidgetSignature) {
+    if (line.inlineDiffLookup) {
+      inlineDiffLookupsBySignature.set(line.commandWidgetSignature, line.inlineDiffLookup);
+      if (isFileChangeWidget && isExpandedCommand) {
+        defaultExpandedInlineDiffSignatures.set(line.commandWidgetSignature, line.inlineDiffLookup);
+      }
+    }
+    const resolvedInlineDiffState = resolvedInlineDiffBySignature.get(line.commandWidgetSignature);
+    const effectiveInlineDiff =
+      line.inlineUnifiedDiff
+      ?? (resolvedInlineDiffState?.status === "ready" ? resolvedInlineDiffState.diff : undefined);
+    if (effectiveInlineDiff) {
+      inlineDiffContentBySignature.set(line.commandWidgetSignature, effectiveInlineDiff);
+    }
+  }
+  return {
+    isExpandedCommand,
+    isFileChangeWidget,
+  };
+}
+
 function buildTranscriptDocument(
   blocks: ReadonlyArray<TranscriptBlock>,
   expandedCommandSignatures: ReadonlySet<string>,
@@ -2512,48 +2591,98 @@ function buildTranscriptDocument(
     readonly questionIndex: number;
     readonly optionIndex?: number;
   },
+  buildInputs?: AppliedDecorationInputs,
   previousFlattened?: FlattenedBlocksBuild | null,
+  previousBuild?: TranscriptDocumentBuildState | null,
 ): { docModel: TranscriptDocumentModel; flattened: FlattenedBlocksBuild } {
   const flattened = flattenBlocksIncremental(blocks, pendingUserInputHighlight, previousFlattened);
   const { lines: historyLines, widgetsByLineIndex } = flattened;
   const allLines: AnnotatedLine[] = [...historyLines];
 
-  const textParts: string[] = [];
-  let offset = 0;
-  const positioned: PositionedLine[] = [];
-  const marks: PositionedMark[] = [];
-  const widgets: PositionedWidget[] = [];
-  const replacements: PositionedReplacement[] = [];
+  const canReuseDocumentPrefix =
+    buildInputs !== undefined
+    && previousBuild !== null
+    && previousBuild !== undefined
+    && flattened.firstChangedLineIndex > 0
+    && transcriptDocumentInputsMatch(previousBuild.inputs, buildInputs);
+  const reusableHistoryLineCount = canReuseDocumentPrefix
+    ? Math.min(
+        flattened.firstChangedLineIndex,
+        previousBuild.docModel.historyLineCount,
+        historyLines.length,
+      )
+    : 0;
+  if (
+    canReuseDocumentPrefix
+    && previousBuild.docModel.historyLineCount === historyLines.length
+    && reusableHistoryLineCount === historyLines.length
+  ) {
+    return {
+      docModel: previousBuild.docModel,
+      flattened,
+    };
+  }
+
+  const boundaryOffset =
+    reusableHistoryLineCount > 0
+      ? reusableHistoryLineCount < previousBuild!.docModel.lines.length
+        ? (previousBuild!.docModel.lines[reusableHistoryLineCount]?.from ?? previousBuild!.docModel.promptStart)
+        : previousBuild!.docModel.promptStart
+      : 0;
+  const textParts: string[] =
+    reusableHistoryLineCount > 0 ? [previousBuild!.docModel.text.slice(0, boundaryOffset)] : [];
+  let offset = boundaryOffset;
+  const positioned: PositionedLine[] =
+    reusableHistoryLineCount > 0 ? previousBuild!.docModel.lines.slice(0, reusableHistoryLineCount) : [];
+  const marks: PositionedMark[] =
+    reusableHistoryLineCount > 0
+      ? previousBuild!.docModel.marks.slice(0, countReusablePositionedPrefix(previousBuild!.docModel.marks, (mark) => mark.to <= boundaryOffset))
+      : [];
+  const widgets: PositionedWidget[] =
+    reusableHistoryLineCount > 0
+      ? previousBuild!.docModel.widgets.slice(0, countReusablePositionedPrefix(previousBuild!.docModel.widgets, (widget) => widget.position < boundaryOffset))
+      : [];
+  const replacements: PositionedReplacement[] =
+    reusableHistoryLineCount > 0
+      ? previousBuild!.docModel.replacements.slice(0, countReusablePositionedPrefix(previousBuild!.docModel.replacements, (replacement) => replacement.to <= boundaryOffset))
+      : [];
   const fileChangeWidgetSignatures = new Set<string>();
   const inlineDiffLookupsBySignature = new Map<string, InlineDiffLookup>();
   const inlineDiffContentBySignature = new Map<string, string>();
   const defaultExpandedInlineDiffSignatures = new Map<string, InlineDiffLookup>();
 
-  allLines.forEach((line, index) => {
+  for (let index = 0; index < reusableHistoryLineCount; index += 1) {
+    collectCommandWidgetMetadata(
+      allLines[index]!,
+      expandedCommandSignatures,
+      collapsedFileChangeSignatures,
+      resolvedInlineDiffBySignature,
+      fileChangeWidgetSignatures,
+      inlineDiffLookupsBySignature,
+      inlineDiffContentBySignature,
+      defaultExpandedInlineDiffSignatures,
+    );
+  }
+
+  for (let index = reusableHistoryLineCount; index < allLines.length; index += 1) {
+    const line = allLines[index]!;
     const from = offset;
     const lineEnd = from + line.text.length;
-    const isFileChangeWidget =
-      line.commandWidgetSignature !== undefined
-      && (
-        line.inlineUnifiedDiff !== undefined
-        || line.inlineDiffLookup !== undefined
-        || line.inlineDiffChangedFiles !== undefined
-      );
-    if (isFileChangeWidget && line.commandWidgetSignature) {
-      fileChangeWidgetSignatures.add(line.commandWidgetSignature);
-    }
+    const { isExpandedCommand, isFileChangeWidget } = collectCommandWidgetMetadata(
+      line,
+      expandedCommandSignatures,
+      collapsedFileChangeSignatures,
+      resolvedInlineDiffBySignature,
+      fileChangeWidgetSignatures,
+      inlineDiffLookupsBySignature,
+      inlineDiffContentBySignature,
+      defaultExpandedInlineDiffSignatures,
+    );
     const hasHiddenExpansionContent = Boolean(
       (line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0)
       || line.inlineUnifiedDiff
       || line.inlineDiffLookup,
     );
-    const isExpandedCommand =
-      line.commandWidgetSignature !== undefined
-      && (
-        isFileChangeWidget
-          ? !collapsedFileChangeSignatures.has(line.commandWidgetSignature)
-          : expandedCommandSignatures.has(line.commandWidgetSignature)
-      );
     positioned.push({
       from,
       to: lineEnd,
@@ -2594,12 +2723,6 @@ function buildTranscriptDocument(
       });
     }
     if (line.commandWidgetSignature) {
-      if (line.inlineDiffLookup) {
-        inlineDiffLookupsBySignature.set(line.commandWidgetSignature, line.inlineDiffLookup);
-        if (isFileChangeWidget && isExpandedCommand) {
-          defaultExpandedInlineDiffSignatures.set(line.commandWidgetSignature, line.inlineDiffLookup);
-        }
-      }
       const parsed = getParsedCommandWidgetText(line.text, line.timingLabel);
       if (parsed) {
         const statusClass = (line.extraClasses ?? []).find((entry) => entry.startsWith("cm-line-workItem"));
@@ -2608,9 +2731,6 @@ function buildTranscriptDocument(
         const effectiveInlineDiff =
           line.inlineUnifiedDiff
           ?? (resolvedInlineDiffState?.status === "ready" ? resolvedInlineDiffState.diff : undefined);
-        if (effectiveInlineDiff) {
-          inlineDiffContentBySignature.set(line.commandWidgetSignature, effectiveInlineDiff);
-        }
         const inlineDiffFiles =
           effectiveInlineDiff && isExpandedCommand
             ? parseInlineDiffFiles(effectiveInlineDiff, line.inlineDiffChangedFiles)
@@ -2677,10 +2797,22 @@ function buildTranscriptDocument(
       textParts.push("\n");
       offset += 1;
     }
-  });
+  }
 
-  replacements.push(...buildCodeBlockReplacements(allLines, positioned));
-  replacements.push(...buildMarkdownTableReplacements(allLines, positioned, cwd));
+  const replacementStartIndex = reusableHistoryLineCount > 0 ? reusableHistoryLineCount : 0;
+  replacements.push(
+    ...buildCodeBlockReplacements(
+      allLines.slice(replacementStartIndex),
+      positioned.slice(replacementStartIndex),
+    ),
+  );
+  replacements.push(
+    ...buildMarkdownTableReplacements(
+      allLines.slice(replacementStartIndex),
+      positioned.slice(replacementStartIndex),
+      cwd,
+    ),
+  );
 
   const text = textParts.join("");
 
@@ -4640,6 +4772,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const expandedCommandSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const collapsedFileChangeSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const flattenedBlocksRef = useRef<FlattenedBlocksBuild | null>(null);
+    const docBuildStateRef = useRef<TranscriptDocumentBuildState | null>(null);
     const appliedDocModelRef = useRef<TranscriptDocumentModel | null>(null);
     const appliedDecorationStateRef = useRef<BuiltDecorationState | null>(null);
     const appliedDecorationInputsRef = useRef<AppliedDecorationInputs | null>(null);
@@ -4863,6 +4996,18 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       };
     }, [attachmentViewerImage]);
 
+    const docBuildInputs = useMemo(
+      () =>
+        buildAppliedDecorationInputs(
+          expandedCommandSignatures,
+          collapsedFileChangeSignatures,
+          resolvedInlineDiffBySignature,
+          cwd,
+          projectRoot,
+          getPendingHighlightSignature(pendingUserInputHighlight),
+        ),
+      [collapsedFileChangeSignatures, cwd, expandedCommandSignatures, pendingUserInputHighlight, projectRoot, resolvedInlineDiffBySignature],
+    );
     const docBuild = useMemo(
       () =>
         buildTranscriptDocument(
@@ -4873,9 +5018,11 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           cwd,
           projectRoot,
           pendingUserInputHighlight,
+          docBuildInputs,
           flattenedBlocksRef.current,
+          docBuildStateRef.current,
         ),
-      [blocks, collapsedFileChangeSignatures, cwd, expandedCommandSignatures, pendingUserInputHighlight, projectRoot, resolvedInlineDiffBySignature],
+      [blocks, collapsedFileChangeSignatures, cwd, docBuildInputs, expandedCommandSignatures, pendingUserInputHighlight, projectRoot, resolvedInlineDiffBySignature],
     );
     const docModel = docBuild.docModel;
     const compactPendingUserInputPrompt =
@@ -4917,8 +5064,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
     useEffect(() => {
       flattenedBlocksRef.current = docBuild.flattened;
+      docBuildStateRef.current = {
+        ...docBuild,
+        inputs: docBuildInputs,
+      };
       docModelRef.current = docModel;
-    }, [docBuild.flattened, docModel]);
+    }, [docBuild, docBuild.flattened, docBuildInputs, docModel]);
 
     const setPromptSelectionValue = useCallback((anchorOffset: number, headOffset: number) => {
       promptSelectionRef.current = { anchorOffset, headOffset };
@@ -5861,6 +6012,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       appliedSearchDecorationSignatureRef.current = buildSearchDecorationSignature([], -1);
       appliedDocModelRef.current = initialDocModel;
       appliedDecorationStateRef.current = initialDecorationStateRef.current;
+      appliedDecorationInputsRef.current = docBuildStateRef.current?.inputs ?? null;
 
       return () => {
         cancelled = true;
@@ -5960,14 +6112,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         });
         appliedDocModelRef.current = docModel;
         appliedDecorationStateRef.current = nextDecorationState;
-        appliedDecorationInputsRef.current = buildAppliedDecorationInputs(
-          expandedCommandSignatures,
-          collapsedFileChangeSignatures,
-          resolvedInlineDiffBySignature,
-          cwd,
-          projectRoot,
-          docBuild.flattened.highlightSignature,
-        );
+        appliedDecorationInputsRef.current = docBuildInputs;
       } finally {
         syncingViewRef.current = false;
       }
@@ -5979,7 +6124,17 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           onScrollOffsetFromBottomChangeRef.current?.(0);
         });
       }
-    }, [collapsedFileChangeSignatures, cwd, docBuild.flattened.firstChangedLineIndex, docBuild.flattened.highlightSignature, docModel, expandedCommandSignatures, projectRoot, resolvedInlineDiffBySignature]);
+    }, [
+      collapsedFileChangeSignatures,
+      cwd,
+      docBuild.flattened.firstChangedLineIndex,
+      docBuild.flattened.highlightSignature,
+      docBuildInputs,
+      docModel,
+      expandedCommandSignatures,
+      projectRoot,
+      resolvedInlineDiffBySignature,
+    ]);
 
     useEffect(() => {
       const view = viewRef.current;
