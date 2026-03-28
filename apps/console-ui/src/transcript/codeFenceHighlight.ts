@@ -45,6 +45,29 @@ function resolveParser(language: string) {
   return LANGUAGE_PARSERS[normalized] ?? null;
 }
 
+function findLineIndexForOffset(lineStarts: ReadonlyArray<number>, offset: number) {
+  let low = 0;
+  let high = lineStarts.length - 1;
+
+  while (low <= high) {
+    const mid = low + ((high - low) >> 1);
+    const lineStart = lineStarts[mid] ?? 0;
+    const nextLineStart = mid + 1 < lineStarts.length ? (lineStarts[mid + 1] ?? Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
+
+    if (offset < lineStart) {
+      high = mid - 1;
+      continue;
+    }
+    if (offset >= nextLineStart) {
+      low = mid + 1;
+      continue;
+    }
+    return mid;
+  }
+
+  return Math.max(0, Math.min(lineStarts.length - 1, low));
+}
+
 export function highlightCodeFence(
   language: string,
   lines: ReadonlyArray<string>,
@@ -69,10 +92,14 @@ export function highlightCodeFence(
       return;
     }
 
-    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const startLineIndex = findLineIndexForOffset(lineStarts, from);
+    for (let lineIndex = startLineIndex; lineIndex < lines.length; lineIndex += 1) {
       const lineStart = lineStarts[lineIndex] ?? 0;
+      if (to <= lineStart) {
+        break;
+      }
       const lineEnd = lineStart + (lines[lineIndex]?.length ?? 0);
-      if (to <= lineStart || from >= lineEnd) {
+      if (from >= lineEnd) {
         continue;
       }
 

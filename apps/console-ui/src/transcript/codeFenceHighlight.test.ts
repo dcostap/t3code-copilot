@@ -13,4 +13,14 @@ describe("highlightCodeFence", () => {
     const spans = highlightCodeFence("unknown-lang", ["hello"]);
     expect(spans).toEqual([[]]);
   });
+
+  it("projects multi-line token spans onto each overlapping line", () => {
+    const spans = highlightCodeFence("ts", [
+      "const value = `hello",
+      "world`;",
+    ]);
+    expect(spans).toHaveLength(2);
+    expect(spans[0]?.length).toBeGreaterThan(0);
+    expect(spans[1]?.length).toBeGreaterThan(0);
+  });
 });
