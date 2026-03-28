@@ -207,6 +207,26 @@ interface PromptCaretMeasureElements {
   readonly mirror: HTMLDivElement;
   readonly textNode: globalThis.Text;
   readonly marker: HTMLSpanElement;
+  layoutSignature?: string;
+}
+
+interface PromptTextareaLayoutMetrics {
+  readonly width: number;
+  readonly padding: string;
+  readonly border: string;
+  readonly font: string;
+  readonly fontKerning: string;
+  readonly fontStretch: string;
+  readonly fontVariant: string;
+  readonly letterSpacing: string;
+  readonly lineHeight: string;
+  readonly resolvedLineHeight: number;
+  readonly tabSize: string;
+  readonly textIndent: string;
+  readonly textTransform: string;
+  readonly textRendering: string;
+  readonly fontSize: string;
+  readonly signature: string;
 }
 
 interface TranscriptRendererProps {
@@ -4186,31 +4206,86 @@ export function resolvePromptTextareaLayout(lineHeight: number, scrollHeight: nu
   };
 }
 
+function readPromptTextareaLayoutMetrics(
+  textarea: HTMLTextAreaElement,
+  computedStyle = window.getComputedStyle(textarea),
+): PromptTextareaLayoutMetrics {
+  const width = textarea.clientWidth;
+  const padding = computedStyle.padding;
+  const border = computedStyle.border;
+  const font = computedStyle.font;
+  const fontKerning = computedStyle.fontKerning;
+  const fontStretch = computedStyle.fontStretch;
+  const fontVariant = computedStyle.fontVariant;
+  const letterSpacing = computedStyle.letterSpacing;
+  const lineHeight = computedStyle.lineHeight;
+  const tabSize = computedStyle.tabSize;
+  const textIndent = computedStyle.textIndent;
+  const textTransform = computedStyle.textTransform;
+  const textRendering = computedStyle.textRendering;
+  const fontSize = computedStyle.fontSize;
+  return {
+    width,
+    padding,
+    border,
+    font,
+    fontKerning,
+    fontStretch,
+    fontVariant,
+    letterSpacing,
+    lineHeight,
+    resolvedLineHeight: Number.parseFloat(lineHeight || "20") || 20,
+    tabSize,
+    textIndent,
+    textTransform,
+    textRendering,
+    fontSize,
+    signature: [
+      width,
+      padding,
+      border,
+      font,
+      fontKerning,
+      fontStretch,
+      fontVariant,
+      letterSpacing,
+      lineHeight,
+      tabSize,
+      textIndent,
+      textTransform,
+      textRendering,
+    ].join("\u0000"),
+  };
+}
+
 function measurePromptCaretBox(
   textarea: HTMLTextAreaElement,
   selection: StoredPromptSelection,
+  layoutMetrics = readPromptTextareaLayoutMetrics(textarea),
 ): PromptCaretBox | null {
   if (typeof document === "undefined" || typeof window === "undefined") {
     return null;
   }
 
   const caretOffset = Math.max(0, Math.min(selection.headOffset, textarea.value.length));
-  const computedStyle = window.getComputedStyle(textarea);
   const measureElements = getPromptCaretMeasureElements(document);
   const { mirror, textNode, marker } = measureElements;
-  mirror.style.width = `${textarea.clientWidth}px`;
-  mirror.style.padding = computedStyle.padding;
-  mirror.style.border = computedStyle.border;
-  mirror.style.font = computedStyle.font;
-  mirror.style.fontKerning = computedStyle.fontKerning;
-  mirror.style.fontStretch = computedStyle.fontStretch;
-  mirror.style.fontVariant = computedStyle.fontVariant;
-  mirror.style.letterSpacing = computedStyle.letterSpacing;
-  mirror.style.lineHeight = computedStyle.lineHeight;
-  mirror.style.tabSize = computedStyle.tabSize;
-  mirror.style.textIndent = computedStyle.textIndent;
-  mirror.style.textTransform = computedStyle.textTransform;
-  mirror.style.textRendering = computedStyle.textRendering;
+  if (measureElements.layoutSignature !== layoutMetrics.signature) {
+    mirror.style.width = `${layoutMetrics.width}px`;
+    mirror.style.padding = layoutMetrics.padding;
+    mirror.style.border = layoutMetrics.border;
+    mirror.style.font = layoutMetrics.font;
+    mirror.style.fontKerning = layoutMetrics.fontKerning;
+    mirror.style.fontStretch = layoutMetrics.fontStretch;
+    mirror.style.fontVariant = layoutMetrics.fontVariant;
+    mirror.style.letterSpacing = layoutMetrics.letterSpacing;
+    mirror.style.lineHeight = layoutMetrics.lineHeight;
+    mirror.style.tabSize = layoutMetrics.tabSize;
+    mirror.style.textIndent = layoutMetrics.textIndent;
+    mirror.style.textTransform = layoutMetrics.textTransform;
+    mirror.style.textRendering = layoutMetrics.textRendering;
+    measureElements.layoutSignature = layoutMetrics.signature;
+  }
 
   const beforeCaret = textarea.value.slice(0, caretOffset);
   textNode.nodeValue = beforeCaret;
@@ -4225,10 +4300,10 @@ function measurePromptCaretBox(
   const mirrorRect = mirror.getBoundingClientRect();
   const markerRect = marker.getBoundingClientRect();
 
-  const lineHeight = Number.parseFloat(computedStyle.lineHeight || "0") || markerRect.height || 20;
+  const lineHeight = layoutMetrics.resolvedLineHeight || markerRect.height || 20;
   const top = Math.floor(markerRect.top - mirrorRect.top - textarea.scrollTop);
   const left = Math.floor(markerRect.left - mirrorRect.left - textarea.scrollLeft);
-  const width = Math.ceil(Math.max(8, markerRect.width || Number.parseFloat(computedStyle.fontSize || "0") * 0.6 || 8));
+  const width = Math.ceil(Math.max(8, markerRect.width || Number.parseFloat(layoutMetrics.fontSize || "0") * 0.6 || 8));
   const height = Math.max(1, Math.round(lineHeight));
 
   if (!Number.isFinite(top) || !Number.isFinite(left) || !Number.isFinite(width) || !Number.isFinite(height)) {
@@ -4848,7 +4923,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       });
     }, []);
 
-    const syncPromptCaretBox = useCallback((textarea = promptTextareaRef.current) => {
+    const syncPromptCaretBox = useCallback((
+      textarea = promptTextareaRef.current,
+      layoutMetrics?: PromptTextareaLayoutMetrics,
+    ) => {
       if (!textarea) {
         applyPromptCaretBox(null);
         return;
@@ -4872,14 +4950,17 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         return;
       }
 
-      applyPromptCaretBox(measurePromptCaretBox(textarea, promptSelectionRef.current));
+      applyPromptCaretBox(measurePromptCaretBox(textarea, promptSelectionRef.current, layoutMetrics));
     }, [applyPromptCaretBox, isFocusedEditableWithinPane, useNativePromptCaret]);
-    const syncPromptSelection = useCallback((textarea = promptTextareaRef.current) => {
+    const syncPromptSelection = useCallback((
+      textarea = promptTextareaRef.current,
+      layoutMetrics?: PromptTextareaLayoutMetrics,
+    ) => {
       const fallbackOffset = draftRef.current.length;
       const anchorOffset = textarea?.selectionStart ?? fallbackOffset;
       const headOffset = textarea?.selectionEnd ?? fallbackOffset;
       setPromptSelectionValue(anchorOffset, headOffset);
-      syncPromptCaretBox(textarea);
+      syncPromptCaretBox(textarea, layoutMetrics);
     }, [setPromptSelectionValue, syncPromptCaretBox]);
 
     useEffect(() => {
@@ -4945,7 +5026,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       collapsePromptSelectionToCaret();
     }, [collapsePromptSelectionToCaret]);
 
-    const autosizePromptInput = useCallback((textarea = promptTextareaRef.current) => {
+    const autosizePromptInput = useCallback((
+      textarea = promptTextareaRef.current,
+      layoutMetrics?: PromptTextareaLayoutMetrics,
+    ) => {
       if (!textarea) {
         return;
       }
@@ -4958,8 +5042,11 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
       const applyAutosize = () => {
         textarea.style.height = "auto";
-        const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight || "20") || 20;
-        const { height, overflowY } = resolvePromptTextareaLayout(lineHeight, textarea.scrollHeight);
+        const resolvedLayoutMetrics = layoutMetrics ?? readPromptTextareaLayoutMetrics(textarea);
+        const { height, overflowY } = resolvePromptTextareaLayout(
+          resolvedLayoutMetrics.resolvedLineHeight,
+          textarea.scrollHeight,
+        );
         const nextTextareaHeight = `${height}px`;
         if (textarea.style.height !== nextTextareaHeight) {
           textarea.style.height = nextTextareaHeight;
@@ -4981,8 +5068,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
       promptLayoutSyncFrameRef.current = requestAnimationFrame(() => {
         promptLayoutSyncFrameRef.current = null;
-        autosizePromptInput(textarea);
-        syncPromptSelection(textarea);
+        const layoutMetrics = readPromptTextareaLayoutMetrics(textarea);
+        autosizePromptInput(textarea, layoutMetrics);
+        syncPromptSelection(textarea, layoutMetrics);
       });
     }, [autosizePromptInput, syncPromptSelection]);
 
@@ -4995,8 +5083,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     }, []);
 
     useLayoutEffect(() => {
-      autosizePromptInput();
-      syncPromptCaretBox();
+      const textarea = promptTextareaRef.current;
+      const layoutMetrics = textarea ? readPromptTextareaLayoutMetrics(textarea) : undefined;
+      autosizePromptInput(textarea, layoutMetrics);
+      syncPromptCaretBox(textarea, layoutMetrics);
     }, [autosizePromptInput, syncPromptCaretBox]);
 
     useEffect(() => () => {
@@ -5025,8 +5115,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         nextTextarea.focus({ preventScroll: true });
         nextTextarea.setSelectionRange(nextCursor, nextCursor);
-        autosizePromptInput(nextTextarea);
-        syncPromptSelection(nextTextarea);
+        const layoutMetrics = readPromptTextareaLayoutMetrics(nextTextarea);
+        autosizePromptInput(nextTextarea, layoutMetrics);
+        syncPromptSelection(nextTextarea, layoutMetrics);
       });
     }, [autosizePromptInput, preparePromptInteraction, setDraftValue, setPromptSelectionValue, syncPromptSelection]);
 
@@ -5063,8 +5154,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         textarea.focus({ preventScroll: true });
         textarea.setSelectionRange(deleteFrom, deleteFrom);
-        autosizePromptInput(textarea);
-        syncPromptSelection(textarea);
+        const layoutMetrics = readPromptTextareaLayoutMetrics(textarea);
+        autosizePromptInput(textarea, layoutMetrics);
+        syncPromptSelection(textarea, layoutMetrics);
       });
     }, [autosizePromptInput, preparePromptInteraction, setDraftValue, setPromptSelectionValue, syncPromptSelection]);
 
@@ -5095,7 +5187,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       requestAnimationFrame(() => {
         const textarea = promptTextareaRef.current;
         if (textarea) {
-          autosizePromptInput(textarea);
+          const layoutMetrics = readPromptTextareaLayoutMetrics(textarea);
+          autosizePromptInput(textarea, layoutMetrics);
         }
         focusPromptInput();
       });
