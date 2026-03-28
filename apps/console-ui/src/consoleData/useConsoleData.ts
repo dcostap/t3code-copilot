@@ -138,6 +138,12 @@ interface PendingUserInputFallback {
   readonly dispatchedFallback: boolean;
 }
 
+interface OptimisticThreadCacheEntry {
+  readonly baseThread: OrchestrationThread;
+  readonly optimisticPatch: OptimisticThreadMetaPatch;
+  readonly mergedThread: OrchestrationThread;
+}
+
 function readSearchConfig(): ConsoleSearchConfig {
   const search = new URLSearchParams(window.location.search);
   return {
@@ -489,6 +495,7 @@ export function useConsoleData(): ConsoleDataState {
   const pendingUserInputFallbacksRef = useRef(new Map<string, PendingUserInputFallback>());
   const interruptInFlightRef = useRef(false);
   const stopSessionInFlightRef = useRef(false);
+  const optimisticThreadsCacheRef = useRef<Map<string, OptimisticThreadCacheEntry>>(new Map());
 
   const [snapshot, setSnapshot] = useState<OrchestrationReadModel | null>(null);
   const [optimisticThreadMetaById, setOptimisticThreadMetaById] = useState<
@@ -692,17 +699,35 @@ export function useConsoleData(): ConsoleDataState {
 
   const threads = useMemo(() => {
     const baseThreads = snapshot?.threads ?? EMPTY_THREADS;
-    return baseThreads.map((thread) => {
+    const nextCache = new Map<string, OptimisticThreadCacheEntry>();
+    const resolvedThreads: OrchestrationThread[] = [];
+    for (const thread of baseThreads) {
       const optimistic = optimisticThreadMetaById[thread.id];
       if (!optimistic) {
-        return thread;
+        resolvedThreads.push(thread);
+        continue;
       }
-      return {
-        ...thread,
-        ...(optimistic.model !== undefined ? { model: optimistic.model } : {}),
-        ...(optimistic.modelOptions !== undefined ? { modelOptions: optimistic.modelOptions } : {}),
-      };
-    });
+      const cached = optimisticThreadsCacheRef.current.get(thread.id);
+      if (cached && cached.baseThread === thread && cached.optimisticPatch === optimistic) {
+        nextCache.set(thread.id, cached);
+        resolvedThreads.push(cached.mergedThread);
+        continue;
+      }
+      const mergedThread = Object.assign(
+        {},
+        thread,
+        optimistic.model !== undefined ? { model: optimistic.model } : {},
+        optimistic.modelOptions !== undefined ? { modelOptions: optimistic.modelOptions } : {},
+      ) satisfies OrchestrationThread;
+      nextCache.set(thread.id, {
+        baseThread: thread,
+        optimisticPatch: optimistic,
+        mergedThread,
+      });
+      resolvedThreads.push(mergedThread);
+    }
+    optimisticThreadsCacheRef.current = nextCache;
+    return resolvedThreads;
   }, [optimisticThreadMetaById, snapshot?.threads]);
 
   const thread = useMemo(() => {

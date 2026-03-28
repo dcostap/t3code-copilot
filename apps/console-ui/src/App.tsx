@@ -429,7 +429,13 @@ interface PaneScrollState {
 }
 
 interface TranscriptBlocksCacheEntry {
-  readonly thread: OrchestrationThread;
+  readonly messages: OrchestrationThread["messages"];
+  readonly activities: OrchestrationThread["activities"];
+  readonly checkpoints: OrchestrationThread["checkpoints"];
+  readonly proposedPlans: OrchestrationThread["proposedPlans"];
+  readonly latestTurn: OrchestrationThread["latestTurn"];
+  readonly session: OrchestrationThread["session"];
+  readonly updatedAt: OrchestrationThread["updatedAt"];
   readonly events: ReadonlyArray<OrchestrationEvent>;
   readonly effectiveNow?: string;
   readonly blocks: ReturnType<typeof threadToTranscriptBlocks>;
@@ -2045,7 +2051,13 @@ export function App() {
       const cached = transcriptBlocksCacheRef.current.get(thread.id);
       if (
         cached
-        && cached.thread === thread
+        && cached.messages === thread.messages
+        && cached.activities === thread.activities
+        && cached.checkpoints === thread.checkpoints
+        && cached.proposedPlans === thread.proposedPlans
+        && cached.latestTurn === thread.latestTurn
+        && cached.session === thread.session
+        && cached.updatedAt === thread.updatedAt
         && cached.events === events
         && cached.effectiveNow === effectiveNow
       ) {
@@ -2061,7 +2073,13 @@ export function App() {
         ...(effectiveNow ? { now: effectiveNow } : {}),
       });
       const nextEntry: TranscriptBlocksCacheEntry = {
-        thread,
+        messages: thread.messages,
+        activities: thread.activities,
+        checkpoints: thread.checkpoints,
+        proposedPlans: thread.proposedPlans,
+        latestTurn: thread.latestTurn,
+        session: thread.session,
+        updatedAt: thread.updatedAt,
         events,
         ...(effectiveNow ? { effectiveNow } : {}),
         blocks,
