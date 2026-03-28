@@ -3570,8 +3570,7 @@ function buildEditorTheme() {
         minWidth: "0",
         fontSize: "12px",
         lineHeight: "1.45",
-        padding: "2px 0",
-        margin: "1px 0",
+        padding: "3px 0",
         backgroundColor: "transparent",
       },
       ".cm-commandWidgetRail, .cm-commandWidgetRailSpacer": {
