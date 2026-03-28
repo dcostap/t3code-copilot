@@ -387,6 +387,15 @@ export function hasNonCollapsedSelectionInsideElement(
 }
 
 const CURSOR_VIEWPORT_PADDING_LINES = 7;
+const DEBUG_ENABLE_COMMAND_WIDGETS = true;
+const DEBUG_ENABLE_COMMAND_WIDGET_EXPANSION_CONTENT = true;
+const DEBUG_ENABLE_CODE_BLOCK_WIDGETS = true;
+const DEBUG_ENABLE_MARKDOWN_TABLE_WIDGETS = true;
+const DEBUG_ENABLE_LINE_WIDGETS = true;
+const DEBUG_ENABLE_LOADING_REPLACEMENTS = true;
+const DEBUG_DISABLE_TRANSCRIPT_LINE_WRAPPING = false;
+const DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER = false;
+const DEBUG_FLATTEN_TRANSCRIPT_LINE_GEOMETRY = true;
 
 const syncAnnotation = Annotation.define<boolean>();
 const setPromptStartEffect = StateEffect.define<number>();
@@ -545,7 +554,7 @@ class ImageAttachmentPanelWidget extends WidgetType {
     });
   }
 
-  override toDOM() {
+  override toDOM(view: EditorView) {
     return createAttachmentPanelDom(this.attachments, "history");
   }
 }
@@ -798,6 +807,10 @@ export function resolveCommandWidgetToggleSignatureFromEventTarget(target: unkno
       ? commandRail.closest(".cm-commandWidgetSurface")
       : null;
   if (!commandSurface || typeof commandSurface !== "object" || !("dataset" in commandSurface)) {
+    return null;
+  }
+
+  if (commandSurface.dataset?.commandWidgetExpandable !== "true") {
     return null;
   }
 
@@ -1280,16 +1293,20 @@ class MarkdownTableWidget extends WidgetType {
     root.append(linesContainer);
 
     let renderedSignature = "";
-    const renderLines = () => {
-      const availableWidth = Math.max(root.clientWidth, view.dom.clientWidth, 320);
+    let renderedWidthBucket = -1;
+    let measureQueued = false;
+    const resolveWidthBucket = (availableWidth: number) => {
       const characterWidth = Math.max(view.defaultCharacterWidth, 6);
-      const maxTotalWidth = Math.max(24, Math.floor(availableWidth / characterWidth) - 1);
-      const displayLines = layoutMarkdownTable(this.content.table, maxTotalWidth);
+      return Math.max(24, Math.floor(Math.max(availableWidth, 320) / characterWidth) - 1);
+    };
+    const renderLines = (widthBucket: number) => {
+      const displayLines = layoutMarkdownTable(this.content.table, widthBucket);
       const nextSignature = JSON.stringify(displayLines);
-      if (nextSignature === renderedSignature) {
+      if (nextSignature === renderedSignature && widthBucket === renderedWidthBucket) {
         return;
       }
       renderedSignature = nextSignature;
+      renderedWidthBucket = widthBucket;
       linesContainer.replaceChildren(...displayLines.map((line) => {
         const element = view.dom.ownerDocument.createElement("div");
         element.className = `cm-markdownTableLine cm-markdownTableLine--${line.kind}`;
@@ -1319,22 +1336,27 @@ class MarkdownTableWidget extends WidgetType {
       }));
     };
 
-    const scheduleRender = () => {
-      if (typeof requestAnimationFrame === "function") {
-        requestAnimationFrame(() => {
-          if (root.isConnected) {
-            renderLines();
-          }
-        });
+    const scheduleMeasuredRender = () => {
+      if (measureQueued) {
         return;
       }
-      queueMicrotask(renderLines);
+      measureQueued = true;
+      view.requestMeasure({
+        read: () => resolveWidthBucket(Math.max(root.clientWidth, view.dom.clientWidth, 320)),
+        write: (widthBucket) => {
+          measureQueued = false;
+          if (!root.isConnected) {
+            return;
+          }
+          renderLines(widthBucket);
+        },
+      });
     };
 
-    scheduleRender();
+    renderLines(resolveWidthBucket(Math.max(view.dom.clientWidth, 320)));
     if (typeof ResizeObserver !== "undefined") {
       const observer = new ResizeObserver(() => {
-        renderLines();
+        scheduleMeasuredRender();
       });
       observer.observe(root);
       commandWidgetResizeObservers.set(root, observer);
@@ -1362,7 +1384,7 @@ class CodeBlockWidget extends WidgetType {
     return this.equalityKey === other.equalityKey;
   }
 
-  override toDOM() {
+  override toDOM(view: EditorView) {
     const root = document.createElement("div");
     root.className = "cm-codeBlockSurface";
 
@@ -1886,6 +1908,37 @@ function buildCommandWidgetLineEqualityKey(content: CommandWidgetLineContent) {
   return hash.toString(36);
 }
 
+function estimateCommandWidgetHeight(content: CommandWidgetLineContent) {
+  const summaryRowHeight = 20;
+  const contentRowHeight = 18;
+  let height = 6 + summaryRowHeight;
+
+  if (content.expanded && content.outputLines && content.outputLines.length > 0) {
+    height += 2 + (content.outputLines.length * contentRowHeight);
+  }
+
+  if (content.expanded && content.inlineDiffFiles && content.inlineDiffFiles.length > 0) {
+    let inlineDiffRows = 0;
+    for (const file of content.inlineDiffFiles) {
+      for (const hunk of file.hunks) {
+        inlineDiffRows += hunk.rows.length;
+      }
+    }
+    if (inlineDiffRows > 0) {
+      height += inlineDiffRows * contentRowHeight;
+      if (content.inlineDiffFiles.length > 1) {
+        height += (content.inlineDiffFiles.length - 1) * 6;
+      }
+    }
+  } else if (content.expanded && content.rawInlineDiff) {
+    height += 20 + (content.rawInlineDiff.split("\n").length * contentRowHeight);
+  } else if (content.expanded && content.inlineDiffStateMessage) {
+    height += 4 + contentRowHeight;
+  }
+
+  return height;
+}
+
 class CommandWidgetLine extends WidgetType {
   private readonly equalityKey: string;
 
@@ -1900,6 +1953,10 @@ class CommandWidgetLine extends WidgetType {
     return this.equalityKey === other.equalityKey;
   }
 
+  override get estimatedHeight() {
+    return estimateCommandWidgetHeight(this.content);
+  }
+
   override ignoreEvent(event: Event) {
     return shouldIgnoreCommandWidgetEvent(event);
   }
@@ -1910,7 +1967,7 @@ class CommandWidgetLine extends WidgetType {
     commandWidgetResizeObservers.delete(dom);
   }
 
-  override toDOM() {
+  override toDOM(view: EditorView) {
     const root = document.createElement("div");
     root.className = [
       "cm-commandWidgetSurface",
@@ -1929,12 +1986,10 @@ class CommandWidgetLine extends WidgetType {
     root.dataset.commandWidgetExpandable = shouldRenderRailInitially ? "true" : "false";
 
     const gutter = document.createElement("div");
-    gutter.className = shouldRenderRailInitially ? "cm-commandWidgetRail" : "cm-commandWidgetRailSpacer";
+    gutter.className = "cm-commandWidgetRail";
     const railVisual = document.createElement("div");
     railVisual.className = "cm-commandWidgetRailVisual";
-    if (shouldRenderRailInitially) {
-      gutter.append(railVisual);
-    }
+    gutter.append(railVisual);
 
     const contentRoot = document.createElement("div");
     contentRoot.className = "cm-commandWidgetContent";
@@ -2084,47 +2139,42 @@ class CommandWidgetLine extends WidgetType {
 
     root.append(gutter, contentRoot);
 
-    const syncRail = () => {
-      const shouldRenderRail = shouldRenderCommandWidgetToggleRail({
-        expanded: this.content.expanded,
-        hasHiddenExpansionContent: this.content.hasHiddenExpansionContent,
-        summaryOverflowing:
-          !this.content.expanded
-          && !this.content.hasHiddenExpansionContent
-          && isCommandWidgetSummaryOverflowing(command),
-      });
+    const syncRail = (shouldRenderRail: boolean) => {
       root.classList.toggle("cm-commandWidgetSurfaceToggleable", shouldRenderRail);
       root.dataset.commandWidgetExpandable = shouldRenderRail ? "true" : "false";
-      gutter.className = shouldRenderRail ? "cm-commandWidgetRail" : "cm-commandWidgetRailSpacer";
-      if (shouldRenderRail) {
-        if (!railVisual.isConnected) {
-          gutter.append(railVisual);
-        }
-        return;
-      }
-      if (railVisual.isConnected) {
-        railVisual.remove();
-      }
     };
 
+    let railMeasureQueued = false;
     const scheduleRailSync = () => {
-      if (typeof requestAnimationFrame === "function") {
-        requestAnimationFrame(() => {
+      if (railMeasureQueued) {
+        return;
+      }
+      railMeasureQueued = true;
+      view.requestMeasure({
+        read: () =>
+          shouldRenderCommandWidgetToggleRail({
+            expanded: this.content.expanded,
+            hasHiddenExpansionContent: this.content.hasHiddenExpansionContent,
+            summaryOverflowing:
+              !this.content.expanded
+              && !this.content.hasHiddenExpansionContent
+              && isCommandWidgetSummaryOverflowing(command),
+          }),
+        write: (shouldRenderRail: boolean) => {
+          railMeasureQueued = false;
           if (!root.isConnected) {
             return;
           }
-          syncRail();
-        });
-        return;
-      }
-      queueMicrotask(syncRail);
+          syncRail(shouldRenderRail);
+        },
+      });
     };
 
     scheduleRailSync();
 
     if (typeof ResizeObserver !== "undefined") {
       const observer = new ResizeObserver(() => {
-        syncRail();
+        scheduleRailSync();
       });
       observer.observe(root);
       commandWidgetResizeObservers.set(root, observer);
@@ -2598,6 +2648,11 @@ function buildTranscriptDocument(
   const flattened = flattenBlocksIncremental(blocks, pendingUserInputHighlight, previousFlattened);
   const { lines: historyLines, widgetsByLineIndex } = flattened;
   const allLines: AnnotatedLine[] = [...historyLines];
+  const includeCommandWidgets = DEBUG_ENABLE_COMMAND_WIDGETS;
+  const includeCodeBlockWidgets = DEBUG_ENABLE_CODE_BLOCK_WIDGETS;
+  const includeMarkdownTableWidgets = DEBUG_ENABLE_MARKDOWN_TABLE_WIDGETS;
+  const includeLineWidgets = DEBUG_ENABLE_LINE_WIDGETS;
+  const includeLoadingReplacements = DEBUG_ENABLE_LOADING_REPLACEMENTS;
 
   const canReuseDocumentPrefix =
     buildInputs !== undefined
@@ -2713,7 +2768,7 @@ function buildTranscriptDocument(
     textParts.push(line.text);
 
     offset += line.text.length;
-    const widget = widgetsByLineIndex.get(index);
+    const widget = includeLineWidgets ? widgetsByLineIndex.get(index) : undefined;
     if (widget) {
       widgets.push({
         position: widget.side > 0 ? lineEnd : from,
@@ -2722,7 +2777,7 @@ function buildTranscriptDocument(
         signature: widget.signature,
       });
     }
-    if (line.commandWidgetSignature) {
+    if (includeCommandWidgets && line.commandWidgetSignature) {
       const parsed = getParsedCommandWidgetText(line.text, line.timingLabel);
       if (parsed) {
         const statusClass = (line.extraClasses ?? []).find((entry) => entry.startsWith("cm-line-workItem"));
@@ -2731,12 +2786,13 @@ function buildTranscriptDocument(
         const effectiveInlineDiff =
           line.inlineUnifiedDiff
           ?? (resolvedInlineDiffState?.status === "ready" ? resolvedInlineDiffState.diff : undefined);
+        const includeCommandWidgetExpansionContent = DEBUG_ENABLE_COMMAND_WIDGET_EXPANSION_CONTENT && isExpandedCommand;
         const inlineDiffFiles =
-          effectiveInlineDiff && isExpandedCommand
+          effectiveInlineDiff && includeCommandWidgetExpansionContent
             ? parseInlineDiffFiles(effectiveInlineDiff, line.inlineDiffChangedFiles)
             : undefined;
         const inlineDiffStateMessage =
-          isExpandedCommand && !effectiveInlineDiff
+          includeCommandWidgetExpansionContent && !effectiveInlineDiff
             ? resolvedInlineDiffState?.status === "loading"
               ? "Loading diff..."
               : resolvedInlineDiffState?.status === "error"
@@ -2750,13 +2806,17 @@ function buildTranscriptDocument(
             signature: line.commandWidgetSignature,
             ...parsed,
             command: relativizeProjectPath(parsed.command, projectRoot),
-            ...(line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0
-              ? { outputLines: line.commandWidgetOutputLines.map((entry) => formatCommandWidgetOutputLine(entry, projectRoot)) }
-              : {}),
-            ...(inlineDiffFiles && inlineDiffFiles.length > 0 ? { inlineDiffFiles } : {}),
-            ...(effectiveInlineDiff && isExpandedCommand && (!inlineDiffFiles || inlineDiffFiles.length === 0)
-              ? { rawInlineDiff: effectiveInlineDiff }
-              : {}),
+             ...(includeCommandWidgetExpansionContent
+               && line.commandWidgetOutputLines
+               && line.commandWidgetOutputLines.length > 0
+               ? { outputLines: line.commandWidgetOutputLines.map((entry) => formatCommandWidgetOutputLine(entry, projectRoot)) }
+               : {}),
+             ...(inlineDiffFiles && inlineDiffFiles.length > 0 ? { inlineDiffFiles } : {}),
+             ...(effectiveInlineDiff
+               && includeCommandWidgetExpansionContent
+               && (!inlineDiffFiles || inlineDiffFiles.length === 0)
+               ? { rawInlineDiff: effectiveInlineDiff }
+               : {}),
             ...(inlineDiffStateMessage
               ? {
                   inlineDiffStateMessage,
@@ -2766,7 +2826,7 @@ function buildTranscriptDocument(
                       : "cm-commandWidgetInlineDiffError",
                 }
               : {}),
-            expanded: isExpandedCommand,
+            expanded: includeCommandWidgetExpansionContent,
             hasHiddenExpansionContent,
             isFileChange: isFileChangeWidget,
             isRunning,
@@ -2779,7 +2839,7 @@ function buildTranscriptDocument(
         });
       }
     }
-    if (line.animatedText?.kind === "loading" && line.text.length > 0) {
+    if (includeLoadingReplacements && line.animatedText?.kind === "loading" && line.text.length > 0) {
       const animatedFrom = Math.max(0, Math.min(line.text.length, line.animatedText.from));
       const animatedTo = Math.max(animatedFrom, Math.min(line.text.length, line.animatedText.to));
       replacements.push({
@@ -2800,19 +2860,23 @@ function buildTranscriptDocument(
   }
 
   const replacementStartIndex = reusableHistoryLineCount > 0 ? reusableHistoryLineCount : 0;
-  replacements.push(
-    ...buildCodeBlockReplacements(
-      allLines.slice(replacementStartIndex),
-      positioned.slice(replacementStartIndex),
-    ),
-  );
-  replacements.push(
-    ...buildMarkdownTableReplacements(
-      allLines.slice(replacementStartIndex),
-      positioned.slice(replacementStartIndex),
-      cwd,
-    ),
-  );
+  if (includeCodeBlockWidgets) {
+    replacements.push(
+      ...buildCodeBlockReplacements(
+        allLines.slice(replacementStartIndex),
+        positioned.slice(replacementStartIndex),
+      ),
+    );
+  }
+  if (includeMarkdownTableWidgets) {
+    replacements.push(
+      ...buildMarkdownTableReplacements(
+        allLines.slice(replacementStartIndex),
+        positioned.slice(replacementStartIndex),
+        cwd,
+      ),
+    );
+  }
 
   const text = textParts.join("");
 
@@ -2824,10 +2888,11 @@ function buildTranscriptDocument(
       marks,
       widgets,
       replacements,
-      fileChangeWidgetSignatures,
-      inlineDiffLookupsBySignature,
-      inlineDiffContentBySignature,
-      defaultExpandedInlineDiffSignatures,
+      fileChangeWidgetSignatures: includeCommandWidgets ? fileChangeWidgetSignatures : new Set(),
+      inlineDiffLookupsBySignature: includeCommandWidgets ? inlineDiffLookupsBySignature : new Map(),
+      inlineDiffContentBySignature: includeCommandWidgets ? inlineDiffContentBySignature : new Map(),
+      defaultExpandedInlineDiffSignatures:
+        includeCommandWidgets ? defaultExpandedInlineDiffSignatures : new Map(),
       separatorStart: text.length,
       promptStart: text.length,
     },
@@ -3093,7 +3158,7 @@ function buildEditorTheme() {
   return EditorView.theme(
     {
       "&": {
-        height: "auto",
+        height: DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER ? "100%" : "auto",
         minHeight: "100%",
         flex: "1 1 auto",
         width: "100%",
@@ -3111,8 +3176,9 @@ function buildEditorTheme() {
         flexDirection: "column",
         flex: "1 1 auto",
         fontFamily: "inherit",
-        overflowX: "hidden",
-        overflowY: "visible",
+        overflowX: DEBUG_DISABLE_TRANSCRIPT_LINE_WRAPPING ? "auto" : "hidden",
+        overflowY: DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER ? "auto" : "visible",
+        height: DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER ? "100%" : "auto",
         width: "100%",
         minWidth: "0",
         minHeight: "100%",
@@ -3164,7 +3230,7 @@ function buildEditorTheme() {
         minWidth: "0",
         maxWidth: "100%",
         padding: "0",
-        whiteSpace: "pre-wrap",
+        whiteSpace: DEBUG_DISABLE_TRANSCRIPT_LINE_WRAPPING ? "pre" : "pre-wrap",
       },
       ".cm-line-blockGap": {
         height: "0",
@@ -3573,7 +3639,7 @@ function buildEditorTheme() {
         padding: "3px 0",
         backgroundColor: "transparent",
       },
-      ".cm-commandWidgetRail, .cm-commandWidgetRailSpacer": {
+      ".cm-commandWidgetRail": {
         flex: "0 0 16px",
         width: "16px",
         alignSelf: "stretch",
@@ -3581,9 +3647,10 @@ function buildEditorTheme() {
         alignItems: "center",
         justifyContent: "flex-start",
         paddingLeft: "4px",
-      },
-      ".cm-commandWidgetRail": {
         cursor: "pointer",
+      },
+      ".cm-commandWidgetSurface:not(.cm-commandWidgetSurfaceToggleable) .cm-commandWidgetRail": {
+        cursor: "default",
       },
       ".cm-commandWidgetRailVisual": {
         width: "2px",
@@ -3993,6 +4060,31 @@ function buildEditorTheme() {
         color: "#c8d0d8",
       },
       ".cm-line-commandOutput": { color: "#7a828b" },
+      ...(DEBUG_FLATTEN_TRANSCRIPT_LINE_GEOMETRY
+        ? {
+            ".cm-line-blockGap, .cm-line-reasoningSeparator, .cm-line-userPromptSeparator, .cm-line-workGroupSeparator, .cm-line-planSeparator, .cm-line-checkpointSeparator, .cm-line-promptSeparator":
+              {
+                height: "auto",
+                minHeight: "0",
+                lineHeight: "inherit",
+                fontSize: "inherit",
+                paddingTop: "0",
+                paddingBottom: "0",
+                overflow: "visible",
+              },
+            ".cm-line-reasoningSummary, .cm-line-reasoning, .cm-line-markdownHeading1, .cm-line-markdownHeading2, .cm-line-markdownHeading3, .cm-line-workGroupHeader, .cm-line-planHeader, .cm-line-checkpointHeader, .cm-line-workingLine":
+              {
+                fontSize: "inherit",
+                paddingTop: "0",
+                paddingBottom: "0",
+                minHeight: "0",
+              },
+            ".cm-line-userPromptSeparator::before, .cm-line-planSeparator::before, .cm-line-checkpointSeparator::before, .cm-line-promptSeparator::before, .cm-line-promptSeparator.cm-line-promptSeparatorPlan::after, .cm-line-blockGap.cm-line-messageTurnSeparator::after":
+              {
+                display: "none",
+              },
+          }
+        : {}),
     },
     { dark: true },
   );
@@ -4011,6 +4103,14 @@ function findConversationScrollContainer(start: HTMLElement | null) {
 }
 
 function getConversationScrollContainer(view: EditorView) {
+  const viewScrollDom = view.scrollDOM;
+  const { overflowY } = window.getComputedStyle(viewScrollDom);
+  if (
+    (overflowY === "auto" || overflowY === "scroll")
+    && viewScrollDom.scrollHeight > viewScrollDom.clientHeight
+  ) {
+    return viewScrollDom;
+  }
   return findConversationScrollContainer(view.dom);
 }
 
@@ -5829,7 +5929,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             ];
           }),
           keymap.of(defaultKeymap),
-          EditorView.lineWrapping,
+          ...(DEBUG_DISABLE_TRANSCRIPT_LINE_WRAPPING ? [] : [EditorView.lineWrapping]),
           EditorView.clipboardOutputFilter.of((text, state) =>
             prefixCopiedUserMessageStarts(
               text,
@@ -6425,7 +6525,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             </div>
           </div>
         ) : null}
-        <div className="transcript-history">
+        <div className={`transcript-history${DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER ? " transcript-history--cmScroller" : ""}`}>
           <div className="transcript-history__editor" ref={editorRef} />
         </div>
         <div
