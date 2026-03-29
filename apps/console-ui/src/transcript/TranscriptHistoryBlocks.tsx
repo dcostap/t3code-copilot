@@ -15,6 +15,11 @@ import {
   type TranscriptBlock,
   type TranscriptImageAttachment,
 } from "./TranscriptBlock";
+import {
+  layoutMarkdownTable,
+  resolveMarkdownTableDisplayWidth,
+  type MarkdownTableDisplayLine,
+} from "./markdownTable";
 
 interface TranscriptHistoryBlocksProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
@@ -271,10 +276,19 @@ function estimateRenderedBlockHeight(
   const plainLineWidthPx = Math.max(120, availableWidthPx);
   const commandSurfaceWidthPx = Math.max(120, availableWidthPx - 28);
   const commandBodyWidthPx = Math.max(120, availableWidthPx - 28);
+  const markdownTableWidth = resolveMarkdownTableDisplayWidth(availableWidthPx);
   let estimatedLineCount = 0;
-  for (const line of renderedBlock.lines) {
+  for (let lineIndex = 0; lineIndex < renderedBlock.lines.length; lineIndex += 1) {
+    const line = renderedBlock.lines[lineIndex]!;
     if (isSpacerLine(line)) {
       estimatedLineCount += 0.6;
+      continue;
+    }
+    if (line.kind === "table" && line.tableData) {
+      estimatedLineCount += layoutMarkdownTable(line.tableData, markdownTableWidth).length;
+      while (lineIndex + 1 < renderedBlock.lines.length && renderedBlock.lines[lineIndex + 1]?.kind === "table") {
+        lineIndex += 1;
+      }
       continue;
     }
     if (isCommandWidgetLine(line)) {
@@ -544,6 +558,8 @@ function renderAnnotatedLineContent(
         data-link-kind={highlightSpan?.link?.kind}
         data-link-target={highlightSpan?.link?.target}
         data-transcript-search-match-index={searchMatch?.matchIndex}
+        role={highlightSpan?.link ? "link" : undefined}
+        tabIndex={highlightSpan?.link ? 0 : undefined}
       >
         {textSegment}
       </span>,
@@ -686,6 +702,82 @@ function renderCommandWidgetLine(
   );
 }
 
+function renderMarkdownTableLine(line: MarkdownTableDisplayLine, key: string) {
+  if (!line.cells || line.kind === "border") {
+    return (
+      <div
+        key={key}
+        className={classNames([
+          "transcript-blockHistory__markdownTableLine",
+          `transcript-blockHistory__markdownTableLine--${line.kind}`,
+        ])}
+      >
+        {line.text}
+      </div>
+    );
+  }
+
+  const cells = line.cells;
+  const cellKind = line.kind === "header" ? "header" : "body";
+  const cellOccurrences = new Map<string, number>();
+  return (
+    <div
+      key={key}
+      className={classNames([
+        "transcript-blockHistory__markdownTableLine",
+        `transcript-blockHistory__markdownTableLine--${line.kind}`,
+      ])}
+    >
+      <span className="transcript-blockHistory__markdownTableBorderGlyph">│ </span>
+      {cells.map((cell, index) => {
+        const cellIdentity = [
+          cell.text,
+          cell.highlightSpans?.map((span) => `${span.from}:${span.to}:${span.className}`).join("|") ?? "",
+        ].join(":");
+        const cellOccurrence = cellOccurrences.get(cellIdentity) ?? 0;
+        cellOccurrences.set(cellIdentity, cellOccurrence + 1);
+        return (
+          <Fragment key={`${key}:cell:${cellIdentity}:${cellOccurrence}`}>
+          <span
+            className={classNames([
+              "transcript-blockHistory__markdownTableCell",
+              `transcript-blockHistory__markdownTableCell--${cellKind}`,
+            ])}
+          >
+            {renderAnnotatedLineContent({
+              text: cell.text,
+              kind: "table",
+              ...(cell.highlightSpans ? { highlightSpans: cell.highlightSpans } : {}),
+            })}
+          </span>
+          <span className="transcript-blockHistory__markdownTableBorderGlyph">
+            {index === cells.length - 1 ? " │" : " │ "}
+          </span>
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+function renderMarkdownTableWidget(line: AnnotatedLine, availableWidthPx: number, key: string) {
+  if (!line.tableData) {
+    return null;
+  }
+
+  const displayLines = layoutMarkdownTable(line.tableData, resolveMarkdownTableDisplayWidth(availableWidthPx));
+  return (
+    <div key={key} className="transcript-blockHistory__lineFrame">
+      <div className="transcript-blockHistory__markdownTableSurface">
+        <div className="transcript-blockHistory__markdownTableLines">
+          {displayLines.map((displayLine, index) =>
+            renderMarkdownTableLine(displayLine, `${key}:${displayLine.kind}:${index}`))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function renderBlock(
   renderedBlock: RenderedTranscriptBlock,
   blockIndex: number,
@@ -694,59 +786,73 @@ function renderBlock(
   collapsedFileChangeSignatures: ReadonlySet<string>,
   resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>,
   onToggleCommandWidget: TranscriptHistoryBlocksProps["onToggleCommandWidget"],
+  availableWidthPx: number,
 ) {
   const lineOccurrences = new Map<string, number>();
+  const renderedLines: ReactNode[] = [];
+  for (let lineIndex = 0; lineIndex < renderedBlock.lines.length; lineIndex += 1) {
+    const line = renderedBlock.lines[lineIndex]!;
+    const lineIdentity = getLineIdentity(line);
+    const lineOccurrence = lineOccurrences.get(lineIdentity) ?? 0;
+    lineOccurrences.set(lineIdentity, lineOccurrence + 1);
+    const lineKey = `${lineIdentity}:${lineOccurrence}`;
+    const lineSearchMatches = searchMatchesByLine.get(`${blockIndex}:${lineIndex}`) ?? [];
+    if (line.kind === "table" && line.tableData) {
+      renderedLines.push(renderMarkdownTableWidget(line, availableWidthPx, lineKey));
+      while (lineIndex + 1 < renderedBlock.lines.length && renderedBlock.lines[lineIndex + 1]?.kind === "table") {
+        lineIndex += 1;
+      }
+      continue;
+    }
+    if (line.kind === "divider") {
+      renderedLines.push(renderDividerLine(line, lineKey));
+      continue;
+    }
+    if (isSpacerLine(line)) {
+      renderedLines.push(renderSpacerLine(line, lineKey));
+      continue;
+    }
+    if (isCommandWidgetLine(line)) {
+      renderedLines.push(
+        <div
+          key={lineKey}
+          className="transcript-blockHistory__lineFrame"
+        >
+          {renderCommandWidgetLine(
+            line,
+            lineSearchMatches,
+            expandedCommandSignatures,
+            collapsedFileChangeSignatures,
+            resolvedInlineDiffBySignature,
+            onToggleCommandWidget,
+          )}
+        </div>,
+      );
+      continue;
+    }
+    renderedLines.push(
+      <div
+        key={lineKey}
+        className="transcript-blockHistory__lineFrame"
+      >
+        <div
+          className={classNames([
+            "transcript-blockHistory__line",
+            `transcript-blockHistory__line--${line.kind}`,
+            ...(line.extraClasses ?? []),
+          ])}
+        >
+          {renderAnnotatedLineContent(line, lineSearchMatches)}
+        </div>
+      </div>,
+    );
+  }
   return (
     <section
       className={`transcript-blockHistory__block transcript-blockHistory__block--${renderedBlock.block.type}`}
       data-block-type={renderedBlock.block.type}
     >
-      {renderedBlock.lines.map((line, lineIndex) => {
-        const lineIdentity = getLineIdentity(line);
-        const lineOccurrence = lineOccurrences.get(lineIdentity) ?? 0;
-        lineOccurrences.set(lineIdentity, lineOccurrence + 1);
-        const lineKey = `${lineIdentity}:${lineOccurrence}`;
-        const lineSearchMatches = searchMatchesByLine.get(`${blockIndex}:${lineIndex}`) ?? [];
-        if (line.kind === "divider") {
-          return renderDividerLine(line, lineKey);
-        }
-        if (isSpacerLine(line)) {
-          return renderSpacerLine(line, lineKey);
-        }
-        if (isCommandWidgetLine(line)) {
-          return (
-            <div
-              key={lineKey}
-              className="transcript-blockHistory__lineFrame"
-            >
-              {renderCommandWidgetLine(
-                line,
-                lineSearchMatches,
-                expandedCommandSignatures,
-                collapsedFileChangeSignatures,
-                resolvedInlineDiffBySignature,
-                onToggleCommandWidget,
-              )}
-            </div>
-          );
-        }
-        return (
-          <div
-            key={lineKey}
-            className="transcript-blockHistory__lineFrame"
-          >
-            <div
-              className={classNames([
-                "transcript-blockHistory__line",
-                `transcript-blockHistory__line--${line.kind}`,
-                ...(line.extraClasses ?? []),
-              ])}
-            >
-              {renderAnnotatedLineContent(line, lineSearchMatches)}
-            </div>
-          </div>
-        );
-      })}
+      {renderedLines}
       {renderedBlock.block.type === "user-message" ? renderAttachmentSummary(renderedBlock.block.attachments) : null}
     </section>
   );
@@ -1183,6 +1289,7 @@ export function TranscriptHistoryBlocks({
                 collapsedFileChangeSignatures,
                 resolvedInlineDiffBySignature,
                 onToggleCommandWidget,
+                availableWidthPx,
               )}
             </div>
           );
@@ -1205,6 +1312,7 @@ export function TranscriptHistoryBlocks({
                 collapsedFileChangeSignatures,
                 resolvedInlineDiffBySignature,
                 onToggleCommandWidget,
+                availableWidthPx,
               )}
             </div>
           ))}

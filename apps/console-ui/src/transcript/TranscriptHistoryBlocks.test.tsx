@@ -183,6 +183,46 @@ describe("TranscriptHistoryBlocks", () => {
     expect(html).toContain("data-transcript-search-match-index=\"1\"");
   });
 
+  it("renders interactive link spans with link semantics in block history", () => {
+    const blocks: TranscriptBlock[] = [
+      {
+        type: "assistant-text",
+        text: "See https://example.com and C:\\Projects\\webdev\\t3code-copilot\\README.md",
+        streaming: false,
+      },
+    ];
+
+    const html = renderToStaticMarkup(<TranscriptHistoryBlocks blocks={blocks} />);
+
+    expect(html).toContain("data-link-kind=\"url\"");
+    expect(html).toContain("data-link-kind=\"file\"");
+    expect(html).toContain("role=\"link\"");
+    expect(html).toContain("tabindex=\"0\"");
+  });
+
+  it("renders markdown tables as block-history table widgets", () => {
+    const blocks: TranscriptBlock[] = [
+      {
+        type: "assistant-text",
+        text: [
+          "| File | Status |",
+          "| --- | ---: |",
+          "| very-long-component-name.tsx | done |",
+        ].join("\n"),
+        streaming: false,
+      },
+    ];
+
+    const html = renderToStaticMarkup(<TranscriptHistoryBlocks blocks={blocks} />);
+
+    expect(html).toContain("transcript-blockHistory__markdownTableSurface");
+    expect(html).toContain("transcript-blockHistory__markdownTableLine--header");
+    expect(html).toContain("transcript-blockHistory__markdownTableCell--body");
+    expect(html).toContain("very-long-component-name.ts");
+    expect(html).toContain("transcript-blockHistory__markdownTableLine--body");
+    expect(html).toContain("done");
+  });
+
   it("estimates taller blocks for narrower wrapped text widths", () => {
     const block: TranscriptBlock = {
       type: "assistant-text",
