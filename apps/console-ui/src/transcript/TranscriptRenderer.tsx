@@ -28,8 +28,9 @@ import {
 } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, WidgetType, keymap } from "@codemirror/view";
 
-import { createAnimatedLoadingTextElement } from "../AnimatedLoadingText";
+import { AnimatedLoadingText, createAnimatedLoadingTextElement } from "../AnimatedLoadingText";
 import type { ComposerImageAttachment } from "../composerAttachments";
+import { measureTranscriptSwitchDiagnostic } from "../transcriptSwitchDiagnostics";
 import {
   blockToLines,
   type AnnotatedLine,
@@ -122,6 +123,14 @@ interface TranscriptDocumentBuildState {
   readonly docModel: TranscriptDocumentModel;
   readonly flattened: FlattenedBlocksBuild;
   readonly inputs: AppliedDecorationInputs;
+}
+
+interface CachedTranscriptRenderState {
+  readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly docBuild: { docModel: TranscriptDocumentModel; flattened: FlattenedBlocksBuild };
+  readonly inputs: AppliedDecorationInputs;
+  readonly decorationState: BuiltDecorationState;
+  readonly decorationSignature: string;
 }
 
 interface PositionedWidget {
@@ -223,6 +232,9 @@ interface PromptTextareaLayoutMetrics {
 
 interface TranscriptRendererProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly historyCacheKey?: string | null;
+  readonly historyState?: "ready" | "loading" | "error";
+  readonly historyStateMessage?: string;
   readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
   readonly cwd?: string | null;
   readonly projectRoot?: string | null;
@@ -2808,6 +2820,23 @@ function buildAppliedDecorationInputs(
   };
 }
 
+function isCachedTranscriptRenderStateCurrent(
+  entry: CachedTranscriptRenderState | null | undefined,
+  blocks: ReadonlyArray<TranscriptBlock>,
+  inputs: AppliedDecorationInputs,
+) {
+  return Boolean(
+    entry
+    && entry.blocks === blocks
+    && entry.inputs.expandedCommandSignatures === inputs.expandedCommandSignatures
+    && entry.inputs.collapsedFileChangeSignatures === inputs.collapsedFileChangeSignatures
+    && entry.inputs.resolvedInlineDiffBySignature === inputs.resolvedInlineDiffBySignature
+    && entry.inputs.cwd === inputs.cwd
+    && entry.inputs.projectRoot === inputs.projectRoot
+    && entry.inputs.highlightSignature === inputs.highlightSignature,
+  );
+}
+
 function computeMinimalDocChange(currentText: string, nextText: string) {
   if (currentText === nextText) {
     return null;
@@ -4509,6 +4538,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
   function TranscriptRenderer(
     {
       blocks,
+      historyCacheKey = null,
+      historyState = "ready",
+      historyStateMessage,
       composerAttachments = [],
       cwd,
       projectRoot,
@@ -4554,12 +4586,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const expandedCommandSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const collapsedFileChangeSignaturesRef = useRef<ReadonlySet<string>>(new Set());
     const flattenedBlocksRef = useRef<FlattenedBlocksBuild | null>(null);
+    const cachedRenderStatesRef = useRef<Map<string, CachedTranscriptRenderState>>(new Map());
     const docBuildStateRef = useRef<TranscriptDocumentBuildState | null>(null);
     const appliedDocModelRef = useRef<TranscriptDocumentModel | null>(null);
     const appliedDecorationStateRef = useRef<BuiltDecorationState | null>(null);
     const appliedDecorationInputsRef = useRef<AppliedDecorationInputs | null>(null);
     const appliedDecorationSignatureRef = useRef("");
     const appliedSearchDecorationSignatureRef = useRef("");
+    const activeHistoryCacheKeyRef = useRef<string | null>(historyCacheKey);
     const dragDepthRef = useRef(0);
     const [expandedCommandSignatures, setExpandedCommandSignatures] = useState<ReadonlySet<string>>(
       () => new Set(),
@@ -4922,21 +4956,51 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         ),
       [collapsedFileChangeSignatures, cwd, expandedCommandSignatures, pendingUserInputHighlight, projectRoot, resolvedInlineDiffBySignature],
     );
+    const cachedRenderState =
+      historyCacheKey !== null
+        ? (cachedRenderStatesRef.current.get(historyCacheKey) ?? null)
+        : null;
     const docBuild = useMemo(
       () =>
-        buildTranscriptDocument(
-          blocks,
-          expandedCommandSignatures,
-          collapsedFileChangeSignatures,
-          resolvedInlineDiffBySignature,
-          cwd,
-          projectRoot,
-          pendingUserInputHighlight,
-          docBuildInputs,
-          flattenedBlocksRef.current,
-          docBuildStateRef.current,
-        ),
-      [blocks, collapsedFileChangeSignatures, cwd, docBuildInputs, expandedCommandSignatures, pendingUserInputHighlight, projectRoot, resolvedInlineDiffBySignature],
+        measureTranscriptSwitchDiagnostic({
+          label: "transcript-renderer-doc-build",
+          historyCacheKey,
+          blockCount: blocks.length,
+          cacheHit: cachedRenderState ? isCachedTranscriptRenderStateCurrent(cachedRenderState, blocks, docBuildInputs) : false,
+        }, () => {
+          if (cachedRenderState && isCachedTranscriptRenderStateCurrent(cachedRenderState, blocks, docBuildInputs)) {
+            return cachedRenderState.docBuild;
+          }
+          return buildTranscriptDocument(
+            blocks,
+            expandedCommandSignatures,
+            collapsedFileChangeSignatures,
+            resolvedInlineDiffBySignature,
+            cwd,
+            projectRoot,
+            pendingUserInputHighlight,
+            docBuildInputs,
+            cachedRenderState?.docBuild.flattened ?? flattenedBlocksRef.current,
+            cachedRenderState
+              ? {
+                  ...cachedRenderState.docBuild,
+                  inputs: cachedRenderState.inputs,
+                }
+              : docBuildStateRef.current,
+          );
+        }),
+      [
+        blocks,
+        cachedRenderState,
+        collapsedFileChangeSignatures,
+        cwd,
+        docBuildInputs,
+        expandedCommandSignatures,
+        pendingUserInputHighlight,
+        projectRoot,
+        resolvedInlineDiffBySignature,
+        historyCacheKey,
+      ],
     );
     const docModel = docBuild.docModel;
     const compactPendingUserInputPrompt =
@@ -4979,14 +5043,31 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         : null;
     const initialDocModelRef = useRef(docModel);
     const initialDecorationStateRef = useRef(
-      buildDecorationState(
-        docModel.lines,
-        docModel.marks,
-        docModel.widgets,
-        docModel.replacements,
-      ),
+      cachedRenderState && isCachedTranscriptRenderStateCurrent(cachedRenderState, blocks, docBuildInputs)
+        ? cachedRenderState.decorationState
+        : buildDecorationState(
+            docModel.lines,
+            docModel.marks,
+            docModel.widgets,
+            docModel.replacements,
+        ),
     );
     const docModelRef = useRef(docModel);
+    const storeCachedRenderState = useCallback((
+      decorationState: BuiltDecorationState,
+      decorationSignature: string,
+    ) => {
+      if (historyCacheKey === null) {
+        return;
+      }
+      cachedRenderStatesRef.current.set(historyCacheKey, {
+        blocks,
+        docBuild,
+        inputs: docBuildInputs,
+        decorationState,
+        decorationSignature,
+      });
+    }, [blocks, docBuild, docBuildInputs, historyCacheKey]);
 
     useEffect(() => {
       flattenedBlocksRef.current = docBuild.flattened;
@@ -4996,6 +5077,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       };
       docModelRef.current = docModel;
     }, [docBuild, docBuild.flattened, docBuildInputs, docModel]);
+
+    useEffect(() => {
+      const decorationState = appliedDecorationStateRef.current;
+      if (!decorationState || appliedDocModelRef.current !== docModel) {
+        return;
+      }
+      storeCachedRenderState(decorationState, appliedDecorationSignatureRef.current);
+    }, [docModel, storeCachedRenderState]);
 
     const setPromptSelectionValue = useCallback((anchorOffset: number, headOffset: number) => {
       promptSelectionRef.current = { anchorOffset, headOffset };
@@ -6100,11 +6189,17 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       const nextDecorationSignature = buildDecorationSignature(docModel);
       const isTextStable = currentText === docModel.text && currentPromptStart === docModel.promptStart;
       if (isTextStable && appliedDecorationSignatureRef.current === nextDecorationSignature) {
+        activeHistoryCacheKeyRef.current = historyCacheKey;
         return;
       }
 
       const shouldPinToBottom = isConversationScrollNearBottom(view);
-      const minimalDocChange = isTextStable ? null : computeMinimalDocChange(currentText, docModel.text);
+      const historyCacheKeyChanged = activeHistoryCacheKeyRef.current !== historyCacheKey;
+      const minimalDocChange = isTextStable
+        ? null
+        : historyCacheKeyChanged
+          ? { from: 0, to: currentText.length, insert: docModel.text }
+          : computeMinimalDocChange(currentText, docModel.text);
       const nextDoc = Text.of(docModel.text.split("\n"));
       const appliedDocModel = appliedDocModelRef.current;
       const appliedDecorationState = appliedDecorationStateRef.current;
@@ -6120,8 +6215,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         && appliedDecorationInputs.cwd === (cwd ?? null)
         && appliedDecorationInputs.projectRoot === (projectRoot ?? null)
         && appliedDecorationInputs.highlightSignature === docBuild.flattened.highlightSignature;
+      const cachedDecorationState =
+        cachedRenderState && isCachedTranscriptRenderStateCurrent(cachedRenderState, blocks, docBuildInputs)
+          ? cachedRenderState.decorationState
+          : null;
       const nextDecorationState =
-        canReuseDecorationPrefix && appliedDocModel !== null && appliedDecorationState !== null
+        cachedDecorationState
+          ? cachedDecorationState
+          : canReuseDecorationPrefix && appliedDocModel !== null && appliedDecorationState !== null
           ? buildDecorationStateIncremental(
               docModel,
               appliedDocModel,
@@ -6169,6 +6270,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         syncingViewRef.current = false;
       }
       appliedDecorationSignatureRef.current = nextDecorationSignature;
+      activeHistoryCacheKeyRef.current = historyCacheKey;
+      storeCachedRenderState(nextDecorationState, nextDecorationSignature);
 
       if (shouldPinToBottom) {
         requestAnimationFrame(() => {
@@ -6184,8 +6287,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       docBuildInputs,
       docModel,
       expandedCommandSignatures,
+      historyCacheKey,
       projectRoot,
       resolvedInlineDiffBySignature,
+      cachedRenderState,
+      blocks,
+      storeCachedRenderState,
     ]);
 
     useEffect(() => {
@@ -6494,6 +6601,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             >
               <TranscriptHistoryBlocks
                 blocks={blocks}
+                cacheKey={historyCacheKey}
                 searchMatches={blockSearchMatches}
                 activeSearchMatchIndex={resolvedActiveSearchMatchIndex}
                 expandedCommandSignatures={expandedCommandSignatures}
@@ -6508,6 +6616,23 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               />
             </div>
           ) : <div className="transcript-history__editor" ref={editorRef} />}
+          {historyState !== "ready" && blocks.length === 0 ? (
+            <div
+              className={`transcript-history__state transcript-history__state--${historyState}`}
+              aria-live={historyState === "loading" ? "polite" : "assertive"}
+            >
+              {historyState === "loading" ? (
+                <AnimatedLoadingText
+                  text={historyStateMessage ?? "loading thread history"}
+                  className="transcript-history__stateText"
+                />
+              ) : (
+                <span className="transcript-history__stateText">
+                  {historyStateMessage ?? "Failed to load thread history."}
+                </span>
+              )}
+            </div>
+          ) : null}
         </div>
         <div
           className={compactPendingUserInputPrompt ? "transcript-prompt transcript-prompt--compact" : "transcript-prompt"}

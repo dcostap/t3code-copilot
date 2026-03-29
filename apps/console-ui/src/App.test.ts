@@ -36,6 +36,7 @@ import {
   getSupportedCuratedReasoningEfforts,
   summarizeThreadSelection,
   getNextProjectTabId,
+  isTranscriptBlocksCacheEntryCurrent,
   shouldRetainPendingPromptSend,
   shouldSuppressTabFocusNavigation,
   toggleManagedThreadChecksForRows,
@@ -94,6 +95,47 @@ describe("shouldRetainPendingPromptSend", () => {
         isThreadTurnRunning: false,
       }),
     ).toBe(true);
+  });
+});
+
+describe("isTranscriptBlocksCacheEntryCurrent", () => {
+  it("only reuses cached transcript blocks when the semantic inputs are unchanged", () => {
+    const snapshot = buildTestSnapshot();
+    const thread = snapshot.threads[0]!;
+    const events: ReadonlyArray<never> = [];
+    const input = {
+      messages: thread.messages,
+      activities: thread.activities,
+      checkpoints: thread.checkpoints,
+      proposedPlans: thread.proposedPlans,
+      latestTurn: thread.latestTurn,
+      session: thread.session,
+      updatedAt: thread.updatedAt,
+      events,
+    };
+    const entry = {
+      ...input,
+      status: "ready" as const,
+      requestId: 1,
+      blocks: [],
+    };
+
+    expect(isTranscriptBlocksCacheEntryCurrent(entry, input)).toBe(true);
+    expect(isTranscriptBlocksCacheEntryCurrent(entry, {
+      ...input,
+      messages: [...thread.messages],
+    })).toBe(false);
+    expect(isTranscriptBlocksCacheEntryCurrent(entry, {
+      ...input,
+      events: [...events],
+    })).toBe(false);
+    expect(isTranscriptBlocksCacheEntryCurrent({
+      ...entry,
+      effectiveNow: "2026-03-29T18:00:00.000Z",
+    }, {
+      ...input,
+      effectiveNow: "2026-03-29T18:00:01.000Z",
+    })).toBe(false);
   });
 });
 

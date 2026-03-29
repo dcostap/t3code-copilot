@@ -16,6 +16,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -79,9 +80,13 @@ import {
   hasNonCollapsedSelectionInsideElement,
   TranscriptRenderer,
   type TranscriptRendererHandle,
-  threadToTranscriptBlocks,
 } from "./transcript";
-import type { InlineDiffLookup } from "./transcript/TranscriptBlock";
+import type { InlineDiffLookup, TranscriptBlock } from "./transcript/TranscriptBlock";
+import {
+  buildThreadTranscriptBlocks,
+  type ThreadTranscriptBlocksComputationRequest,
+  type ThreadTranscriptBlocksComputationResponse,
+} from "./transcript/threadTranscriptBlocksLoader";
 import { useConsoleData, type PendingConsoleThread } from "./consoleData/useConsoleData";
 import { formatProviderModelSelectionLabel } from "./providerModelLabels";
 import {
@@ -92,6 +97,7 @@ import {
   type ConsoleProjectPane,
 } from "./consoleSessions";
 import { resolveWsHttpOrigin } from "./wsTransport";
+import { recordTranscriptSwitchDiagnostic } from "./transcriptSwitchDiagnostics";
 
 const DRAFT_STORAGE_KEY = "t3code:console-pane-drafts:v1";
 const ARCHIVED_PROJECT_IDS_STORAGE_KEY = "t3code:archived-project-ids:v1";
@@ -112,6 +118,7 @@ interface AppPaletteCommand extends CommandPaletteCommand {
 const PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL = "gpt-5.4" as const;
 const HIGH_PRIORITY_COMMAND = 100;
 const CURATED_REASONING_EFFORTS = ["high", "medium"] as const satisfies ReadonlyArray<CodexReasoningEffort>;
+const EMPTY_TRANSCRIPT_BLOCKS: ReadonlyArray<TranscriptBlock> = [];
 interface ManualModelCommandDefinition {
   readonly slug: string;
   readonly label: string;
@@ -298,7 +305,9 @@ interface PaneView {
   readonly thread: OrchestrationThread | null;
   readonly pendingThread: PendingConsoleThread | null;
   readonly setup: ConsolePaneSetup | null;
-  readonly blocks: ReturnType<typeof threadToTranscriptBlocks>;
+  readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly historyState: "ready" | "loading" | "error";
+  readonly historyStateMessage: string | null;
   readonly attachments: ReadonlyArray<ComposerImageAttachment>;
   readonly pendingPromptSendStartedAt: string | null;
   readonly pendingUserInput: ReturnType<ReturnType<typeof useConsoleData>["getPendingUserInputs"]>[number] | null;
@@ -390,10 +399,23 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
 
   const handleTranscriptSubmit = useCallback((value: string) => handleSubmit(paneView, value), [handleSubmit, paneView]);
 
+  useLayoutEffect(() => {
+    recordTranscriptSwitchDiagnostic({
+      label: "pane-transcript-commit",
+      paneId: paneView.pane.id,
+      threadId: paneView.threadId,
+      historyCacheKey: paneView.threadId ?? paneView.pane.id,
+      blockCount: paneView.blocks.length,
+    });
+  }, [paneView.blocks.length, paneView.pane.id, paneView.threadId]);
+
   return (
     <TranscriptRenderer
       ref={handleTranscriptRef}
       blocks={paneView.blocks}
+      historyCacheKey={paneView.threadId ?? paneView.pane.id}
+      historyState={paneView.historyState}
+      {...(paneView.historyStateMessage ? { historyStateMessage: paneView.historyStateMessage } : {})}
       composerAttachments={paneView.attachments}
       cwd={paneView.cwd}
       projectRoot={paneView.project.workspaceRoot}
@@ -428,7 +450,7 @@ interface PaneScrollState {
   readonly offsetFromBottom: number;
 }
 
-interface TranscriptBlocksCacheEntry {
+interface TranscriptBlocksCacheEntryInput {
   readonly messages: OrchestrationThread["messages"];
   readonly activities: OrchestrationThread["activities"];
   readonly checkpoints: OrchestrationThread["checkpoints"];
@@ -438,7 +460,17 @@ interface TranscriptBlocksCacheEntry {
   readonly updatedAt: OrchestrationThread["updatedAt"];
   readonly events: ReadonlyArray<OrchestrationEvent>;
   readonly effectiveNow?: string;
-  readonly blocks: ReturnType<typeof threadToTranscriptBlocks>;
+}
+
+interface TranscriptBlocksCacheEntry extends TranscriptBlocksCacheEntryInput {
+  readonly status: "loading" | "ready" | "error";
+  readonly requestId: number;
+  readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly error?: string;
+}
+
+interface VisibleThreadTranscriptBlocksRequest extends TranscriptBlocksCacheEntryInput {
+  readonly thread: OrchestrationThread;
 }
 
 interface ThreadStatusDescriptor {
@@ -454,6 +486,29 @@ interface SidebarThreadEntry {
   readonly tooltip: string;
   readonly sidebarLabel: string | null;
   readonly ageMs: number;
+}
+
+export function isTranscriptBlocksCacheEntryCurrent(
+  entry: TranscriptBlocksCacheEntry | null | undefined,
+  input: TranscriptBlocksCacheEntryInput,
+) {
+  return Boolean(
+    entry
+    && entry.messages === input.messages
+    && entry.activities === input.activities
+    && entry.checkpoints === input.checkpoints
+    && entry.proposedPlans === input.proposedPlans
+    && entry.latestTurn === input.latestTurn
+    && entry.session === input.session
+    && entry.updatedAt === input.updatedAt
+    && entry.events === input.events
+    && entry.effectiveNow === input.effectiveNow,
+  );
+}
+
+function postThreadTranscriptBlocksRequest(worker: Worker, payload: ThreadTranscriptBlocksComputationRequest) {
+  const postMessage = Reflect.get(worker, "postMessage") as (message: ThreadTranscriptBlocksComputationRequest) => void;
+  postMessage.call(worker, payload);
 }
 
 interface ProjectContextMenuState {
@@ -2039,40 +2094,31 @@ export function App() {
   const activeTab = workspace.activeTab;
   const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
   const transcriptBlocksCacheRef = useRef<Map<OrchestrationThread["id"], TranscriptBlocksCacheEntry>>(new Map());
-  const transcriptBlocksByThreadId = useMemo(() => {
-    const blocksByThreadId = new Map<OrchestrationThread["id"], ReturnType<typeof threadToTranscriptBlocks>>();
-    const nextCache = new Map<OrchestrationThread["id"], TranscriptBlocksCacheEntry>();
+  const transcriptBlocksWorkerRef = useRef<Worker | null>(null);
+  const transcriptBlocksRequestIdRef = useRef(0);
+  const transcriptBlocksTimeoutsRef = useRef<Map<OrchestrationThread["id"], number>>(new Map());
+  const [transcriptBlocksRevision, setTranscriptBlocksRevision] = useState(0);
+  const visibleThreadTranscriptBlockRequests = useMemo<ReadonlyArray<VisibleThreadTranscriptBlocksRequest>>(() => {
+    if (!activeLayout || !activeTab) {
+      return [];
+    }
 
-    for (const thread of consoleData.threads) {
+    const requests = new Map<OrchestrationThread["id"], VisibleThreadTranscriptBlocksRequest>();
+    for (const paneId of activeTab.paneIds) {
+      const pane = activeLayout.panesById[paneId];
+      if (!pane || pane.kind !== "thread") {
+        continue;
+      }
+      const thread = consoleData.threads.find((candidate) => candidate.id === pane.threadId) ?? null;
+      if (!thread || requests.has(thread.id)) {
+        continue;
+      }
       const events = getThreadEvents(thread.id);
       const effectiveNow = (isThreadTurnRunning(thread.id) || pendingPromptSendStartedAtByThreadId[thread.id])
         ? animationNowIso
         : undefined;
-      const cached = transcriptBlocksCacheRef.current.get(thread.id);
-      if (
-        cached
-        && cached.messages === thread.messages
-        && cached.activities === thread.activities
-        && cached.checkpoints === thread.checkpoints
-        && cached.proposedPlans === thread.proposedPlans
-        && cached.latestTurn === thread.latestTurn
-        && cached.session === thread.session
-        && cached.updatedAt === thread.updatedAt
-        && cached.events === events
-        && cached.effectiveNow === effectiveNow
-      ) {
-        nextCache.set(thread.id, cached);
-        blocksByThreadId.set(thread.id, cached.blocks);
-        continue;
-      }
-
-      const blocks = threadToTranscriptBlocks(thread, {
-        resolveAttachmentPreviewUrl: (attachmentId) =>
-          `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
-        orchestrationEvents: events,
-        ...(effectiveNow ? { now: effectiveNow } : {}),
-      });
-      const nextEntry: TranscriptBlocksCacheEntry = {
+      requests.set(thread.id, {
+        thread,
         messages: thread.messages,
         activities: thread.activities,
         checkpoints: thread.checkpoints,
@@ -2082,16 +2128,13 @@ export function App() {
         updatedAt: thread.updatedAt,
         events,
         ...(effectiveNow ? { effectiveNow } : {}),
-        blocks,
-      };
-      nextCache.set(thread.id, nextEntry);
-      blocksByThreadId.set(thread.id, blocks);
+      });
     }
 
-    transcriptBlocksCacheRef.current = nextCache;
-    return blocksByThreadId;
+    return [...requests.values()];
   }, [
-    attachmentPreviewBaseUrl,
+    activeLayout,
+    activeTab,
     animationNowIso,
     consoleData.threads,
     getThreadEvents,
@@ -2099,7 +2142,129 @@ export function App() {
     pendingPromptSendStartedAtByThreadId,
   ]);
 
+  useEffect(() => {
+    if (typeof Worker !== "function") {
+      return;
+    }
+
+    const worker = new Worker(new URL("./transcript/threadTranscriptBlocks.worker.ts", import.meta.url), {
+      type: "module",
+    });
+    transcriptBlocksWorkerRef.current = worker;
+
+    const handleMessage = (event: MessageEvent<ThreadTranscriptBlocksComputationResponse>) => {
+      const result = event.data;
+      const cached = transcriptBlocksCacheRef.current.get(result.threadId);
+      if (cached === undefined || cached.requestId !== result.requestId) {
+        return;
+      }
+      if (result.kind === "ready") {
+        const { error: _error, ...cachedWithoutError } = cached;
+        transcriptBlocksCacheRef.current.set(result.threadId, {
+          ...cachedWithoutError,
+          status: "ready",
+          blocks: result.blocks,
+        });
+      } else {
+        transcriptBlocksCacheRef.current.set(result.threadId, {
+          ...cached,
+          status: "error",
+          error: result.error,
+        });
+      }
+      setTranscriptBlocksRevision((current) => current + 1);
+    };
+    const handleError = () => {
+      transcriptBlocksWorkerRef.current = null;
+    };
+    worker.addEventListener("message", handleMessage);
+    worker.addEventListener("error", handleError);
+
+    return () => {
+      transcriptBlocksWorkerRef.current = null;
+      worker.removeEventListener("message", handleMessage);
+      worker.removeEventListener("error", handleError);
+      worker.terminate();
+    };
+  }, []);
+
+  useEffect(() => {
+    for (const request of visibleThreadTranscriptBlockRequests) {
+      if (request.effectiveNow !== undefined) {
+        continue;
+      }
+
+      const cached = transcriptBlocksCacheRef.current.get(request.thread.id);
+      if (
+        cached
+        && isTranscriptBlocksCacheEntryCurrent(cached, request)
+        && (cached.status === "loading" || cached.status === "ready")
+      ) {
+        continue;
+      }
+
+      const requestId = transcriptBlocksRequestIdRef.current + 1;
+      transcriptBlocksRequestIdRef.current = requestId;
+      transcriptBlocksCacheRef.current.set(request.thread.id, {
+        ...request,
+        status: "loading",
+        requestId,
+        blocks: cached?.blocks ?? EMPTY_TRANSCRIPT_BLOCKS,
+      });
+
+      const payload: ThreadTranscriptBlocksComputationRequest = {
+        threadId: request.thread.id,
+        requestId,
+        thread: request.thread,
+        orchestrationEvents: request.events,
+        attachmentPreviewBaseUrl,
+      };
+
+      if (transcriptBlocksWorkerRef.current) {
+        postThreadTranscriptBlocksRequest(transcriptBlocksWorkerRef.current, payload);
+        continue;
+      }
+
+      const existingTimeout = transcriptBlocksTimeoutsRef.current.get(request.thread.id);
+      if (existingTimeout !== undefined) {
+        window.clearTimeout(existingTimeout);
+      }
+      const timeoutId = window.setTimeout(() => {
+        transcriptBlocksTimeoutsRef.current.delete(request.thread.id);
+        const latestEntry = transcriptBlocksCacheRef.current.get(request.thread.id);
+        if (!latestEntry || latestEntry.requestId !== requestId) {
+          return;
+        }
+        try {
+          const blocks = buildThreadTranscriptBlocks(payload);
+          const { error: _error, ...latestEntryWithoutError } = latestEntry;
+          transcriptBlocksCacheRef.current.set(request.thread.id, {
+            ...latestEntryWithoutError,
+            status: "ready",
+            blocks,
+          });
+        } catch (error) {
+          transcriptBlocksCacheRef.current.set(request.thread.id, {
+            ...latestEntry,
+            status: "error",
+            error: error instanceof Error ? error.message : "Failed to load thread history.",
+          });
+        }
+        setTranscriptBlocksRevision((current) => current + 1);
+      }, 0);
+      transcriptBlocksTimeoutsRef.current.set(request.thread.id, timeoutId);
+    }
+  }, [attachmentPreviewBaseUrl, visibleThreadTranscriptBlockRequests]);
+
+  useEffect(() => () => {
+    for (const timeoutId of transcriptBlocksTimeoutsRef.current.values()) {
+      window.clearTimeout(timeoutId);
+    }
+    transcriptBlocksTimeoutsRef.current.clear();
+  }, []);
+
   const paneViews = useMemo<ReadonlyArray<PaneView>>(() => {
+    void transcriptBlocksRevision;
     const activeProject = workspace.activeProject;
     if (!activeProject || !activeLayout || !activeTab) {
       return [];
@@ -2133,12 +2298,64 @@ export function App() {
         const effectiveNow = thread && (isThreadTurnRunning(thread.id) || pendingPromptSendStartedAtByThreadId[thread.id])
           ? animationNowIso
           : undefined;
-        const blocks = thread
-          ? (transcriptBlocksByThreadId.get(thread.id) ?? [])
-          : [];
         const pendingPromptSendStartedAt = pane.kind === "thread"
           ? pendingPromptSendStartedAtByThreadId[pane.threadId] ?? null
           : null;
+        const transcriptBlocksInput = thread
+          ? {
+              messages: thread.messages,
+              activities: thread.activities,
+              checkpoints: thread.checkpoints,
+              proposedPlans: thread.proposedPlans,
+              latestTurn: thread.latestTurn,
+              session: thread.session,
+              updatedAt: thread.updatedAt,
+              events: getThreadEvents(thread.id),
+              ...(effectiveNow ? { effectiveNow } : {}),
+            } satisfies TranscriptBlocksCacheEntryInput
+          : null;
+        const cachedBlocks = thread ? (transcriptBlocksCacheRef.current.get(thread.id) ?? null) : null;
+        let blocks = EMPTY_TRANSCRIPT_BLOCKS;
+        let historyState: PaneView["historyState"] = "ready";
+        let historyStateMessage: string | null = null;
+
+        if (thread && transcriptBlocksInput) {
+          if (
+            effectiveNow !== undefined
+            && cachedBlocks
+            && isTranscriptBlocksCacheEntryCurrent(cachedBlocks, transcriptBlocksInput)
+            && cachedBlocks.status === "ready"
+          ) {
+            blocks = cachedBlocks.blocks;
+          } else if (effectiveNow !== undefined) {
+            blocks = buildThreadTranscriptBlocks({
+              thread,
+              orchestrationEvents: transcriptBlocksInput.events,
+              attachmentPreviewBaseUrl,
+              now: effectiveNow,
+            });
+            transcriptBlocksCacheRef.current.set(thread.id, {
+              ...transcriptBlocksInput,
+              status: "ready",
+              requestId: cachedBlocks?.requestId ?? 0,
+              blocks,
+            });
+          } else if (cachedBlocks && isTranscriptBlocksCacheEntryCurrent(cachedBlocks, transcriptBlocksInput)) {
+            blocks = cachedBlocks.blocks;
+            if (cachedBlocks.status === "error" && cachedBlocks.blocks.length === 0) {
+              historyState = "error";
+              historyStateMessage = cachedBlocks.error ?? "Failed to load thread history.";
+            } else if (cachedBlocks.status === "loading" && cachedBlocks.blocks.length === 0) {
+              historyState = "loading";
+              historyStateMessage = "loading thread history";
+            }
+          } else if (cachedBlocks?.blocks.length) {
+            blocks = cachedBlocks.blocks;
+          } else {
+            historyState = "loading";
+            historyStateMessage = "loading thread history";
+          }
+        }
 
         return [{
           project: activeProject,
@@ -2159,6 +2376,8 @@ export function App() {
                 },
               ]
             : blocks,
+          historyState,
+          historyStateMessage,
           attachments: composerAttachmentsByPaneId[pane.id] ?? [],
           pendingPromptSendStartedAt,
           pendingUserInput,
@@ -2187,7 +2406,9 @@ export function App() {
     pendingUserInputAnswersByRequestId,
     pendingUserInputQuestionIndexByRequestId,
     projects,
-    transcriptBlocksByThreadId,
+    getThreadEvents,
+    transcriptBlocksRevision,
+    attachmentPreviewBaseUrl,
     workspace.activeProject,
   ]);
 
@@ -2346,6 +2567,10 @@ export function App() {
     if (!thread) {
       return;
     }
+    recordTranscriptSwitchDiagnostic({
+      label: "open-thread-requested",
+      threadId,
+    });
     const projectView = workspace.projectViews.find((candidate) => candidate.project.id === thread.projectId) ?? null;
     const reusableDraftPane = findReusableDraftPaneForThreadOpen({
       layout: projectView?.layout ?? null,
@@ -2353,25 +2578,27 @@ export function App() {
       attachmentsByPaneId: composerAttachmentsByPaneId,
       pendingDraftPaneIds,
     });
-    if (reusableDraftPane) {
-      const didMount = workspace.mountThreadInPane({
-        projectId: thread.projectId,
-        paneId: reusableDraftPane.paneId,
-        threadId,
-      });
-      if (didMount) {
-        focusPanePrompt(reusableDraftPane.paneId);
+    startTransition(() => {
+      if (reusableDraftPane) {
+        const didMount = workspace.mountThreadInPane({
+          projectId: thread.projectId,
+          paneId: reusableDraftPane.paneId,
+          threadId,
+        });
+        if (didMount) {
+          focusPanePrompt(reusableDraftPane.paneId);
+          return;
+        }
+      }
+      const result = workspace.openThread(threadId);
+      if (!result) {
         return;
       }
-    }
-    const result = workspace.openThread(threadId);
-    if (!result) {
-      return;
-    }
-    focusPanePrompt(result.paneId);
-    if (result.highlightPane) {
-      highlightPane(result.paneId);
-    }
+      focusPanePrompt(result.paneId);
+      if (result.highlightPane) {
+        highlightPane(result.paneId);
+      }
+    });
   }, [
     composerAttachmentsByPaneId,
     consoleData.threads,

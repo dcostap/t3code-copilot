@@ -26,9 +26,11 @@ import {
   resolveMarkdownTableDisplayWidth,
   type MarkdownTableDisplayLine,
 } from "./markdownTable";
+import { measureTranscriptSwitchDiagnostic } from "../transcriptSwitchDiagnostics";
 
 interface TranscriptHistoryBlocksProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly cacheKey?: string | null;
   readonly searchMatches?: ReadonlyArray<TranscriptHistorySearchMatch>;
   readonly activeSearchMatchIndex?: number;
   readonly expandedCommandSignatures?: ReadonlySet<string>;
@@ -82,6 +84,34 @@ interface RenderedTranscriptBlock {
   readonly key: string;
   readonly measurementKey: string;
   readonly showMessageTurnSeparator: boolean;
+}
+
+interface CachedRenderedTranscriptBlockBase {
+  readonly block: TranscriptBlock;
+  readonly lines: ReadonlyArray<AnnotatedLine>;
+  readonly key: string;
+  readonly showMessageTurnSeparator: boolean;
+}
+
+interface CachedRenderedTranscriptBlocksState {
+  readonly baseRenderedBlocks: ReadonlyArray<CachedRenderedTranscriptBlockBase>;
+  readonly expandedCommandSignatures: ReadonlySet<string>;
+  readonly collapsedFileChangeSignatures: ReadonlySet<string>;
+  readonly resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>;
+  readonly renderedBlocks: ReadonlyArray<RenderedTranscriptBlock>;
+}
+
+interface CachedBlockGeometryState {
+  readonly renderedBlocks: ReadonlyArray<RenderedTranscriptBlock>;
+  readonly measuredHeights: ReadonlyMap<string, number>;
+  readonly availableWidthPx: number;
+  readonly expandedCommandSignatures: ReadonlySet<string>;
+  readonly collapsedFileChangeSignatures: ReadonlySet<string>;
+  readonly resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>;
+  readonly blockHeights: ReadonlyArray<number>;
+  readonly blockOffsets: ReadonlyArray<number>;
+  readonly totalHeight: number;
+  readonly blockIndexByKey: ReadonlyMap<string, number>;
 }
 
 interface VirtualWindow {
@@ -981,6 +1011,7 @@ function renderBlock(
 
 export function TranscriptHistoryBlocks({
   blocks,
+  cacheKey = null,
   searchMatches = [],
   activeSearchMatchIndex = -1,
   expandedCommandSignatures = new Set<string>(),
@@ -994,29 +1025,111 @@ export function TranscriptHistoryBlocks({
   isScrolling = false,
 }: TranscriptHistoryBlocksProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const renderedBlocks = useMemo(() => {
-    const blockOccurrences = new Map<string, number>();
-    return blocks.map((block, blockIndex) => {
-      const previousBlock = blockIndex > 0 ? blocks[blockIndex - 1] ?? null : null;
-      const lines = blockToLines(block);
-      const blockIdentity = getBlockIdentity(block, lines);
-      const blockOccurrence = blockOccurrences.get(blockIdentity) ?? 0;
-      blockOccurrences.set(blockIdentity, blockOccurrence + 1);
-      return {
-        block,
-        lines,
-        key: `${blockIdentity}:${blockOccurrence}`,
-        measurementKey: `${getBlockMeasurementIdentity(
+  const renderedBlockCacheRef = useRef<Map<string, {
+    readonly blocks: ReadonlyArray<TranscriptBlock>;
+    readonly renderedBlocks: ReadonlyArray<CachedRenderedTranscriptBlockBase>;
+  }>>(new Map());
+  const renderedBlocksStateCacheRef = useRef<Map<string, CachedRenderedTranscriptBlocksState>>(new Map());
+  const geometryCacheRef = useRef<Map<string, CachedBlockGeometryState>>(new Map());
+  const baseRenderedBlocks = useMemo(() => {
+    return measureTranscriptSwitchDiagnostic({
+      label: "block-history-base-render",
+      historyCacheKey: cacheKey,
+      blockCount: blocks.length,
+      cacheHit: cacheKey !== null && (renderedBlockCacheRef.current.get(cacheKey)?.blocks === blocks),
+    }, () => {
+      const cached =
+        cacheKey !== null
+          ? (renderedBlockCacheRef.current.get(cacheKey) ?? null)
+          : null;
+      if (cached && cached.blocks === blocks) {
+        return cached.renderedBlocks;
+      }
+      const blockOccurrences = new Map<string, number>();
+      const nextRenderedBlocks = blocks.map((block, blockIndex) => {
+        const previousBlock = blockIndex > 0 ? blocks[blockIndex - 1] ?? null : null;
+        const lines = blockToLines(block);
+        const blockIdentity = getBlockIdentity(block, lines);
+        const blockOccurrence = blockOccurrences.get(blockIdentity) ?? 0;
+        blockOccurrences.set(blockIdentity, blockOccurrence + 1);
+        return {
           block,
           lines,
+          key: `${blockIdentity}:${blockOccurrence}`,
+          showMessageTurnSeparator: shouldShowMessageTurnSeparator(previousBlock, block),
+        } satisfies CachedRenderedTranscriptBlockBase;
+      });
+      if (cacheKey !== null) {
+        renderedBlockCacheRef.current.set(cacheKey, {
+          blocks,
+          renderedBlocks: nextRenderedBlocks,
+        });
+      }
+      return nextRenderedBlocks;
+    });
+  }, [blocks, cacheKey]);
+  const renderedBlocks = useMemo(() => {
+    return measureTranscriptSwitchDiagnostic({
+      label: "block-history-rendered-blocks",
+      historyCacheKey: cacheKey,
+      blockCount: baseRenderedBlocks.length,
+      cacheHit:
+        cacheKey !== null
+        && (() => {
+          const cachedState = renderedBlocksStateCacheRef.current.get(cacheKey);
+          return Boolean(
+            cachedState
+            && cachedState.baseRenderedBlocks === baseRenderedBlocks
+            && cachedState.expandedCommandSignatures === expandedCommandSignatures
+            && cachedState.collapsedFileChangeSignatures === collapsedFileChangeSignatures
+            && cachedState.resolvedInlineDiffBySignature === resolvedInlineDiffBySignature,
+          );
+        })(),
+    }, () => {
+      const cachedState =
+        cacheKey !== null
+          ? (renderedBlocksStateCacheRef.current.get(cacheKey) ?? null)
+          : null;
+      if (
+        cachedState
+        && cachedState.baseRenderedBlocks === baseRenderedBlocks
+        && cachedState.expandedCommandSignatures === expandedCommandSignatures
+        && cachedState.collapsedFileChangeSignatures === collapsedFileChangeSignatures
+        && cachedState.resolvedInlineDiffBySignature === resolvedInlineDiffBySignature
+      ) {
+        return cachedState.renderedBlocks;
+      }
+
+      const nextRenderedBlocks = baseRenderedBlocks.map((renderedBlock) => ({
+        ...renderedBlock,
+        measurementKey: `${getBlockMeasurementIdentity(
+          renderedBlock.block,
+          renderedBlock.lines,
           expandedCommandSignatures,
           collapsedFileChangeSignatures,
           resolvedInlineDiffBySignature,
-        )}:${blockOccurrence}`,
-        showMessageTurnSeparator: shouldShowMessageTurnSeparator(previousBlock, block),
-      } satisfies RenderedTranscriptBlock;
+        )}:${renderedBlock.key}`,
+      } satisfies RenderedTranscriptBlock));
+
+      if (cacheKey !== null) {
+        renderedBlocksStateCacheRef.current.set(cacheKey, {
+          baseRenderedBlocks,
+          expandedCommandSignatures,
+          collapsedFileChangeSignatures,
+          resolvedInlineDiffBySignature,
+          renderedBlocks: nextRenderedBlocks,
+        });
+      }
+
+      return nextRenderedBlocks;
     });
-  }, [blocks, collapsedFileChangeSignatures, expandedCommandSignatures, resolvedInlineDiffBySignature]);
+  }, [
+    baseRenderedBlocks,
+    cacheKey,
+    collapsedFileChangeSignatures,
+    expandedCommandSignatures,
+    resolvedInlineDiffBySignature,
+  ]);
 
   const searchMatchesByLine = useMemo(() => {
     const byLine = new Map<string, IndexedSearchMatch[]>();
@@ -1086,9 +1199,43 @@ export function TranscriptHistoryBlocks({
     setMeasuredHeights((current) => current.size === 0 ? current : new Map());
   }, [widthBucket]);
 
-  const blockHeights = useMemo(
-    () =>
-      renderedBlocks.map((renderedBlock, index) =>
+  const geometry = useMemo(() => {
+    return measureTranscriptSwitchDiagnostic({
+      label: "block-history-geometry",
+      historyCacheKey: cacheKey,
+      blockCount: renderedBlocks.length,
+      cacheHit:
+        cacheKey !== null
+        && (() => {
+          const cachedGeometry = geometryCacheRef.current.get(cacheKey);
+          return Boolean(
+            cachedGeometry
+            && cachedGeometry.renderedBlocks === renderedBlocks
+            && cachedGeometry.measuredHeights === measuredHeights
+            && cachedGeometry.availableWidthPx === availableWidthPx
+            && cachedGeometry.expandedCommandSignatures === expandedCommandSignatures
+            && cachedGeometry.collapsedFileChangeSignatures === collapsedFileChangeSignatures
+            && cachedGeometry.resolvedInlineDiffBySignature === resolvedInlineDiffBySignature,
+          );
+        })(),
+    }, () => {
+      const cachedGeometry =
+        cacheKey !== null
+          ? (geometryCacheRef.current.get(cacheKey) ?? null)
+          : null;
+      if (
+        cachedGeometry
+        && cachedGeometry.renderedBlocks === renderedBlocks
+        && cachedGeometry.measuredHeights === measuredHeights
+        && cachedGeometry.availableWidthPx === availableWidthPx
+        && cachedGeometry.expandedCommandSignatures === expandedCommandSignatures
+        && cachedGeometry.collapsedFileChangeSignatures === collapsedFileChangeSignatures
+        && cachedGeometry.resolvedInlineDiffBySignature === resolvedInlineDiffBySignature
+      ) {
+        return cachedGeometry;
+      }
+
+      const blockHeights = renderedBlocks.map((renderedBlock, index) =>
         measuredHeights.get(renderedBlock.measurementKey)
         ?? (
           estimateRenderedBlockHeight(
@@ -1099,35 +1246,49 @@ export function TranscriptHistoryBlocks({
             resolvedInlineDiffBySignature,
           )
           + (index > 0 ? DEFAULT_BLOCK_GAP_PX : 0)
-        )),
-    [
-      availableWidthPx,
-      collapsedFileChangeSignatures,
-      expandedCommandSignatures,
-      measuredHeights,
-      renderedBlocks,
-      resolvedInlineDiffBySignature,
-    ],
-  );
-  const blockOffsets = useMemo(() => {
-    const offsets: number[] = [];
-    let offset = 0;
-    for (const height of blockHeights) {
-      offsets.push(offset);
-      offset += height ?? 0;
-    }
-    return offsets;
-  }, [blockHeights]);
-  const totalHeight = useMemo(() => blockHeights.reduce((sum, height) => sum + height, 0), [blockHeights]);
+        ));
+      const blockOffsets: number[] = [];
+      let offset = 0;
+      for (const height of blockHeights) {
+        blockOffsets.push(offset);
+        offset += height ?? 0;
+      }
+      const totalHeight = blockHeights.reduce((sum, height) => sum + height, 0);
+      const blockIndexByKey = new Map(renderedBlocks.map((renderedBlock, index) => [renderedBlock.measurementKey, index]));
+      const nextGeometry = {
+        renderedBlocks,
+        measuredHeights,
+        availableWidthPx,
+        expandedCommandSignatures,
+        collapsedFileChangeSignatures,
+        resolvedInlineDiffBySignature,
+        blockHeights,
+        blockOffsets,
+        totalHeight,
+        blockIndexByKey,
+      } satisfies CachedBlockGeometryState;
+
+      if (cacheKey !== null) {
+        geometryCacheRef.current.set(cacheKey, nextGeometry);
+      }
+
+      return nextGeometry;
+    });
+  }, [
+    availableWidthPx,
+    cacheKey,
+    collapsedFileChangeSignatures,
+    expandedCommandSignatures,
+    measuredHeights,
+    renderedBlocks,
+    resolvedInlineDiffBySignature,
+  ]);
+  const { blockHeights, blockIndexByKey, blockOffsets, totalHeight } = geometry;
 
   const activeSearchBlockIndex =
     activeSearchMatchIndex >= 0
       ? searchMatches[activeSearchMatchIndex]?.blockIndex ?? -1
       : -1;
-  const blockIndexByKey = useMemo(
-    () => new Map(renderedBlocks.map((renderedBlock, index) => [renderedBlock.measurementKey, index])),
-    [renderedBlocks],
-  );
 
   const applyMeasuredHeightUpdates = useCallback((updates: ReadonlyMap<string, number>) => {
     const measurementUpdates: TranscriptHistoryMeasurementUpdate[] = [];

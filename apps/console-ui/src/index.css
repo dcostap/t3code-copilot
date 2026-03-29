@@ -422,6 +422,7 @@ body {
 }
 
 .transcript-history {
+  position: relative;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -439,6 +440,31 @@ body {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 100%;
+}
+
+.transcript-history__state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  pointer-events: none;
+}
+
+.transcript-history__stateText {
+  display: inline-flex;
+  gap: 0.02em;
+  color: #8f99a3;
+  font-size: 13px;
+  letter-spacing: 0.16em;
+  text-transform: lowercase;
+  text-align: center;
+}
+
+.transcript-history__state--error .transcript-history__stateText {
+  color: #c58f8f;
+  letter-spacing: 0.04em;
+  text-transform: none;
 }
 
 .transcript-history__blockRoot {
