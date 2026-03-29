@@ -607,73 +607,120 @@ body {
 }
 
 .transcript-blockHistory__commandWidgetSurface {
+  color: #ced5dc;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: stretch;
+  gap: 0;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
-  margin: 2px 0;
-  padding: 8px 12px;
-  border-left: 2px solid rgba(244, 247, 250, 0.24);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.02);
+  margin: 0;
+  padding: 5px 0;
+  font-size: 12px;
+  line-height: 1.45;
+  background: transparent;
 }
 
 .transcript-blockHistory__commandWidgetSummary {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  display: block;
   min-width: 0;
+  width: 100%;
   color: #8a939d;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.transcript-blockHistory__commandWidgetSurfaceExpanded .transcript-blockHistory__commandWidgetSummary {
   white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: clip;
   overflow-wrap: anywhere;
 }
 
-.transcript-blockHistory__commandWidgetButton {
-  display: block;
-  width: 100%;
-  min-width: 0;
-  padding: 0;
+.transcript-blockHistory__commandWidgetSurfaceExpanded,
+.transcript-blockHistory__commandWidgetSurfaceWithBody {
+  align-items: flex-start;
+}
+
+.transcript-blockHistory__commandWidgetRail {
+  flex: 0 0 16px;
+  width: 16px;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 0 0 4px;
   border: 0;
+  margin: 0;
   background: transparent;
   color: inherit;
-  font: inherit;
-  text-align: left;
   cursor: pointer;
 }
 
-.transcript-blockHistory__commandWidgetButton:focus-visible {
+.transcript-blockHistory__commandWidgetRailSpacer {
+  flex: 0 0 16px;
+  width: 16px;
+  align-self: stretch;
+}
+
+.transcript-blockHistory__commandWidgetRail:focus-visible {
   outline: 1px solid rgba(122, 182, 235, 0.4);
   outline-offset: 2px;
   border-radius: 4px;
 }
 
-.transcript-blockHistory__commandWidgetToggleGlyph {
-  flex: 0 0 auto;
-  color: #8ea7bc;
-  line-height: 1.2;
+.transcript-blockHistory__commandWidgetRailVisual {
+  width: 2px;
+  align-self: stretch;
+  border-radius: 0;
+  background-color: rgba(244, 247, 250, 0.28);
+  opacity: 0.72;
+  transition:
+    background-color 140ms ease,
+    opacity 140ms ease,
+    width 180ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
-.transcript-blockHistory__commandWidgetSurface.cm-line-workItemRunning {
-  border-left-color: rgba(130, 191, 242, 0.8);
+.transcript-blockHistory__commandWidgetSurfaceToggleable:hover .transcript-blockHistory__commandWidgetRailVisual,
+.transcript-blockHistory__commandWidgetSurfaceExpanded .transcript-blockHistory__commandWidgetRailVisual {
+  opacity: 1;
 }
 
-.transcript-blockHistory__commandWidgetSurface.cm-line-workItemDone {
-  border-left-color: rgba(99, 242, 138, 0.75);
+.transcript-blockHistory__commandWidgetSurfaceToggleable:hover .transcript-blockHistory__commandWidgetRailVisual {
+  background-color: rgba(244, 247, 250, 0.38);
+}
+
+.transcript-blockHistory__commandWidgetRail:hover .transcript-blockHistory__commandWidgetRailVisual {
+  width: 5px;
+  background-color: rgba(244, 247, 250, 0.52);
+}
+
+.transcript-blockHistory__commandWidgetContent {
+  flex: 1 1 auto;
+  min-width: 0;
+  user-select: text;
+  padding: 1px 0;
+}
+
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemRunning .transcript-blockHistory__commandWidgetRailVisual {
+  background-color: rgba(244, 247, 250, 0.4);
 }
 
 .transcript-blockHistory__commandWidgetSurface.cm-line-workItemError {
   color: #f0cbcb;
-  border-left-color: rgba(255, 157, 157, 0.85);
 }
 
 .transcript-blockHistory__commandWidgetSurface.cm-line-workItemDeclined {
   color: #e0d1ae;
-  border-left-color: rgba(240, 195, 106, 0.85);
 }
 
 .transcript-blockHistory__commandWidgetBody,
 .transcript-blockHistory__inlineDiffBody {
-  margin: 0;
+  width: 100%;
+  min-width: 0;
+  margin: 2px 0 0;
   padding: 0;
   color: #7a828b;
   white-space: pre-wrap;
@@ -685,9 +732,11 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
 
 .transcript-blockHistory__inlineDiffFiles {
+  padding-top: 4px;
   color: #a3adb7;
   font-size: 12px;
 }

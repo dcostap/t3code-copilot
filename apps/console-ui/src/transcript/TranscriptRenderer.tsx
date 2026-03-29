@@ -404,6 +404,7 @@ const DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER = false;
 const DEBUG_FLATTEN_TRANSCRIPT_LINE_GEOMETRY = true;
 const DEBUG_BLOCK_HISTORY_SCROLL_DIAGNOSTICS = false;
 const BLOCK_HISTORY_SCROLL_WINDOW_STEP_PX = 480;
+const BLOCK_HISTORY_SCROLL_IDLE_MS = 120;
 const BLOCK_HISTORY_SCROLL_DIAGNOSTIC_LIMIT = 400;
 
 type BlockHistoryScrollDiagnosticKind = "scroll" | "write" | "geometry";
@@ -5020,6 +5021,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(-1);
     const [blockHistoryScrollTop, setBlockHistoryScrollTop] = useState(0);
     const [blockHistoryViewportHeight, setBlockHistoryViewportHeight] = useState(0);
+    const [blockHistoryScrolling, setBlockHistoryScrolling] = useState(false);
     const [attachmentViewerImage, setAttachmentViewerImage] = useState<AttachmentViewerImage | null>(null);
     const [attachmentViewerNaturalSize, setAttachmentViewerNaturalSize] = useState<AttachmentViewerNaturalSize>({
       width: 0,
@@ -5054,6 +5056,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const blockHistoryRef = useRef<HTMLDivElement | null>(null);
     const historyScrollContainerRef = useRef<HTMLDivElement | null>(null);
     const blockHistoryLastMetricsRef = useRef<BlockHistoryScrollMetrics | null>(null);
+    const blockHistoryScrollIdleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const handleBlockHistoryMeasuredHeightApplied = useCallback((
       updates: ReadonlyArray<TranscriptHistoryMeasurementUpdate>,
     ) => {
@@ -5172,6 +5175,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         frameId = requestAnimationFrame(syncFromContainer);
       };
       const handleScroll = () => {
+        setBlockHistoryScrolling((current) => current ? current : true);
+        if (blockHistoryScrollIdleTimeoutRef.current !== null) {
+          clearTimeout(blockHistoryScrollIdleTimeoutRef.current);
+        }
+        blockHistoryScrollIdleTimeoutRef.current = setTimeout(() => {
+          blockHistoryScrollIdleTimeoutRef.current = null;
+          setBlockHistoryScrolling(false);
+        }, BLOCK_HISTORY_SCROLL_IDLE_MS);
         pendingSyncSource = "scroll";
         scheduleSync();
       };
@@ -5196,6 +5207,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         resizeObserver?.disconnect();
         if (frameId !== null) {
           cancelAnimationFrame(frameId);
+        }
+        if (blockHistoryScrollIdleTimeoutRef.current !== null) {
+          clearTimeout(blockHistoryScrollIdleTimeoutRef.current);
+          blockHistoryScrollIdleTimeoutRef.current = null;
         }
       };
     }, [blocks, collapsedFileChangeSignatures, expandedCommandSignatures, resolvedInlineDiffBySignature]);
@@ -6914,6 +6929,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                 onMeasuredHeightApplied={handleBlockHistoryMeasuredHeightApplied}
                 scrollTop={blockHistoryScrollTop}
                 viewportHeight={blockHistoryViewportHeight}
+                scrollContainerRef={historyScrollContainerRef}
+                isScrolling={blockHistoryScrolling}
               />
             </div>
           ) : <div className="transcript-history__editor" ref={editorRef} />}

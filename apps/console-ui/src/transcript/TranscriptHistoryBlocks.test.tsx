@@ -91,7 +91,7 @@ describe("TranscriptHistoryBlocks", () => {
     );
 
     expect(collapsedHtml).toContain("transcript-blockHistory__commandWidgetSurface");
-    expect(collapsedHtml).toContain("transcript-blockHistory__commandWidgetButton");
+    expect(collapsedHtml).toContain("transcript-blockHistory__commandWidgetRail");
     expect(collapsedHtml).toContain("cm-line-workItemDone");
     expect(collapsedHtml).toContain("git status --short");
     expect(collapsedHtml).not.toContain("M src/App.tsx");
@@ -134,6 +134,29 @@ describe("TranscriptHistoryBlocks", () => {
     expect(html).toContain("cm-line-userInputAnsweredOption");
     expect(html).toContain("Source: Which mode should this console stay in?");
     expect(html).toContain("Staging: Connect to the staging service.");
+  });
+
+  it("treats multiline command summaries as expandable", () => {
+    const block: TranscriptBlock = {
+      type: "work-group",
+      title: "Command run",
+      status: "done",
+      startedAt: "2026-03-13T12:00:00.000Z",
+      endedAt: "2026-03-13T12:00:04.400Z",
+      items: [
+        {
+          kind: "command",
+          label: "Command run",
+          status: "done",
+          command: "$ErrorActionPreference='Stop';\nSet-Location 'C:\\Projects\\example';\npython script.py",
+        },
+      ],
+    };
+
+    const html = renderToStaticMarkup(<TranscriptHistoryBlocks blocks={[block]} />);
+
+    expect(html).toContain("transcript-blockHistory__commandWidgetSurfaceToggleable");
+    expect(html).toContain("aria-expanded=\"false\"");
   });
 
   it("renders block-history search highlights with an active match", () => {
@@ -204,6 +227,35 @@ describe("TranscriptHistoryBlocks", () => {
     });
 
     expect(narrowHeight).toBeGreaterThan(wideHeight);
+  });
+
+  it("keeps collapsed multiline command summaries on a stable estimated height", () => {
+    const block: TranscriptBlock = {
+      type: "work-group",
+      title: "Command run",
+      status: "done",
+      startedAt: "2026-03-13T12:00:00.000Z",
+      endedAt: "2026-03-13T12:00:04.400Z",
+      items: [
+        {
+          kind: "command",
+          label: "Command run",
+          status: "done",
+          command: "$ErrorActionPreference='Stop';\nSet-Location 'C:\\Projects\\example';\npython script.py",
+        },
+      ],
+    };
+    const signature = blockToLines(block)[0]?.commandWidgetSignature;
+
+    const collapsedNarrowHeight = estimateTranscriptHistoryBlockHeight(block, { availableWidthPx: 260 });
+    const collapsedWideHeight = estimateTranscriptHistoryBlockHeight(block, { availableWidthPx: 900 });
+    const expandedNarrowHeight = estimateTranscriptHistoryBlockHeight(block, {
+      availableWidthPx: 260,
+      expandedCommandSignatures: new Set(signature ? [signature] : []),
+    });
+
+    expect(collapsedNarrowHeight).toBe(collapsedWideHeight);
+    expect(expandedNarrowHeight).toBeGreaterThan(collapsedNarrowHeight);
   });
 
   it("changes the measurement key when a command widget expands", () => {

@@ -27,6 +27,8 @@ interface TranscriptHistoryBlocksProps {
   readonly onMeasuredHeightApplied?: (updates: ReadonlyArray<TranscriptHistoryMeasurementUpdate>) => void;
   readonly scrollTop?: number;
   readonly viewportHeight?: number;
+  readonly scrollContainerRef?: { readonly current: HTMLDivElement | null };
+  readonly isScrolling?: boolean;
 }
 
 export interface TranscriptHistorySearchMatch {
@@ -82,8 +84,7 @@ const DEFAULT_LINE_HEIGHT_PX = 20;
 const DEFAULT_ESTIMATED_CHARACTER_WIDTH_PX = 7.8;
 const DEFAULT_WIDTH_BUCKET_PX = 32;
 const DEFAULT_BLOCK_GAP_PX = 4;
-const DEFAULT_PREMEASURE_AHEAD_PX = 1200;
-const DEFAULT_PREMEASURE_BLOCK_LIMIT = 6;
+const DEFAULT_PREMEASURE_BLOCK_LIMIT = 12;
 
 interface EstimateTranscriptHistoryBlockHeightInput {
   readonly availableWidthPx?: number;
@@ -97,6 +98,13 @@ function classNames(parts: ReadonlyArray<string | false | null | undefined>) {
 
 function summarizeText(text: string) {
   return `${text.length}:${text.slice(0, 40)}:${text.slice(-20)}`;
+}
+
+function summarizeTextLines(lines: ReadonlyArray<string>) {
+  const firstLine = lines[0] ?? "";
+  const lastLine = lines[lines.length - 1] ?? "";
+  const totalLength = lines.reduce((sum, line) => sum + line.length, 0);
+  return `${lines.length}:${totalLength}:${firstLine.slice(0, 40)}:${lastLine.slice(-20)}`;
 }
 
 function getLineIdentity(line: AnnotatedLine) {
@@ -143,7 +151,7 @@ function getCommandWidgetMeasurementIdentity(
     signature,
     isExpanded ? "expanded" : "collapsed",
     isExpanded && line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0
-      ? `output:${summarizeText(line.commandWidgetOutputLines.join("\n"))}`
+      ? `output:${summarizeTextLines(line.commandWidgetOutputLines)}`
       : "",
     isExpanded && effectiveInlineDiff
       ? `diff:${summarizeText(effectiveInlineDiff)}`
@@ -219,6 +227,10 @@ function isFileChangeWidgetLine(line: AnnotatedLine) {
   );
 }
 
+function hasExpandableCommandSummary(line: AnnotatedLine) {
+  return line.text.includes("\n") || line.text.length > 180;
+}
+
 function isExpandedCommandLine(
   line: AnnotatedLine,
   expandedCommandSignatures: ReadonlySet<string>,
@@ -233,7 +245,10 @@ function isExpandedCommandLine(
 }
 
 function estimateWrappedTextRows(text: string, availableWidthPx: number) {
-  const logicalLines = text.split(/\r?\n/);
+  return estimateWrappedLogicalLineRows(text.split(/\r?\n/), availableWidthPx);
+}
+
+function estimateWrappedLogicalLineRows(logicalLines: ReadonlyArray<string>, availableWidthPx: number) {
   if (availableWidthPx <= 0) {
     return logicalLines.length;
   }
@@ -263,13 +278,17 @@ function estimateRenderedBlockHeight(
       continue;
     }
     if (isCommandWidgetLine(line)) {
-      estimatedLineCount += estimateWrappedTextRows(line.text, commandSurfaceWidthPx);
+      const isExpanded = isExpandedCommandLine(line, expandedCommandSignatures, collapsedFileChangeSignatures);
+      estimatedLineCount +=
+        !isExpanded && hasExpandableCommandSummary(line)
+          ? 1
+          : estimateWrappedTextRows(line.text, commandSurfaceWidthPx);
       estimatedLineCount += 1;
-      if (!isExpandedCommandLine(line, expandedCommandSignatures, collapsedFileChangeSignatures)) {
+      if (!isExpanded) {
         continue;
       }
       if (line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0) {
-        estimatedLineCount += estimateWrappedTextRows(line.commandWidgetOutputLines.join("\n"), commandBodyWidthPx);
+        estimatedLineCount += estimateWrappedLogicalLineRows(line.commandWidgetOutputLines, commandBodyWidthPx);
       }
       if (line.inlineUnifiedDiff) {
         estimatedLineCount += 1;
@@ -491,7 +510,15 @@ function renderAnnotatedLineContent(
     const highlightSpan = sortedHighlightSpans.find((span) => from >= span.from && to <= span.to);
     const searchMatch = sortedSearchMatches.find((match) => from >= match.from && to <= match.to);
     const isAnimated = animatedText !== null && from >= animatedText.from && to <= animatedText.to;
-    const textSegment = line.text.slice(from, to);
+    const previousHighlightSpan = sortedHighlightSpans.find((span) => span.to === from);
+    const nextHighlightSpan = sortedHighlightSpans.find((span) => span.from === to);
+    const textSegment =
+      line.kind === "commandExec"
+      && line.text.slice(from, to) === " "
+      && previousHighlightSpan?.className === "tok-commandWidgetGlyph"
+      && nextHighlightSpan?.className === "tok-commandWidgetPrefix"
+        ? "\u00A0"
+        : line.text.slice(from, to);
     const classes = classNames([
       highlightSpan ? "transcript-blockHistory__token" : "",
       highlightSpan?.className,
@@ -584,8 +611,10 @@ function renderCommandWidgetLine(
   const effectiveInlineDiff =
     line.inlineUnifiedDiff
     ?? (resolvedInlineDiffState?.status === "ready" ? resolvedInlineDiffState.diff : undefined);
+  const hasExpandableSummary = hasExpandableCommandSummary(line);
   const hasHiddenExpansionContent =
-    (line.commandWidgetOutputLines?.length ?? 0) > 0
+    hasExpandableSummary
+    || (line.commandWidgetOutputLines?.length ?? 0) > 0
     || line.inlineUnifiedDiff !== undefined
     || line.inlineDiffLookup !== undefined;
   const inlineDiffStateMessage =
@@ -598,11 +627,6 @@ function renderCommandWidgetLine(
       : undefined;
   const summaryContent = (
     <div className="transcript-blockHistory__commandWidgetSummary">
-      {hasHiddenExpansionContent ? (
-        <span className="transcript-blockHistory__commandWidgetToggleGlyph" aria-hidden="true">
-          {isExpanded ? "▾" : "▸"}
-        </span>
-      ) : null}
       {renderAnnotatedLineContent(line, lineSearchMatches)}
     </div>
   );
@@ -613,42 +637,51 @@ function renderCommandWidgetLine(
         "transcript-blockHistory__commandWidgetSurface",
         `transcript-blockHistory__commandWidgetSurface--${line.kind}`,
         ...(line.extraClasses ?? []),
-        hasHiddenExpansionContent ? "transcript-blockHistory__commandWidgetSurface--toggleable" : "",
+        hasHiddenExpansionContent ? "transcript-blockHistory__commandWidgetSurfaceToggleable" : "",
+        isExpanded ? "transcript-blockHistory__commandWidgetSurfaceExpanded" : "",
+        isExpanded && line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0
+          ? "transcript-blockHistory__commandWidgetSurfaceWithBody"
+          : "",
       ])}
     >
       {hasHiddenExpansionContent ? (
         <button
           type="button"
-          className="transcript-blockHistory__commandWidgetButton"
+          className="transcript-blockHistory__commandWidgetRail"
+          aria-label={isExpanded ? "Collapse details" : "Expand details"}
+          aria-expanded={isExpanded}
           onClick={() => onToggleCommandWidget?.({
             signature,
             isFileChange,
             ...(line.inlineDiffLookup ? { inlineDiffLookup: line.inlineDiffLookup } : {}),
           })}
         >
-          {summaryContent}
+          <span className="transcript-blockHistory__commandWidgetRailVisual" aria-hidden="true" />
         </button>
-      ) : summaryContent}
-      {isExpanded && line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0 ? (
-        <pre className="transcript-blockHistory__commandWidgetBody">
-          {line.commandWidgetOutputLines.join("\n")}
-        </pre>
-      ) : null}
-      {isExpanded && effectiveInlineDiff ? (
-        <div className="transcript-blockHistory__inlineDiff">
-          {line.inlineDiffChangedFiles && line.inlineDiffChangedFiles.length > 0 ? (
-            <div className="transcript-blockHistory__inlineDiffFiles">
-              {line.inlineDiffChangedFiles.join(", ")}
-            </div>
-          ) : null}
-          <pre className="transcript-blockHistory__inlineDiffBody">{effectiveInlineDiff}</pre>
-        </div>
-      ) : null}
-      {inlineDiffStateMessage ? (
-        <div className="transcript-blockHistory__inlineDiffFiles">
-          {inlineDiffStateMessage}
-        </div>
-      ) : null}
+      ) : <span className="transcript-blockHistory__commandWidgetRailSpacer" aria-hidden="true" />}
+      <div className="transcript-blockHistory__commandWidgetContent">
+        {summaryContent}
+        {isExpanded && line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0 ? (
+          <pre className="transcript-blockHistory__commandWidgetBody">
+            {line.commandWidgetOutputLines.join("\n")}
+          </pre>
+        ) : null}
+        {isExpanded && effectiveInlineDiff ? (
+          <div className="transcript-blockHistory__inlineDiff">
+            {line.inlineDiffChangedFiles && line.inlineDiffChangedFiles.length > 0 ? (
+              <div className="transcript-blockHistory__inlineDiffFiles">
+                {line.inlineDiffChangedFiles.join(", ")}
+              </div>
+            ) : null}
+            <pre className="transcript-blockHistory__inlineDiffBody">{effectiveInlineDiff}</pre>
+          </div>
+        ) : null}
+        {inlineDiffStateMessage ? (
+          <div className="transcript-blockHistory__inlineDiffFiles">
+            {inlineDiffStateMessage}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -730,6 +763,8 @@ export function TranscriptHistoryBlocks({
   onMeasuredHeightApplied,
   scrollTop = 0,
   viewportHeight = 0,
+  scrollContainerRef,
+  isScrolling = false,
 }: TranscriptHistoryBlocksProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const renderedBlocks = useMemo(() => {
@@ -772,6 +807,7 @@ export function TranscriptHistoryBlocks({
   const [measuredHeights, setMeasuredHeights] = useState<ReadonlyMap<string, number>>(() => new Map());
   const [availableWidthPx, setAvailableWidthPx] = useState(0);
   const stickyWindowRef = useRef<VirtualWindow | null>(null);
+  const pendingScrollAnchorDeltaRef = useRef(0);
   const blockRefs = useRef(new Map<string, HTMLDivElement>());
   const premeasureRefs = useRef(new Map<string, HTMLDivElement>());
   const setBlockRef = useCallback((key: string, node: HTMLDivElement | null) => {
@@ -858,36 +894,54 @@ export function TranscriptHistoryBlocks({
 
   const applyMeasuredHeightUpdates = useCallback((updates: ReadonlyMap<string, number>) => {
     const measurementUpdates: TranscriptHistoryMeasurementUpdate[] = [];
+    const nextMeasuredHeights = new Map<string, number>();
+    let scrollAnchorDelta = 0;
+    for (const [key, nextHeight] of updates) {
+      const globalIndex = blockIndexByKey.get(key);
+      if (globalIndex === undefined) {
+        continue;
+      }
+      const previousHeight = blockHeights[globalIndex] ?? 0;
+      if (nextHeight <= 0 || previousHeight === nextHeight) {
+        continue;
+      }
+      const blockTop = blockOffsets[globalIndex] ?? 0;
+      const blockBottom = blockTop + previousHeight;
+      if (blockBottom <= scrollTop + 0.5) {
+        if (isScrolling) {
+          continue;
+        }
+        scrollAnchorDelta += nextHeight - previousHeight;
+      }
+      const renderedBlock = renderedBlocks[globalIndex];
+      if (renderedBlock) {
+        measurementUpdates.push({
+          blockIndex: globalIndex,
+          blockType: renderedBlock.block.type,
+          blockKey: renderedBlock.key,
+          measurementKey: renderedBlock.measurementKey,
+          commandWidgetSignatures: renderedBlock.lines
+            .filter(isCommandWidgetLine)
+            .flatMap((line) => line.commandWidgetSignature ? [line.commandWidgetSignature] : []),
+          previousHeight,
+          nextHeight,
+          deltaHeight: nextHeight - previousHeight,
+        });
+      }
+      nextMeasuredHeights.set(key, nextHeight);
+    }
+    if (nextMeasuredHeights.size === 0) {
+      return;
+    }
+    if (Math.abs(scrollAnchorDelta) > 0.5) {
+      pendingScrollAnchorDeltaRef.current += scrollAnchorDelta;
+    }
     setMeasuredHeights((current) => {
       let changed = false;
       const next = new Map(current);
-      for (const [key, nextHeight] of updates) {
-        const globalIndex = blockIndexByKey.get(key);
-        if (globalIndex === undefined) {
+      for (const [key, nextHeight] of nextMeasuredHeights) {
+        if (next.get(key) === nextHeight) {
           continue;
-        }
-        const previousHeight = blockHeights[globalIndex] ?? 0;
-        const blockTop = blockOffsets[globalIndex] ?? 0;
-        if (blockTop + previousHeight <= scrollTop + 0.5) {
-          continue;
-        }
-        if (nextHeight <= 0 || previousHeight === nextHeight) {
-          continue;
-        }
-        const renderedBlock = renderedBlocks[globalIndex];
-        if (renderedBlock) {
-          measurementUpdates.push({
-            blockIndex: globalIndex,
-            blockType: renderedBlock.block.type,
-            blockKey: renderedBlock.key,
-            measurementKey: renderedBlock.measurementKey,
-            commandWidgetSignatures: renderedBlock.lines
-              .filter(isCommandWidgetLine)
-              .flatMap((line) => line.commandWidgetSignature ? [line.commandWidgetSignature] : []),
-            previousHeight,
-            nextHeight,
-            deltaHeight: nextHeight - previousHeight,
-          });
         }
         next.set(key, nextHeight);
         changed = true;
@@ -897,7 +951,20 @@ export function TranscriptHistoryBlocks({
     if (measurementUpdates.length > 0) {
       onMeasuredHeightApplied?.(measurementUpdates);
     }
-  }, [blockHeights, blockIndexByKey, blockOffsets, onMeasuredHeightApplied, renderedBlocks, scrollTop]);
+  }, [blockHeights, blockIndexByKey, blockOffsets, isScrolling, onMeasuredHeightApplied, renderedBlocks, scrollTop]);
+
+  useLayoutEffect(() => {
+    const scrollAnchorDelta = pendingScrollAnchorDeltaRef.current;
+    if (Math.abs(scrollAnchorDelta) <= 0.5) {
+      return;
+    }
+    pendingScrollAnchorDeltaRef.current = 0;
+    const scrollContainer = scrollContainerRef?.current;
+    if (!scrollContainer) {
+      return;
+    }
+    scrollContainer.scrollTop += scrollAnchorDelta;
+  }, [measuredHeights, scrollContainerRef]);
 
   const virtualWindow = useMemo(
     () => {
@@ -958,24 +1025,47 @@ export function TranscriptHistoryBlocks({
     if (viewportHeight <= 0) {
       return [];
     }
-    const nextBlocks: Array<{ readonly renderedBlock: RenderedTranscriptBlock; readonly blockIndex: number }> = [];
+    const viewportTop = scrollTop;
     const viewportBottom = scrollTop + viewportHeight;
-    for (let blockIndex = virtualWindow.endIndex; blockIndex < renderedBlocks.length; blockIndex += 1) {
+    const candidates: Array<{
+      readonly renderedBlock: RenderedTranscriptBlock;
+      readonly blockIndex: number;
+      readonly distanceFromViewport: number;
+    }> = [];
+    renderedBlocks.forEach((renderedBlock, blockIndex) => {
+      if (blockIndex >= virtualWindow.startIndex && blockIndex < virtualWindow.endIndex) {
+        return;
+      }
+      if (measuredHeights.has(renderedBlock.measurementKey)) {
+        return;
+      }
       const blockTop = blockOffsets[blockIndex] ?? 0;
-      if (blockTop >= viewportBottom + DEFAULT_PREMEASURE_AHEAD_PX) {
-        break;
-      }
-      const renderedBlock = renderedBlocks[blockIndex];
-      if (!renderedBlock || measuredHeights.has(renderedBlock.measurementKey)) {
-        continue;
-      }
-      nextBlocks.push({ renderedBlock, blockIndex });
-      if (nextBlocks.length >= DEFAULT_PREMEASURE_BLOCK_LIMIT) {
-        break;
-      }
-    }
-    return nextBlocks;
-  }, [blockOffsets, measuredHeights, renderedBlocks, scrollTop, viewportHeight, virtualWindow.endIndex]);
+      const blockBottom = blockTop + (blockHeights[blockIndex] ?? 0);
+      const distanceFromViewport =
+        blockBottom <= viewportTop
+          ? viewportTop - blockBottom
+          : blockTop >= viewportBottom
+            ? blockTop - viewportBottom
+            : 0;
+      candidates.push({ renderedBlock, blockIndex, distanceFromViewport });
+    });
+    return candidates
+      .toSorted((left, right) =>
+        left.distanceFromViewport === right.distanceFromViewport
+          ? left.blockIndex - right.blockIndex
+          : left.distanceFromViewport - right.distanceFromViewport)
+      .slice(0, DEFAULT_PREMEASURE_BLOCK_LIMIT)
+      .map(({ renderedBlock, blockIndex }) => ({ renderedBlock, blockIndex }));
+  }, [
+    blockHeights,
+    blockOffsets,
+    measuredHeights,
+    renderedBlocks,
+    scrollTop,
+    viewportHeight,
+    virtualWindow.endIndex,
+    virtualWindow.startIndex,
+  ]);
 
   useLayoutEffect(() => {
     if (viewportHeight <= 0) {
