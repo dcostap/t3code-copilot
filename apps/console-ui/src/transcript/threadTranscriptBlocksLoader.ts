@@ -1,7 +1,8 @@
 import type { OrchestrationEvent, OrchestrationThread } from "@t3tools/contracts";
 
-import type { TranscriptBlock } from "./TranscriptBlock";
+import { blockToLines, type AnnotatedLine, type TranscriptBlock } from "./TranscriptBlock";
 import { threadToTranscriptBlocks } from "./orchestrationTranscript";
+import { deriveTranscriptBlockRowDefinitions, type TranscriptBlockRowDefinition } from "./transcriptRows";
 
 export interface ThreadTranscriptBlocksComputationInput {
   readonly thread: OrchestrationThread;
@@ -20,6 +21,8 @@ interface ThreadTranscriptBlocksReadyResponse {
   readonly requestId: number;
   readonly threadId: OrchestrationThread["id"];
   readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly blockLines: ReadonlyArray<ReadonlyArray<AnnotatedLine>>;
+  readonly blockRows: ReadonlyArray<ReadonlyArray<TranscriptBlockRowDefinition>>;
 }
 
 interface ThreadTranscriptBlocksErrorResponse {
@@ -33,16 +36,32 @@ export type ThreadTranscriptBlocksComputationResponse =
   | ThreadTranscriptBlocksReadyResponse
   | ThreadTranscriptBlocksErrorResponse;
 
-export function buildThreadTranscriptBlocks({
+export interface ThreadTranscriptBlocksBuildResult {
+  readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly blockLines: ReadonlyArray<ReadonlyArray<AnnotatedLine>>;
+  readonly blockRows: ReadonlyArray<ReadonlyArray<TranscriptBlockRowDefinition>>;
+}
+
+export function buildThreadTranscriptBlocksResult({
   thread,
   orchestrationEvents,
   attachmentPreviewBaseUrl,
   now,
-}: ThreadTranscriptBlocksComputationInput): ReadonlyArray<TranscriptBlock> {
-  return threadToTranscriptBlocks(thread, {
+}: ThreadTranscriptBlocksComputationInput): ThreadTranscriptBlocksBuildResult {
+  const blocks = threadToTranscriptBlocks(thread, {
     resolveAttachmentPreviewUrl: (attachmentId) =>
       `${attachmentPreviewBaseUrl}/attachments/${encodeURIComponent(attachmentId)}`,
     orchestrationEvents,
     ...(now ? { now } : {}),
   });
+  const blockLines = blocks.map((block) => blockToLines(block));
+  return {
+    blocks,
+    blockLines,
+    blockRows: blockLines.map((lines) => deriveTranscriptBlockRowDefinitions(lines)),
+  };
+}
+
+export function buildThreadTranscriptBlocks(input: ThreadTranscriptBlocksComputationInput): ReadonlyArray<TranscriptBlock> {
+  return buildThreadTranscriptBlocksResult(input).blocks;
 }

@@ -1,5 +1,5 @@
 import {
-  buildThreadTranscriptBlocks,
+  buildThreadTranscriptBlocksResult,
   type ThreadTranscriptBlocksComputationRequest,
   type ThreadTranscriptBlocksComputationResponse,
 } from "./threadTranscriptBlocksLoader";
@@ -21,11 +21,14 @@ workerScope.addEventListener("message", (event) => {
   const request = event.data;
 
   try {
+    const result = buildThreadTranscriptBlocksResult(request);
     postThreadTranscriptBlocksResponse({
       kind: "ready",
       requestId: request.requestId,
       threadId: request.threadId,
-      blocks: buildThreadTranscriptBlocks(request),
+      blocks: result.blocks,
+      blockLines: result.blockLines,
+      blockRows: result.blockRows,
     });
   } catch (error) {
     postThreadTranscriptBlocksResponse({

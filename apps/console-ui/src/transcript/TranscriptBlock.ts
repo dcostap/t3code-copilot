@@ -2,8 +2,8 @@
  * Transcript block model.
  *
  * The transcript is a flat sequence of typed blocks. Each block knows how to
- * serialize itself to plain text (for the CodeMirror document) and carries
- * metadata for line-level decoration.
+ * serialize itself to plain text and carries metadata for line-level
+ * decoration.
  */
 
 import { highlightCodeFence } from "./codeFenceHighlight";

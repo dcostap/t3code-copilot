@@ -81,9 +81,10 @@ import {
   TranscriptRenderer,
   type TranscriptRendererHandle,
 } from "./transcript";
-import type { InlineDiffLookup, TranscriptBlock } from "./transcript/TranscriptBlock";
+import type { AnnotatedLine, InlineDiffLookup, TranscriptBlock } from "./transcript/TranscriptBlock";
+import type { TranscriptBlockRowDefinition } from "./transcript/transcriptRows";
 import {
-  buildThreadTranscriptBlocks,
+  buildThreadTranscriptBlocksResult,
   type ThreadTranscriptBlocksComputationRequest,
   type ThreadTranscriptBlocksComputationResponse,
 } from "./transcript/threadTranscriptBlocksLoader";
@@ -97,7 +98,7 @@ import {
   type ConsoleProjectPane,
 } from "./consoleSessions";
 import { resolveWsHttpOrigin } from "./wsTransport";
-import { recordTranscriptSwitchDiagnostic } from "./transcriptSwitchDiagnostics";
+import { recordSlowTranscriptSwitchDiagnostic, recordTranscriptSwitchDiagnostic } from "./transcriptSwitchDiagnostics";
 
 const DRAFT_STORAGE_KEY = "t3code:console-pane-drafts:v1";
 const ARCHIVED_PROJECT_IDS_STORAGE_KEY = "t3code:archived-project-ids:v1";
@@ -119,6 +120,8 @@ const PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL = "gpt-5.4" as const;
 const HIGH_PRIORITY_COMMAND = 100;
 const CURATED_REASONING_EFFORTS = ["high", "medium"] as const satisfies ReadonlyArray<CodexReasoningEffort>;
 const EMPTY_TRANSCRIPT_BLOCKS: ReadonlyArray<TranscriptBlock> = [];
+const EMPTY_TRANSCRIPT_BLOCK_LINES: ReadonlyArray<ReadonlyArray<AnnotatedLine>> = [];
+const EMPTY_TRANSCRIPT_BLOCK_ROWS: ReadonlyArray<ReadonlyArray<TranscriptBlockRowDefinition>> = [];
 interface ManualModelCommandDefinition {
   readonly slug: string;
   readonly label: string;
@@ -306,6 +309,8 @@ interface PaneView {
   readonly pendingThread: PendingConsoleThread | null;
   readonly setup: ConsolePaneSetup | null;
   readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly blockLines: ReadonlyArray<ReadonlyArray<AnnotatedLine>>;
+  readonly blockRows: ReadonlyArray<ReadonlyArray<TranscriptBlockRowDefinition>>;
   readonly historyState: "ready" | "loading" | "error";
   readonly historyStateMessage: string | null;
   readonly attachments: ReadonlyArray<ComposerImageAttachment>;
@@ -413,6 +418,8 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
     <TranscriptRenderer
       ref={handleTranscriptRef}
       blocks={paneView.blocks}
+      precomputedBlockLines={paneView.blockLines}
+      precomputedBlockRows={paneView.blockRows}
       historyCacheKey={paneView.threadId ?? paneView.pane.id}
       historyState={paneView.historyState}
       {...(paneView.historyStateMessage ? { historyStateMessage: paneView.historyStateMessage } : {})}
@@ -466,6 +473,8 @@ interface TranscriptBlocksCacheEntry extends TranscriptBlocksCacheEntryInput {
   readonly status: "loading" | "ready" | "error";
   readonly requestId: number;
   readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly blockLines: ReadonlyArray<ReadonlyArray<AnnotatedLine>>;
+  readonly blockRows: ReadonlyArray<ReadonlyArray<TranscriptBlockRowDefinition>>;
   readonly error?: string;
 }
 
@@ -502,7 +511,6 @@ export function isTranscriptBlocksCacheEntryCurrent(
     && entry.session === input.session
     && entry.updatedAt === input.updatedAt
     && entry.events === input.events
-    && entry.effectiveNow === input.effectiveNow,
   );
 }
 
@@ -2164,6 +2172,8 @@ export function App() {
           ...cachedWithoutError,
           status: "ready",
           blocks: result.blocks,
+          blockLines: result.blockLines,
+          blockRows: result.blockRows,
         });
       } else {
         transcriptBlocksCacheRef.current.set(result.threadId, {
@@ -2210,6 +2220,8 @@ export function App() {
         status: "loading",
         requestId,
         blocks: cached?.blocks ?? EMPTY_TRANSCRIPT_BLOCKS,
+        blockLines: cached?.blockLines ?? EMPTY_TRANSCRIPT_BLOCK_LINES,
+        blockRows: cached?.blockRows ?? EMPTY_TRANSCRIPT_BLOCK_ROWS,
       });
 
       const payload: ThreadTranscriptBlocksComputationRequest = {
@@ -2236,12 +2248,14 @@ export function App() {
           return;
         }
         try {
-          const blocks = buildThreadTranscriptBlocks(payload);
+          const { blocks, blockLines, blockRows } = buildThreadTranscriptBlocksResult(payload);
           const { error: _error, ...latestEntryWithoutError } = latestEntry;
           transcriptBlocksCacheRef.current.set(request.thread.id, {
             ...latestEntryWithoutError,
             status: "ready",
             blocks,
+            blockLines,
+            blockRows,
           });
         } catch (error) {
           transcriptBlocksCacheRef.current.set(request.thread.id, {
@@ -2264,13 +2278,14 @@ export function App() {
   }, []);
 
   const paneViews = useMemo<ReadonlyArray<PaneView>>(() => {
+    const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
     void transcriptBlocksRevision;
     const activeProject = workspace.activeProject;
     if (!activeProject || !activeLayout || !activeTab) {
       return [];
     }
 
-    return activeTab.paneIds
+    const nextPaneViews = activeTab.paneIds
       .flatMap((paneId) => {
         const pane = activeLayout.panesById[paneId];
         if (!pane) {
@@ -2316,10 +2331,40 @@ export function App() {
           : null;
         const cachedBlocks = thread ? (transcriptBlocksCacheRef.current.get(thread.id) ?? null) : null;
         let blocks = EMPTY_TRANSCRIPT_BLOCKS;
+        let blockLines = EMPTY_TRANSCRIPT_BLOCK_LINES;
+        let blockRows = EMPTY_TRANSCRIPT_BLOCK_ROWS;
         let historyState: PaneView["historyState"] = "ready";
         let historyStateMessage: string | null = null;
 
         if (thread && transcriptBlocksInput) {
+          const buildVisibleThreadBlocksSynchronously = () => {
+            const syncBuildStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+            const computed = buildThreadTranscriptBlocksResult({
+              thread,
+              orchestrationEvents: transcriptBlocksInput.events,
+              attachmentPreviewBaseUrl,
+              ...(effectiveNow ? { now: effectiveNow } : {}),
+            });
+            blocks = computed.blocks;
+            blockLines = computed.blockLines;
+            blockRows = computed.blockRows;
+            transcriptBlocksCacheRef.current.set(thread.id, {
+              ...transcriptBlocksInput,
+              status: "ready",
+              requestId: cachedBlocks?.requestId ?? 0,
+              blocks,
+              blockLines,
+              blockRows,
+            });
+            recordSlowTranscriptSwitchDiagnostic({
+              label: "sync-build-visible-thread-blocks",
+              threadId: thread.id,
+              paneId: pane.id,
+              historyCacheKey: thread.id,
+              blockCount: computed.blocks.length,
+            }, syncBuildStartedAt, 12);
+          };
+
           if (
             effectiveNow !== undefined
             && cachedBlocks
@@ -2327,21 +2372,14 @@ export function App() {
             && cachedBlocks.status === "ready"
           ) {
             blocks = cachedBlocks.blocks;
+            blockLines = cachedBlocks.blockLines;
+            blockRows = cachedBlocks.blockRows;
           } else if (effectiveNow !== undefined) {
-            blocks = buildThreadTranscriptBlocks({
-              thread,
-              orchestrationEvents: transcriptBlocksInput.events,
-              attachmentPreviewBaseUrl,
-              now: effectiveNow,
-            });
-            transcriptBlocksCacheRef.current.set(thread.id, {
-              ...transcriptBlocksInput,
-              status: "ready",
-              requestId: cachedBlocks?.requestId ?? 0,
-              blocks,
-            });
+            buildVisibleThreadBlocksSynchronously();
           } else if (cachedBlocks && isTranscriptBlocksCacheEntryCurrent(cachedBlocks, transcriptBlocksInput)) {
             blocks = cachedBlocks.blocks;
+            blockLines = cachedBlocks.blockLines;
+            blockRows = cachedBlocks.blockRows;
             if (cachedBlocks.status === "error" && cachedBlocks.blocks.length === 0) {
               historyState = "error";
               historyStateMessage = cachedBlocks.error ?? "Failed to load thread history.";
@@ -2351,6 +2389,8 @@ export function App() {
             }
           } else if (cachedBlocks?.blocks.length) {
             blocks = cachedBlocks.blocks;
+            blockLines = cachedBlocks.blockLines;
+            blockRows = cachedBlocks.blockRows;
           } else {
             historyState = "loading";
             historyStateMessage = "loading thread history";
@@ -2376,8 +2416,10 @@ export function App() {
                 },
               ]
             : blocks,
+          blockLines,
           historyState,
           historyStateMessage,
+          blockRows,
           attachments: composerAttachmentsByPaneId[pane.id] ?? [],
           pendingPromptSendStartedAt,
           pendingUserInput,
@@ -2393,6 +2435,11 @@ export function App() {
           modelOptions,
         } satisfies PaneView];
       });
+    recordSlowTranscriptSwitchDiagnostic({
+      label: "pane-views-built",
+      paneId: activeTab.activePaneId,
+    }, startedAt, 12);
+    return nextPaneViews;
   }, [
     activeLayout,
     activeTab,

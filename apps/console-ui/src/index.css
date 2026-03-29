@@ -502,7 +502,7 @@ body {
 }
 
 .transcript-blockHistory__virtualBlock--messageTurnSeparator::before,
-.transcript-blockHistory__measurementProbe--messageTurnSeparator::before {
+.transcript-blockHistory__staticBlock--messageTurnSeparator::before {
   content: "";
   position: absolute;
   left: 0;
@@ -518,22 +518,13 @@ body {
   box-sizing: border-box;
 }
 
-.transcript-blockHistory__measurementLane {
-  position: absolute;
-  inset: 0;
-  height: 0;
-  overflow: hidden;
-  visibility: hidden;
-  pointer-events: none;
-}
-
-.transcript-blockHistory__measurementProbe {
+.transcript-blockHistory__staticBlock {
   position: relative;
   width: 100%;
   min-width: 0;
 }
 
-.transcript-blockHistory__measurementProbe[data-has-leading-gap="true"] {
+.transcript-blockHistory__staticBlock[data-has-leading-gap="true"] {
   padding-top: 4px;
   box-sizing: border-box;
 }
@@ -1018,6 +1009,35 @@ body {
 
 .transcript-blockHistory__token.tok-removed {
   color: #ff7575;
+}
+
+.transcript-blockHistory__token.tok-keyword,
+.transcript-blockHistory__token.tok-operator {
+  color: #f97583;
+}
+
+.transcript-blockHistory__token.tok-variableName,
+.transcript-blockHistory__token.tok-number {
+  color: #79b8ff;
+}
+
+.transcript-blockHistory__token.tok-propertyName,
+.transcript-blockHistory__token.tok-attributeName,
+.transcript-blockHistory__token.tok-typeName {
+  color: #b392f0;
+}
+
+.transcript-blockHistory__token.tok-string {
+  color: #9ecbff;
+}
+
+.transcript-blockHistory__token.tok-comment {
+  color: #6a737d;
+  font-style: italic;
+}
+
+.transcript-blockHistory__token.tok-tagName {
+  color: #85e89d;
 }
 
 .transcript-blockHistory__attachmentSummary {

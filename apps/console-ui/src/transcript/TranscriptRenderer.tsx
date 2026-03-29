@@ -16,158 +16,22 @@ import {
   type SyntheticEvent as ReactSyntheticEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
-import { defaultKeymap } from "@codemirror/commands";
-import {
-  Annotation,
-  Compartment,
-  EditorSelection,
-  EditorState,
-  StateEffect,
-  StateField,
-  Text,
-} from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, WidgetType, keymap } from "@codemirror/view";
 
-import { AnimatedLoadingText, createAnimatedLoadingTextElement } from "../AnimatedLoadingText";
+import { AnimatedLoadingText } from "../AnimatedLoadingText";
 import type { ComposerImageAttachment } from "../composerAttachments";
-import { measureTranscriptSwitchDiagnostic } from "../transcriptSwitchDiagnostics";
+import { recordSlowTranscriptSwitchDiagnostic } from "../transcriptSwitchDiagnostics";
 import {
   blockToLines,
   type AnnotatedLine,
   type InlineDiffLookup,
-  type LineKind,
-  type MarkdownTableData,
   type TranscriptBlock,
-  type TranscriptImageAttachment,
 } from "./TranscriptBlock";
-import {
-  countInlineDiffRows,
-  getInlineDiffRowCopyText,
-  getInlineDiffRowMarker,
-  normalizeInlineDiffRowText,
-  parseInlineDiffFiles,
-  type InlineDiffFileData,
-} from "./inlineDiff";
-import {
-  layoutMarkdownTable,
-  resolveMarkdownTableDisplayWidth,
-  type MarkdownTableDisplayCell,
-} from "./markdownTable";
-import {
-  findTranscriptHistoryBlockSearchMatches,
-  TranscriptHistoryBlocks,
-  type TranscriptHistoryMeasurementUpdate,
-} from "./TranscriptHistoryBlocks";
+import type { TranscriptBlockRowDefinition } from "./transcriptRows";
+import { normalizeInlineDiffRowText, parseInlineDiffFiles } from "./inlineDiff";
+import { layoutMarkdownTable } from "./markdownTable";
+import { findTranscriptHistoryBlockSearchMatches, TranscriptHistoryBlocks } from "./TranscriptHistoryBlocks";
 
 export { layoutMarkdownTable, normalizeInlineDiffRowText, parseInlineDiffFiles };
-
-interface PositionedLine {
-  readonly from: number;
-  readonly to: number;
-  readonly kind: LineKind;
-  readonly extraClasses?: ReadonlyArray<string>;
-  readonly commandWidgetSignature?: string;
-}
-
-interface PositionedMark {
-  readonly from: number;
-  readonly to: number;
-  readonly className: string;
-  readonly link?: {
-    readonly kind: "url" | "file";
-    readonly target: string;
-  };
-}
-
-interface TranscriptDocumentModel {
-  readonly text: string;
-  readonly historyLineCount: number;
-  readonly lines: ReadonlyArray<PositionedLine>;
-  readonly marks: ReadonlyArray<PositionedMark>;
-  readonly widgets: ReadonlyArray<PositionedWidget>;
-  readonly replacements: ReadonlyArray<PositionedReplacement>;
-  readonly fileChangeWidgetSignatures: ReadonlySet<string>;
-  readonly inlineDiffLookupsBySignature: ReadonlyMap<string, InlineDiffLookup>;
-  readonly inlineDiffContentBySignature: ReadonlyMap<string, string>;
-  readonly defaultExpandedInlineDiffSignatures: ReadonlyMap<string, InlineDiffLookup>;
-  readonly separatorStart: number;
-  readonly promptStart: number;
-}
-
-interface FlattenedBlockWidgetEntry {
-  readonly lineOffset: number;
-  readonly widget: WidgetType;
-  readonly side: -1 | 1;
-  readonly signature: string;
-}
-
-interface FlattenedBlockSegment {
-  readonly blockSignature: string;
-  readonly block: TranscriptBlock;
-  readonly lines: ReadonlyArray<AnnotatedLine>;
-  readonly widgetEntries: ReadonlyArray<FlattenedBlockWidgetEntry>;
-}
-
-interface FlattenedBlocksBuild {
-  readonly highlightSignature: string;
-  readonly segments: ReadonlyArray<FlattenedBlockSegment>;
-  readonly lines: ReadonlyArray<AnnotatedLine>;
-  readonly widgetsByLineIndex: ReadonlyMap<
-    number,
-    { widget: WidgetType; side: -1 | 1; signature: string }
-  >;
-  readonly firstChangedLineIndex: number;
-}
-
-interface TranscriptDocumentBuildState {
-  readonly docModel: TranscriptDocumentModel;
-  readonly flattened: FlattenedBlocksBuild;
-  readonly inputs: AppliedDecorationInputs;
-}
-
-interface CachedTranscriptRenderState {
-  readonly blocks: ReadonlyArray<TranscriptBlock>;
-  readonly docBuild: { docModel: TranscriptDocumentModel; flattened: FlattenedBlocksBuild };
-  readonly inputs: AppliedDecorationInputs;
-  readonly decorationState: BuiltDecorationState;
-  readonly decorationSignature: string;
-}
-
-interface PositionedWidget {
-  readonly position: number;
-  readonly side: -1 | 1;
-  readonly widget: WidgetType;
-  readonly signature: string;
-}
-
-interface PositionedReplacement {
-  readonly from: number;
-  readonly to: number;
-  readonly widget: WidgetType;
-  readonly signature: string;
-}
-
-type UserMessageCopyLine = Pick<PositionedLine, "from" | "extraClasses">;
-
-interface CodeBlockWidgetLineData {
-  readonly text: string;
-  readonly highlightSpans?: ReadonlyArray<{
-    readonly from: number;
-    readonly to: number;
-    readonly className: string;
-  }>;
-}
-
-interface InlineTextHighlightSpan {
-  readonly from: number;
-  readonly to: number;
-  readonly className: string;
-}
-
-interface StoredSelection {
-  readonly anchor: number;
-  readonly head: number;
-}
 
 interface StoredPromptSelection {
   readonly anchorOffset: number;
@@ -232,6 +96,8 @@ interface PromptTextareaLayoutMetrics {
 
 interface TranscriptRendererProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly precomputedBlockLines?: ReadonlyArray<ReadonlyArray<AnnotatedLine>>;
+  readonly precomputedBlockRows?: ReadonlyArray<ReadonlyArray<TranscriptBlockRowDefinition>>;
   readonly historyCacheKey?: string | null;
   readonly historyState?: "ready" | "loading" | "error";
   readonly historyStateMessage?: string;
@@ -260,47 +126,6 @@ interface TranscriptRendererProps {
 interface InlineDiffResolutionState {
   readonly status: "loading" | "ready" | "error";
   readonly diff?: string;
-}
-
-interface CommandWidgetLineContent {
-  readonly signature: string;
-  readonly glyph: string;
-  readonly prefix: string;
-  readonly command: string;
-  readonly commandRange?: {
-    readonly from: number;
-    readonly to: number;
-  };
-  readonly timingLabel?: string;
-  readonly counts?: {
-    additions: string;
-    deletions: string;
-  };
-  readonly inlineDiffFiles?: ReadonlyArray<InlineDiffFileData>;
-  readonly rawInlineDiff?: string;
-  readonly inlineDiffStateMessage?: string;
-  readonly inlineDiffStateClass?: string;
-  readonly outputLines?: ReadonlyArray<string>;
-  readonly expanded: boolean;
-  readonly hasHiddenExpansionContent: boolean;
-  readonly isFileChange: boolean;
-  readonly isRunning: boolean;
-  readonly statusClass?: string;
-}
-
-interface ParsedCommandWidgetText {
-  readonly glyph: string;
-  readonly prefix: string;
-  readonly command: string;
-  readonly commandRange?: {
-    readonly from: number;
-    readonly to: number;
-  };
-  readonly timingLabel?: string;
-  readonly counts?: {
-    readonly additions: string;
-    readonly deletions: string;
-  };
 }
 
 export type TranscriptRegion = "prompt" | "history";
@@ -341,6 +166,12 @@ type NativeSelectionLike =
 interface TranscriptSearchMatch {
   readonly from: number;
   readonly to: number;
+}
+
+interface ScrollPositionSnapshot {
+  readonly element: HTMLElement;
+  readonly scrollTop: number;
+  readonly scrollLeft: number;
 }
 
 function resolveSelectionContainerNode(node: unknown): Node | null {
@@ -384,173 +215,6 @@ export function hasNonCollapsedSelectionInsideElement(
   return false;
 }
 
-const CURSOR_VIEWPORT_PADDING_LINES = 7;
-const DEBUG_ENABLE_COMMAND_WIDGETS = true;
-const DEBUG_ENABLE_COMMAND_WIDGET_EXPANSION_CONTENT = true;
-const DEBUG_ENABLE_CODE_BLOCK_WIDGETS = true;
-const DEBUG_ENABLE_MARKDOWN_TABLE_WIDGETS = true;
-const DEBUG_ENABLE_LINE_WIDGETS = true;
-const DEBUG_ENABLE_LOADING_REPLACEMENTS = true;
-const DEBUG_USE_BLOCK_HISTORY = true;
-const DEBUG_DISABLE_TRANSCRIPT_LINE_WRAPPING = false;
-const DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER = false;
-const DEBUG_FLATTEN_TRANSCRIPT_LINE_GEOMETRY = true;
-const DEBUG_BLOCK_HISTORY_SCROLL_DIAGNOSTICS = false;
-const BLOCK_HISTORY_SCROLL_WINDOW_STEP_PX = 480;
-const BLOCK_HISTORY_SCROLL_IDLE_MS = 120;
-const BLOCK_HISTORY_SCROLL_DIAGNOSTIC_LIMIT = 400;
-
-type BlockHistoryScrollDiagnosticKind = "scroll" | "write" | "geometry";
-
-interface BlockHistoryScrollDiagnosticEntry {
-  readonly index: number;
-  readonly timeMs: number;
-  readonly kind: BlockHistoryScrollDiagnosticKind;
-  readonly source: string;
-  readonly scrollTop: number;
-  readonly scrollHeight: number;
-  readonly clientHeight: number;
-  readonly offsetFromBottom: number;
-  readonly scrolling: boolean;
-  readonly deltaTop?: number;
-  readonly deltaHeight?: number;
-  readonly blockIndex?: number;
-  readonly blockType?: string;
-  readonly blockKey?: string;
-  readonly measurementKey?: string;
-  readonly commandWidgetSignatures?: string;
-  readonly previousHeight?: number;
-  readonly nextHeight?: number;
-}
-
-interface BlockHistoryScrollDiagnosticStore {
-  entries: BlockHistoryScrollDiagnosticEntry[];
-  clear(): void;
-  print(limit?: number): void;
-}
-
-interface BlockHistoryScrollMetrics {
-  readonly scrollTop: number;
-  readonly scrollHeight: number;
-  readonly clientHeight: number;
-  readonly offsetFromBottom: number;
-}
-
-function readBlockHistoryScrollMetrics(scrollContainer: HTMLElement): BlockHistoryScrollMetrics {
-  return {
-    scrollTop: scrollContainer.scrollTop,
-    scrollHeight: scrollContainer.scrollHeight,
-    clientHeight: scrollContainer.clientHeight,
-    offsetFromBottom: Math.max(0, scrollContainer.scrollHeight - (scrollContainer.scrollTop + scrollContainer.clientHeight)),
-  };
-}
-
-function getBlockHistoryScrollDiagnosticStore() {
-  if (!DEBUG_BLOCK_HISTORY_SCROLL_DIAGNOSTICS || typeof window === "undefined") {
-    return null;
-  }
-
-  const diagnosticsWindow = window as Window & {
-    __blockHistoryScrollDiagnostics?: BlockHistoryScrollDiagnosticStore;
-  };
-  if (!diagnosticsWindow.__blockHistoryScrollDiagnostics) {
-    diagnosticsWindow.__blockHistoryScrollDiagnostics = {
-      entries: [],
-      clear() {
-        this.entries = [];
-      },
-      print(limit = 80) {
-        console.table(this.entries.slice(-Math.max(1, limit)));
-      },
-    };
-  }
-  return diagnosticsWindow.__blockHistoryScrollDiagnostics;
-}
-
-function recordBlockHistoryScrollDiagnostic(
-  kind: BlockHistoryScrollDiagnosticKind,
-  source: string,
-  metrics: BlockHistoryScrollMetrics,
-  scrolling: boolean,
-  extras: {
-    readonly deltaTop?: number;
-    readonly deltaHeight?: number;
-    readonly blockIndex?: number;
-    readonly blockType?: string;
-    readonly blockKey?: string;
-    readonly measurementKey?: string;
-    readonly commandWidgetSignatures?: string;
-    readonly previousHeight?: number;
-    readonly nextHeight?: number;
-  } = {},
-) {
-  const store = getBlockHistoryScrollDiagnosticStore();
-  if (!store) {
-    return;
-  }
-
-  const entry: BlockHistoryScrollDiagnosticEntry = {
-    index: store.entries.length,
-    timeMs: Math.round(performance.now()),
-    kind,
-    source,
-    scrollTop: metrics.scrollTop,
-    scrollHeight: metrics.scrollHeight,
-    clientHeight: metrics.clientHeight,
-    offsetFromBottom: metrics.offsetFromBottom,
-    scrolling,
-    ...(extras.deltaTop !== undefined ? { deltaTop: extras.deltaTop } : {}),
-    ...(extras.deltaHeight !== undefined ? { deltaHeight: extras.deltaHeight } : {}),
-    ...(extras.blockIndex !== undefined ? { blockIndex: extras.blockIndex } : {}),
-    ...(extras.blockType !== undefined ? { blockType: extras.blockType } : {}),
-    ...(extras.blockKey !== undefined ? { blockKey: extras.blockKey } : {}),
-    ...(extras.measurementKey !== undefined ? { measurementKey: extras.measurementKey } : {}),
-    ...(extras.commandWidgetSignatures !== undefined ? { commandWidgetSignatures: extras.commandWidgetSignatures } : {}),
-    ...(extras.previousHeight !== undefined ? { previousHeight: extras.previousHeight } : {}),
-    ...(extras.nextHeight !== undefined ? { nextHeight: extras.nextHeight } : {}),
-  };
-  store.entries.push(entry);
-  if (store.entries.length > BLOCK_HISTORY_SCROLL_DIAGNOSTIC_LIMIT) {
-    store.entries.splice(0, store.entries.length - BLOCK_HISTORY_SCROLL_DIAGNOSTIC_LIMIT);
-  }
-  if (kind !== "scroll") {
-    console.debug("[block-history-scroll]", entry);
-  }
-}
-
-const syncAnnotation = Annotation.define<boolean>();
-const setPromptStartEffect = StateEffect.define<number>();
-const decorationsCompartment = new Compartment();
-const setSearchDecorationsEffect = StateEffect.define<DecorationSet>();
-const commandWidgetResizeObservers = new WeakMap<HTMLElement, ResizeObserver>();
-const SEARCH_MATCH_VIEWPORT_PADDING_PX = 36;
-
-const promptStartField = StateField.define<number>({
-  create: () => 0,
-  update(value, transaction) {
-    for (const effect of transaction.effects) {
-      if (effect.is(setPromptStartEffect)) {
-        return effect.value;
-      }
-    }
-
-    return transaction.changes.mapPos(value, -1);
-  },
-});
-
-const searchDecorationsField = StateField.define<DecorationSet>({
-  create: () => Decoration.none,
-  update(value, transaction) {
-    for (const effect of transaction.effects) {
-      if (effect.is(setSearchDecorationsEffect)) {
-        return effect.value;
-      }
-    }
-    return transaction.docChanged ? value.map(transaction.changes) : value;
-  },
-  provide: (field) => EditorView.decorations.from(field),
-});
-
 function formatAttachmentSize(sizeBytes: number) {
   if (sizeBytes >= 1024 * 1024) {
     return `${(sizeBytes / (1024 * 1024)).toFixed(sizeBytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
@@ -559,772 +223,6 @@ function formatAttachmentSize(sizeBytes: number) {
     return `${Math.round(sizeBytes / 1024)} KB`;
   }
   return `${sizeBytes} B`;
-}
-
-function applyAttachmentPreviewDataset(
-  element: HTMLElement,
-  attachment: Pick<TranscriptImageAttachment, "name" | "previewUrl">,
-) {
-  if (!attachment.previewUrl) {
-    return;
-  }
-  element.dataset.attachmentViewerName = attachment.name;
-  element.dataset.attachmentViewerSrc = attachment.previewUrl;
-}
-
-function createAttachmentTileDom(
-  attachment: TranscriptImageAttachment,
-  variant: "history" | "composer",
-  options: {
-    onRemoveImage?(attachmentId: string): void;
-  } = {},
-) {
-  const tile = document.createElement("div");
-  tile.className = "attachment-tile";
-  tile.title = `${attachment.name} (${formatAttachmentSize(attachment.sizeBytes)})`;
-
-  const media =
-    attachment.previewUrl
-      ? document.createElement("button")
-      : document.createElement("div");
-  media.className = "attachment-tile__media";
-  if (media instanceof HTMLButtonElement) {
-    media.type = "button";
-    media.setAttribute("aria-label", `Open ${attachment.name}`);
-    applyAttachmentPreviewDataset(media, attachment);
-  }
-
-  if (attachment.previewUrl) {
-    const image = document.createElement("img");
-    image.className = "attachment-tile__image";
-    image.alt = attachment.name;
-    image.loading = "lazy";
-    image.src = attachment.previewUrl;
-    media.append(image);
-  }
-
-  const meta = document.createElement("div");
-  meta.className = "attachment-tile__meta";
-
-  const name = document.createElement("div");
-  name.className = "attachment-tile__name";
-  name.textContent = attachment.name;
-
-  const detail = document.createElement("div");
-  detail.className = "attachment-tile__detail";
-  detail.textContent = formatAttachmentSize(attachment.sizeBytes);
-
-  meta.append(name, detail);
-  tile.append(media, meta);
-
-  if (variant === "composer" && options.onRemoveImage) {
-    const removeButton = document.createElement("button");
-    removeButton.type = "button";
-    removeButton.className = "attachment-tile__remove";
-    removeButton.textContent = "×";
-    removeButton.setAttribute("aria-label", `Remove ${attachment.name}`);
-    removeButton.addEventListener("click", () => {
-      options.onRemoveImage?.(attachment.id);
-    });
-    tile.append(removeButton);
-  }
-
-  return tile;
-}
-
-function createAttachmentPanelDom(
-  attachments: ReadonlyArray<TranscriptImageAttachment>,
-  variant: "history" | "composer",
-) {
-  const panel = document.createElement("div");
-  panel.className = `attachment-panel attachment-panel--${variant}`;
-  for (const attachment of attachments) {
-    panel.append(createAttachmentTileDom(attachment, variant));
-  }
-  return panel;
-}
-
-function buildAttachmentPanelSignature(
-  attachments: ReadonlyArray<TranscriptImageAttachment>,
-) {
-  return attachments
-    .map((attachment) =>
-      `${attachment.id}:${attachment.name}:${attachment.mimeType}:${attachment.sizeBytes}:${attachment.previewUrl ?? ""}`)
-    .join("|");
-}
-
-class ImageAttachmentPanelWidget extends WidgetType {
-  constructor(private readonly attachments: ReadonlyArray<TranscriptImageAttachment>) {
-    super();
-  }
-
-  override eq(other: ImageAttachmentPanelWidget) {
-    if (this.attachments.length !== other.attachments.length) {
-      return false;
-    }
-    return this.attachments.every((attachment, index) => {
-      const nextAttachment = other.attachments[index];
-      if (!nextAttachment) {
-        return false;
-      }
-      return attachment.id === nextAttachment.id
-        && attachment.name === nextAttachment.name
-        && attachment.mimeType === nextAttachment.mimeType
-        && attachment.sizeBytes === nextAttachment.sizeBytes
-        && attachment.previewUrl === nextAttachment.previewUrl;
-    });
-  }
-
-  override toDOM(view: EditorView) {
-    return createAttachmentPanelDom(this.attachments, "history");
-  }
-}
-
-function resolveAttachmentViewerFitScale(
-  naturalSize: AttachmentViewerNaturalSize,
-  viewportWidth: number,
-  viewportHeight: number,
-) {
-  if (naturalSize.width <= 0 || naturalSize.height <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
-    return 1;
-  }
-  const availableWidth = Math.max(1, viewportWidth - 96);
-  const availableHeight = Math.max(1, viewportHeight - 96);
-  return Math.min(1, availableWidth / naturalSize.width, availableHeight / naturalSize.height);
-}
-
-function resolveAttachmentViewerPanLimits(
-  scale: number,
-  naturalSize: AttachmentViewerNaturalSize,
-  viewportWidth: number,
-  viewportHeight: number,
-) {
-  const availableWidth = Math.max(1, viewportWidth - 96);
-  const availableHeight = Math.max(1, viewportHeight - 96);
-  const scaledWidth = naturalSize.width * scale;
-  const scaledHeight = naturalSize.height * scale;
-  return {
-    maxX: Math.max(0, (scaledWidth - availableWidth) / 2),
-    maxY: Math.max(0, (scaledHeight - availableHeight) / 2),
-  };
-}
-
-function canPanAttachmentViewer(
-  scale: number,
-  naturalSize: AttachmentViewerNaturalSize,
-  viewportWidth: number,
-  viewportHeight: number,
-) {
-  if (naturalSize.width <= 0 || naturalSize.height <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
-    return false;
-  }
-  const { maxX, maxY } = resolveAttachmentViewerPanLimits(scale, naturalSize, viewportWidth, viewportHeight);
-  return maxX > 0 || maxY > 0;
-}
-
-function clampAttachmentViewerPan(
-  pan: AttachmentViewerPan,
-  scale: number,
-  naturalSize: AttachmentViewerNaturalSize,
-  viewportWidth: number,
-  viewportHeight: number,
-) {
-  if (naturalSize.width <= 0 || naturalSize.height <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
-    return pan;
-  }
-
-  const { maxX, maxY } = resolveAttachmentViewerPanLimits(
-    scale,
-    naturalSize,
-    viewportWidth,
-    viewportHeight,
-  );
-
-  return {
-    x: Math.min(maxX, Math.max(-maxX, pan.x)),
-    y: Math.min(maxY, Math.max(-maxY, pan.y)),
-  };
-}
-
-async function copyTextToClipboard(text: string) {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  textarea.style.pointerEvents = "none";
-  document.body.append(textarea);
-  textarea.select();
-  const copied = document.execCommand("copy");
-  textarea.remove();
-  if (!copied) {
-    throw new Error("Clipboard copy failed");
-  }
-}
-
-function renderCodeBlockLine(
-  line: CodeBlockWidgetLineData,
-) {
-  const lineElement = document.createElement("span");
-  lineElement.className = "cm-codeBlockLine";
-
-  if (!line.highlightSpans || line.highlightSpans.length === 0) {
-    if (line.text.length > 0) {
-      lineElement.textContent = line.text;
-    }
-    return lineElement;
-  }
-
-  const orderedSpans = line.highlightSpans.toSorted((left, right) => left.from - right.from);
-  let cursor = 0;
-
-  for (const span of orderedSpans) {
-    const from = Math.max(0, Math.min(line.text.length, span.from));
-    const to = Math.max(from, Math.min(line.text.length, span.to));
-    if (from > cursor) {
-      lineElement.append(document.createTextNode(line.text.slice(cursor, from)));
-    }
-    if (to > from) {
-      const highlighted = document.createElement("span");
-      highlighted.className = `cm-codeToken ${span.className}`;
-      highlighted.textContent = line.text.slice(from, to);
-      lineElement.append(highlighted);
-    }
-    cursor = Math.max(cursor, to);
-  }
-
-  if (cursor < line.text.length) {
-    lineElement.append(document.createTextNode(line.text.slice(cursor)));
-  }
-
-  return lineElement;
-}
-
-function renderHighlightedInlineText(
-  text: string,
-  highlightSpans?: ReadonlyArray<InlineTextHighlightSpan>,
-) {
-  const root = document.createElement("span");
-
-  if (!highlightSpans || highlightSpans.length === 0) {
-    root.textContent = text;
-    return root;
-  }
-
-  const orderedSpans = highlightSpans.toSorted((left, right) => left.from - right.from);
-  let cursor = 0;
-
-  for (const span of orderedSpans) {
-    const from = Math.max(0, Math.min(text.length, span.from));
-    const to = Math.max(from, Math.min(text.length, span.to));
-    if (from > cursor) {
-      root.append(document.createTextNode(text.slice(cursor, from)));
-    }
-    if (to > from) {
-      const highlighted = document.createElement("span");
-      highlighted.className = `cm-codeToken ${span.className}`;
-      highlighted.textContent = text.slice(from, to);
-      root.append(highlighted);
-    }
-    cursor = Math.max(cursor, to);
-  }
-
-  if (cursor < text.length) {
-    root.append(document.createTextNode(text.slice(cursor)));
-  }
-
-  return root;
-}
-
-function windowsPathToFileUrl(path: string) {
-  const normalized = path.replace(/\\/g, "/");
-  if (/^[A-Za-z]:\//.test(normalized)) {
-    return encodeURI(`file:///${normalized}`);
-  }
-  if (normalized.startsWith("//")) {
-    return encodeURI(`file:${normalized}`);
-  }
-  return encodeURI(`file://${normalized}`);
-}
-
-export function resolveTranscriptLinkUrl(
-  link: {
-    kind: "url" | "file";
-    target: string;
-  },
-  cwd?: string | null,
-) {
-  if (link.kind === "url") {
-    return link.target;
-  }
-
-  const normalizedTarget = link.target.replace(/\//g, "\\");
-  if (/^[A-Za-z]:\\/.test(normalizedTarget) || normalizedTarget.startsWith("\\\\")) {
-    return windowsPathToFileUrl(normalizedTarget);
-  }
-  if (!cwd) {
-    return null;
-  }
-
-  try {
-    const baseUrl = new URL(windowsPathToFileUrl(cwd.endsWith("\\") ? cwd : `${cwd}\\`));
-    return new URL(link.target.replace(/\\/g, "/"), baseUrl).toString();
-  } catch {
-    return null;
-  }
-}
-
-function resolveInteractiveMarkAtPosition(
-  marks: ReadonlyArray<PositionedMark>,
-  position: number | null,
-) {
-  if (position === null) {
-    return null;
-  }
-  return marks.find((mark) => mark.link && position >= mark.from && position < mark.to) ?? null;
-}
-
-function resolveInteractiveMarkFromMouseEvent(
-  view: EditorView,
-  event: MouseEvent,
-  marks: ReadonlyArray<PositionedMark>,
-) {
-  return resolveInteractiveMarkAtPosition(
-    marks,
-    view.posAtCoords({
-      x: event.clientX,
-      y: event.clientY,
-    }),
-  );
-}
-
-function resolveBlockHistoryLinkFromEventTarget(target: EventTarget | null) {
-  if (!(target instanceof Element)) {
-    return null;
-  }
-  const interactiveElement = target.closest<HTMLElement>("[data-link-kind][data-link-target]");
-  if (!interactiveElement) {
-    return null;
-  }
-  const kind = interactiveElement.dataset.linkKind;
-  const linkTarget = interactiveElement.dataset.linkTarget;
-  if ((kind !== "url" && kind !== "file") || !linkTarget) {
-    return null;
-  }
-  return {
-    kind,
-    target: linkTarget,
-  } as const;
-}
-
-export function resolveCommandWidgetToggleSignatureFromEventTarget(target: unknown) {
-  if (!target || typeof target !== "object") {
-    return null;
-  }
-
-  const targetElement =
-    "closest" in target && typeof target.closest === "function"
-      ? target
-      : "parentElement" in target && target.parentElement && typeof target.parentElement === "object"
-        ? target.parentElement
-        : null;
-  if (!targetElement || !("closest" in targetElement) || typeof targetElement.closest !== "function") {
-    return null;
-  }
-
-  const commandRail = targetElement.closest(".cm-commandWidgetRail");
-  if (!commandRail || typeof commandRail !== "object") {
-    return null;
-  }
-
-  const commandSurface =
-    "closest" in commandRail && typeof commandRail.closest === "function"
-      ? commandRail.closest(".cm-commandWidgetSurface")
-      : null;
-  if (!commandSurface || typeof commandSurface !== "object" || !("dataset" in commandSurface)) {
-    return null;
-  }
-
-  if (commandSurface.dataset?.commandWidgetExpandable !== "true") {
-    return null;
-  }
-
-  const signature = commandSurface.dataset?.commandWidgetSignature;
-  if (typeof signature === "string" && signature.length > 0) {
-    return signature;
-  }
-
-  return null;
-}
-
-export function shouldIgnoreCommandWidgetEvent(
-  event: Pick<Event, "type"> & { target: unknown },
-) {
-  if (event.type === "copy") {
-    return false;
-  }
-  return resolveCommandWidgetToggleSignatureFromEventTarget(event.target) === null;
-}
-
-export function isCommandWidgetSummaryOverflowing(
-  element:
-    | Pick<HTMLElement, "clientWidth" | "scrollWidth">
-    | null
-    | undefined,
-) {
-  if (!element) {
-    return false;
-  }
-  return element.scrollWidth > element.clientWidth + 1;
-}
-
-export function shouldRenderCommandWidgetToggleRail(options: {
-  readonly expanded: boolean;
-  readonly hasHiddenExpansionContent: boolean;
-  readonly summaryOverflowing: boolean;
-}) {
-  return options.expanded || options.hasHiddenExpansionContent || options.summaryOverflowing;
-}
-
-async function openTranscriptLink(
-  link: {
-    kind: "url" | "file";
-    target: string;
-  },
-  cwd?: string | null,
-) {
-  const resolved = resolveTranscriptLinkUrl(link, cwd);
-  if (!resolved) {
-    return false;
-  }
-
-  if (typeof window !== "undefined" && window.desktopBridge) {
-    return window.desktopBridge.openExternal(resolved);
-  }
-
-  if (typeof window !== "undefined") {
-    window.open(resolved, "_blank", "noopener,noreferrer");
-    return true;
-  }
-
-  return false;
-}
-
-function renderAnimatedCommandText(text: string) {
-  return createAnimatedLoadingTextElement(text, { className: "cm-commandWidgetAnimatedText" });
-}
-
-class AnimatedLoadingTextLine extends WidgetType {
-  constructor(
-    private readonly animatedText: string,
-    private readonly suffixText: string,
-    private readonly className: string,
-    private readonly characterDelaySeconds?: number,
-  ) {
-    super();
-  }
-
-  override eq(other: AnimatedLoadingTextLine) {
-    return this.animatedText === other.animatedText
-      && this.suffixText === other.suffixText
-      && this.className === other.className
-      && this.characterDelaySeconds === other.characterDelaySeconds;
-  }
-
-  override updateDOM(dom: HTMLElement) {
-    if (dom.dataset.animatedText !== this.animatedText || dom.dataset.className !== this.className) {
-      return false;
-    }
-
-    const suffix = dom.querySelector<HTMLElement>(".cm-workingLineAnimatedSuffix");
-    if (!suffix) {
-      return false;
-    }
-
-    suffix.textContent = this.suffixText;
-    return true;
-  }
-
-  override toDOM(view: EditorView) {
-    const root = view.dom.ownerDocument.createElement("span");
-    root.className = this.className;
-    root.dataset.animatedText = this.animatedText;
-    root.dataset.className = this.className;
-    root.append(createAnimatedLoadingTextElement(this.animatedText, {
-      document: view.dom.ownerDocument,
-      className: "cm-workingLineAnimatedPrefix",
-      ...(this.characterDelaySeconds !== undefined ? { characterDelaySeconds: this.characterDelaySeconds } : {}),
-    }));
-    const suffix = view.dom.ownerDocument.createElement("span");
-    suffix.className = "cm-workingLineAnimatedSuffix";
-    suffix.textContent = this.suffixText;
-    root.append(suffix);
-    return root;
-  }
-}
-
-function appendMarkdownTableCellContent(
-  document: Document,
-  container: HTMLElement,
-  cell: MarkdownTableDisplayCell,
-  cwd?: string | null,
-) {
-  const highlightSpans = (cell.highlightSpans ?? []).toSorted((left, right) => left.from - right.from);
-  let cursor = 0;
-
-  const appendText = (text: string) => {
-    if (text.length > 0) {
-      container.append(document.createTextNode(text));
-    }
-  };
-
-  highlightSpans.forEach((span) => {
-    appendText(cell.text.slice(cursor, span.from));
-    const token = document.createElement("span");
-    token.className = `cm-codeToken ${span.className}${span.link ? " cm-inlineLink" : ""}`;
-    token.textContent = cell.text.slice(span.from, span.to);
-    if (span.link) {
-      token.addEventListener("mousedown", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-      });
-      token.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        void openTranscriptLink(span.link!, cwd);
-      });
-    }
-    container.append(token);
-    cursor = span.to;
-  });
-
-  appendText(cell.text.slice(cursor));
-}
-
-class MarkdownTableWidget extends WidgetType {
-  constructor(
-    private readonly content: {
-      readonly signature: string;
-      readonly table: MarkdownTableData;
-      readonly cwd?: string | null;
-    },
-  ) {
-    super();
-  }
-
-  override eq(other: MarkdownTableWidget) {
-    return this.content.signature === other.content.signature
-      && this.content.cwd === other.content.cwd;
-  }
-
-  override destroy(dom: HTMLElement) {
-    const observer = commandWidgetResizeObservers.get(dom);
-    observer?.disconnect();
-    commandWidgetResizeObservers.delete(dom);
-  }
-
-  override toDOM(view: EditorView) {
-    const root = view.dom.ownerDocument.createElement("div");
-    root.className = "cm-markdownTableSurface";
-    root.dataset.tableSignature = this.content.signature;
-
-    const linesContainer = view.dom.ownerDocument.createElement("div");
-    linesContainer.className = "cm-markdownTableLines";
-    root.append(linesContainer);
-
-    let renderedSignature = "";
-    let renderedWidthBucket = -1;
-    let measureQueued = false;
-    const resolveWidthBucket = (availableWidth: number) =>
-      resolveMarkdownTableDisplayWidth(availableWidth, view.defaultCharacterWidth);
-    const renderLines = (widthBucket: number) => {
-      const displayLines = layoutMarkdownTable(this.content.table, widthBucket);
-      const nextSignature = JSON.stringify(displayLines);
-      if (nextSignature === renderedSignature && widthBucket === renderedWidthBucket) {
-        return;
-      }
-      renderedSignature = nextSignature;
-      renderedWidthBucket = widthBucket;
-      linesContainer.replaceChildren(...displayLines.map((line) => {
-        const element = view.dom.ownerDocument.createElement("div");
-        element.className = `cm-markdownTableLine cm-markdownTableLine--${line.kind}`;
-        if (!line.cells || line.kind === "border") {
-          element.textContent = line.text;
-          return element;
-        }
-        const cells = line.cells;
-        const appendBorder = (text: string) => {
-          const span = view.dom.ownerDocument.createElement("span");
-          span.className = "cm-markdownTableBorderGlyph";
-          span.textContent = text;
-          element.append(span);
-        };
-        appendBorder("│ ");
-        cells.forEach((cell, index) => {
-          const cellSpan = view.dom.ownerDocument.createElement("span");
-          cellSpan.className = [
-            "cm-markdownTableCell",
-            line.kind === "header" ? "cm-markdownTableCell--header" : "cm-markdownTableCell--body",
-          ].join(" ");
-          appendMarkdownTableCellContent(view.dom.ownerDocument, cellSpan, cell, this.content.cwd);
-          element.append(cellSpan);
-          appendBorder(index === cells.length - 1 ? " │" : " │ ");
-        });
-        return element;
-      }));
-    };
-
-    const scheduleMeasuredRender = () => {
-      if (measureQueued) {
-        return;
-      }
-      measureQueued = true;
-      view.requestMeasure({
-        read: () => resolveWidthBucket(Math.max(root.clientWidth, view.dom.clientWidth, 320)),
-        write: (widthBucket) => {
-          measureQueued = false;
-          if (!root.isConnected) {
-            return;
-          }
-          renderLines(widthBucket);
-        },
-      });
-    };
-
-    renderLines(resolveWidthBucket(Math.max(view.dom.clientWidth, 320)));
-    if (typeof ResizeObserver !== "undefined") {
-      const observer = new ResizeObserver(() => {
-        scheduleMeasuredRender();
-      });
-      observer.observe(root);
-      commandWidgetResizeObservers.set(root, observer);
-    }
-
-    return root;
-  }
-}
-
-class CodeBlockWidget extends WidgetType {
-  private readonly equalityKey: string;
-
-  constructor(
-    private readonly content: {
-      signature: string;
-      code: string;
-      lines: ReadonlyArray<CodeBlockWidgetLineData>;
-    },
-  ) {
-    super();
-    this.equalityKey = content.signature;
-  }
-
-  override eq(other: CodeBlockWidget) {
-    return this.equalityKey === other.equalityKey;
-  }
-
-  override toDOM(view: EditorView) {
-    const root = document.createElement("div");
-    root.className = "cm-codeBlockSurface";
-
-    const copyButton = document.createElement("button");
-    copyButton.type = "button";
-    copyButton.className = "cm-codeBlockCopyButton";
-    copyButton.setAttribute("title", "Copy code block");
-    copyButton.setAttribute("aria-label", "Copy code block");
-
-    const copyButtonLabel = document.createElement("span");
-    copyButtonLabel.className = "cm-codeBlockCopyButtonLabel";
-    copyButtonLabel.textContent = "Copy";
-
-    const copyButtonStatus = document.createElement("span");
-    copyButtonStatus.className = "cm-codeBlockCopyButtonStatus";
-    copyButtonStatus.setAttribute("aria-hidden", "true");
-
-    copyButton.append(copyButtonLabel, copyButtonStatus);
-
-    const copiedFeedbackDurationMs = 520;
-    const copyButtonExitDurationMs = 160;
-    let feedbackTimer: number | undefined;
-    let contentResetTimer: number | undefined;
-    const clearContentResetTimer = () => {
-      if (contentResetTimer !== undefined) {
-        window.clearTimeout(contentResetTimer);
-        contentResetTimer = undefined;
-      }
-    };
-    const clearFeedbackTimer = () => {
-      if (feedbackTimer !== undefined) {
-        window.clearTimeout(feedbackTimer);
-        feedbackTimer = undefined;
-      }
-    };
-    const resetCopyButtonContent = () => {
-      clearContentResetTimer();
-      copyButton.classList.remove("cm-codeBlockCopyButtonCopied", "cm-codeBlockCopyButtonFailed");
-      copyButtonStatus.textContent = "";
-    };
-    const shouldDelayContentReset = () =>
-      !root.matches(":hover") && !root.matches(":focus-within");
-    const releaseCopyFeedback = () => {
-      clearFeedbackTimer();
-      root.classList.remove("cm-codeBlockSurfaceCopyFeedbackActive");
-      if (!shouldDelayContentReset()) {
-        resetCopyButtonContent();
-        return;
-      }
-      clearContentResetTimer();
-      contentResetTimer = window.setTimeout(() => {
-        resetCopyButtonContent();
-      }, copyButtonExitDurationMs);
-    };
-
-    const applyCopyFeedback = (variant: "copied" | "failed") => {
-      clearFeedbackTimer();
-      clearContentResetTimer();
-      root.classList.add("cm-codeBlockSurfaceCopyFeedbackActive");
-      copyButton.classList.remove("cm-codeBlockCopyButtonCopied", "cm-codeBlockCopyButtonFailed");
-      void copyButton.offsetWidth;
-      copyButton.classList.add(
-        variant === "copied" ? "cm-codeBlockCopyButtonCopied" : "cm-codeBlockCopyButtonFailed",
-      );
-      copyButtonStatus.textContent = variant === "copied" ? "\u2713" : "!";
-      feedbackTimer = window.setTimeout(() => {
-        releaseCopyFeedback();
-      }, variant === "copied" ? copiedFeedbackDurationMs : 1400);
-    };
-
-    copyButton.addEventListener("mousedown", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-    });
-    copyButton.addEventListener("click", async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      try {
-        await copyTextToClipboard(this.content.code);
-        applyCopyFeedback("copied");
-      } catch {
-        applyCopyFeedback("failed");
-      }
-    });
-
-    const content = document.createElement("pre");
-    content.className = "cm-codeBlockContent";
-    this.content.lines.forEach((line, index) => {
-      content.append(renderCodeBlockLine(line));
-      if (index < this.content.lines.length - 1) {
-        content.append(document.createTextNode("\n"));
-      }
-    });
-
-    root.append(copyButton, content);
-    return root;
-  }
 }
 
 function normalizeProjectPathForComparison(path: string) {
@@ -1373,607 +271,134 @@ export function formatCommandWidgetOutputLine(line: string, projectRoot?: string
   }
   return relativizeProjectPath(line, projectRoot);
 }
-const parsedCommandWidgetTextCache = new Map<string, ParsedCommandWidgetText | null>();
-const parsedCommandWidgetTextCacheLimit = 512;
 
-function setBoundedCacheEntry<K, V>(cache: Map<K, V>, key: K, value: V, limit: number) {
-  cache.set(key, value);
-  if (cache.size > limit) {
-    const oldestKey = cache.keys().next().value;
-    if (oldestKey !== undefined) {
-      cache.delete(oldestKey);
-    }
+function windowsPathToFileUrl(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    return encodeURI(`file:///${normalized}`);
   }
-  return value;
+  if (normalized.startsWith("//")) {
+    return encodeURI(`file:${normalized}`);
+  }
+  return encodeURI(`file://${normalized}`);
 }
 
-function hashNumber(hash: number, value: number) {
-  return Math.imul((hash ^ value) >>> 0, 16777619) >>> 0;
-}
-
-function hashString(hash: number, value: string) {
-  let nextHash = hash;
-  for (let index = 0; index < value.length; index += 1) {
-    nextHash = hashNumber(nextHash, value.charCodeAt(index));
-  }
-  return nextHash;
-}
-
-function hashBoolean(hash: number, value: boolean) {
-  return hashNumber(hash, value ? 1 : 0);
-}
-
-function hashOptionalString(hash: number, value?: string) {
-  return value === undefined ? hashNumber(hash, 0) : hashString(hashNumber(hash, 1), value);
-}
-
-function hashStringArray(hash: number, values?: ReadonlyArray<string>) {
-  let nextHash = hashNumber(hash, values?.length ?? 0);
-  for (const value of values ?? []) {
-    nextHash = hashString(nextHash, value);
-  }
-  return nextHash;
-}
-
-function hashInlineDiffFiles(hash: number, files?: ReadonlyArray<InlineDiffFileData>) {
-  let nextHash = hashNumber(hash, files?.length ?? 0);
-  for (const file of files ?? []) {
-    nextHash = hashString(nextHash, file.path);
-    nextHash = hashOptionalString(nextHash, file.previousPath);
-    nextHash = hashNumber(nextHash, file.additions);
-    nextHash = hashNumber(nextHash, file.deletions);
-    nextHash = hashNumber(nextHash, file.hunks.length);
-    for (const hunk of file.hunks) {
-      nextHash = hashString(nextHash, hunk.header);
-      nextHash = hashNumber(nextHash, hunk.rows.length);
-      for (const row of hunk.rows) {
-        nextHash = hashString(nextHash, row.kind);
-        nextHash = hashNumber(nextHash, row.oldLineNumber ?? -1);
-        nextHash = hashNumber(nextHash, row.newLineNumber ?? -1);
-        nextHash = hashString(nextHash, row.text);
-      }
-    }
-  }
-  return nextHash;
-}
-
-function extractCommandWidgetCounts(value: string):
-  | {
-      base: string;
-      counts: {
-        additions: string;
-        deletions: string;
-      };
-    }
-  | null {
-  const match = /^(?<base>[\s\S]*?) \((?<add>\+\d+), (?<remove>-\d+)\)$/.exec(value);
-  const groups = match?.groups;
-  const additions = groups?.add;
-  const deletions = groups?.remove;
-  if (!groups || !additions || !deletions) {
-    return null;
-  }
-  return {
-    base: groups.base ?? value,
-    counts: {
-      additions,
-      deletions,
-    },
-  };
-}
-
-function buildCommandWidgetSummaryCopyText(content: {
-  glyph: string;
-  prefix: string;
-  command: string;
-  timingLabel?: string;
-  counts?: {
-    additions: string;
-    deletions: string;
-  };
-}) {
-  return [
-    `${content.glyph} ${content.prefix}${content.counts ? ` (${content.counts.additions}, ${content.counts.deletions})` : ""}`,
-    content.command,
-    content.timingLabel,
-  ].filter((part): part is string => typeof part === "string" && part.length > 0).join(" ");
-}
-
-function parseCommandWidgetText(text: string, timingLabel?: string): ParsedCommandWidgetText | null {
-  const firstSpace = text.indexOf(" ");
-  if (firstSpace <= 0) {
-    return null;
-  }
-
-  const glyph = text.slice(0, firstSpace);
-  const prefixAndCommand = text.slice(firstSpace + 1);
-  const firstDivider = prefixAndCommand.indexOf("  ");
-  if (firstDivider <= 0) {
-    return null;
-  }
-
-  let prefix = prefixAndCommand.slice(0, firstDivider);
-  let command = prefixAndCommand.slice(firstDivider + 2);
-  let rawCommandStart = firstSpace + 1 + firstDivider + 2;
-  let rawCommandEnd = text.length;
-  let resolvedTimingLabel = timingLabel;
-  let counts:
-    | {
-        additions: string;
-        deletions: string;
-      }
-    | undefined;
-
-  const prefixCounts = extractCommandWidgetCounts(prefix);
-  if (prefixCounts) {
-    prefix = prefixCounts.base;
-    counts = prefixCounts.counts;
-  }
-
-  if (timingLabel) {
-    const timingSuffix = `  ${timingLabel}`;
-    if (command.endsWith(timingSuffix)) {
-      command = command.slice(0, -timingSuffix.length);
-      rawCommandEnd -= timingSuffix.length;
-    }
-  } else {
-    for (const marker of ["  Finished in ", "  Completed in ", "  Running for ", "  Failed after ", "  Declined after "]) {
-      const timingIndex = command.lastIndexOf(marker);
-      if (timingIndex === -1) {
-        continue;
-      }
-      resolvedTimingLabel = command.slice(timingIndex + 2);
-      command = command.slice(0, timingIndex);
-      rawCommandEnd = rawCommandStart + timingIndex;
-      break;
-    }
-  }
-
-  if (!counts) {
-    const countsPrefixMatch = /^\((?<add>\+\d+), (?<remove>-\d+)\)\s+(?<base>[\s\S]*)$/.exec(command);
-    const countsPrefixGroups = countsPrefixMatch?.groups;
-    const prefixAdditions = countsPrefixGroups?.add;
-    const prefixDeletions = countsPrefixGroups?.remove;
-    if (countsPrefixGroups && prefixAdditions && prefixDeletions) {
-      const consumedPrefixLength = countsPrefixMatch?.[0].length - (countsPrefixGroups.base?.length ?? command.length);
-      command = countsPrefixGroups.base ?? command;
-      rawCommandStart += consumedPrefixLength;
-      counts = {
-        additions: prefixAdditions,
-        deletions: prefixDeletions,
-      };
-    }
-  }
-
-  if (!counts) {
-    const commandCounts = extractCommandWidgetCounts(command);
-    if (commandCounts) {
-      const removedSuffixLength = command.length - commandCounts.base.length;
-      command = commandCounts.base;
-      rawCommandEnd -= removedSuffixLength;
-      counts = commandCounts.counts;
-    }
-  }
-
-  const commandSearchWindow = text.slice(rawCommandStart, rawCommandEnd);
-  const commandRelativeIndex = commandSearchWindow.indexOf(command);
-  const commandRange =
-    command.length > 0 && commandRelativeIndex >= 0
-      ? {
-          from: rawCommandStart + commandRelativeIndex,
-          to: rawCommandStart + commandRelativeIndex + command.length,
-        }
-      : undefined;
-
-  return {
-    glyph,
-    prefix,
-    command,
-    ...(commandRange ? { commandRange } : {}),
-    ...(resolvedTimingLabel ? { timingLabel: resolvedTimingLabel } : {}),
-    ...(counts ? { counts } : {}),
-  };
-}
-
-function getParsedCommandWidgetText(text: string, timingLabel?: string) {
-  const cacheKey = `${timingLabel ?? ""}\u0000${text}`;
-  if (parsedCommandWidgetTextCache.has(cacheKey)) {
-    return parsedCommandWidgetTextCache.get(cacheKey) ?? null;
-  }
-  return setBoundedCacheEntry(
-    parsedCommandWidgetTextCache,
-    cacheKey,
-    parseCommandWidgetText(text, timingLabel),
-    parsedCommandWidgetTextCacheLimit,
-  );
-}
-
-function buildCommandWidgetLineEqualityKey(content: CommandWidgetLineContent) {
-  let hash = 2166136261;
-  hash = hashString(hash, content.signature);
-  hash = hashString(hash, content.glyph);
-  hash = hashString(hash, content.prefix);
-  hash = hashString(hash, content.command);
-  hash = hashOptionalString(hash, content.timingLabel);
-  hash = hashOptionalString(
-    hash,
-    content.commandRange ? `${content.commandRange.from}:${content.commandRange.to}` : undefined,
-  );
-  hash = hashOptionalString(
-    hash,
-    content.counts ? `${content.counts.additions}:${content.counts.deletions}` : undefined,
-  );
-  hash = hashInlineDiffFiles(hash, content.inlineDiffFiles);
-  hash = hashOptionalString(hash, content.rawInlineDiff);
-  hash = hashOptionalString(hash, content.inlineDiffStateMessage);
-  hash = hashOptionalString(hash, content.inlineDiffStateClass);
-  hash = hashStringArray(hash, content.outputLines);
-  hash = hashBoolean(hash, content.expanded);
-  hash = hashBoolean(hash, content.hasHiddenExpansionContent);
-  hash = hashBoolean(hash, content.isFileChange);
-  hash = hashBoolean(hash, content.isRunning);
-  hash = hashOptionalString(hash, content.statusClass);
-  return hash.toString(36);
-}
-
-function estimateCommandWidgetHeight(content: CommandWidgetLineContent) {
-  const summaryRowHeight = 20;
-  const contentRowHeight = 18;
-  let height = 6 + summaryRowHeight;
-
-  if (content.expanded && content.outputLines && content.outputLines.length > 0) {
-    height += 2 + (content.outputLines.length * contentRowHeight);
-  }
-
-  if (content.expanded && content.inlineDiffFiles && content.inlineDiffFiles.length > 0) {
-    const inlineDiffRows = countInlineDiffRows(content.inlineDiffFiles);
-    if (inlineDiffRows > 0) {
-      height += inlineDiffRows * contentRowHeight;
-      if (content.inlineDiffFiles.length > 1) {
-        height += (content.inlineDiffFiles.length - 1) * 6;
-      }
-    }
-  } else if (content.expanded && content.rawInlineDiff) {
-    height += 20 + (content.rawInlineDiff.split("\n").length * contentRowHeight);
-  } else if (content.expanded && content.inlineDiffStateMessage) {
-    height += 4 + contentRowHeight;
-  }
-
-  return height;
-}
-
-class CommandWidgetLine extends WidgetType {
-  private readonly equalityKey: string;
-
-  constructor(
-    private readonly content: CommandWidgetLineContent,
-  ) {
-    super();
-    this.equalityKey = buildCommandWidgetLineEqualityKey(content);
-  }
-
-  override eq(other: CommandWidgetLine) {
-    return this.equalityKey === other.equalityKey;
-  }
-
-  override get estimatedHeight() {
-    return estimateCommandWidgetHeight(this.content);
-  }
-
-  override ignoreEvent(event: Event) {
-    return shouldIgnoreCommandWidgetEvent(event);
-  }
-
-  override destroy(dom: HTMLElement) {
-    const observer = commandWidgetResizeObservers.get(dom);
-    observer?.disconnect();
-    commandWidgetResizeObservers.delete(dom);
-  }
-
-  override toDOM(view: EditorView) {
-    const root = document.createElement("div");
-    root.className = [
-      "cm-commandWidgetSurface",
-      this.content.isFileChange ? "cm-commandWidgetSurfaceFileChange" : "",
-      this.content.expanded && this.content.outputLines?.length ? "cm-commandWidgetSurfaceWithBody" : "",
-      this.content.expanded ? "cm-commandWidgetSurfaceExpanded" : "",
-      this.content.statusClass ?? "",
-    ].filter(Boolean).join(" ");
-    root.dataset.commandWidgetSignature = this.content.signature;
-    const shouldRenderRailInitially = shouldRenderCommandWidgetToggleRail({
-      expanded: this.content.expanded,
-      hasHiddenExpansionContent: this.content.hasHiddenExpansionContent,
-      summaryOverflowing: false,
-    });
-    root.classList.toggle("cm-commandWidgetSurfaceToggleable", shouldRenderRailInitially);
-    root.dataset.commandWidgetExpandable = shouldRenderRailInitially ? "true" : "false";
-
-    const gutter = document.createElement("div");
-    gutter.className = "cm-commandWidgetRail";
-    const railVisual = document.createElement("div");
-    railVisual.className = "cm-commandWidgetRailVisual";
-    gutter.append(railVisual);
-
-    const contentRoot = document.createElement("div");
-    contentRoot.className = "cm-commandWidgetContent";
-
-    const summary = document.createElement("div");
-    summary.className = "cm-commandWidgetSummary cm-commandWidgetCopyRow";
-    summary.dataset.copyText = buildCommandWidgetSummaryCopyText(this.content);
-
-    const lead = document.createElement("span");
-    lead.className = "cm-commandWidgetLead";
-
-    const glyph = document.createElement("span");
-    glyph.className = "cm-commandWidgetGlyph";
-    glyph.textContent = this.content.glyph;
-
-    const prefix = document.createElement("span");
-    prefix.className = "cm-commandWidgetPrefix";
-    prefix.textContent = this.content.prefix;
-
-    lead.append(glyph, document.createTextNode(" "), prefix);
-
-    summary.append(lead);
-
-    if (this.content.counts) {
-      const counts = document.createElement("span");
-      counts.className = "cm-commandWidgetCounts";
-
-      const open = document.createTextNode(" (");
-      const additions = document.createElement("span");
-      additions.className = "cm-commandWidgetCountAdded";
-      additions.textContent = this.content.counts.additions;
-      const comma = document.createTextNode(", ");
-      const deletions = document.createElement("span");
-      deletions.className = "cm-commandWidgetCountRemoved";
-      deletions.textContent = this.content.counts.deletions;
-      const close = document.createTextNode(")");
-
-      counts.append(open, additions, comma, deletions, close);
-      summary.append(counts);
-    }
-
-    const command = document.createElement("span");
-    command.className = "cm-commandWidgetCommand";
-    command.append(
-      this.content.isRunning
-        ? renderAnimatedCommandText(this.content.command)
-        : renderHighlightedInlineText(this.content.command),
-    );
-
-    summary.append(command);
-
-    if (this.content.timingLabel) {
-      const meta = document.createElement("span");
-      meta.className = "cm-commandWidgetMeta";
-      meta.textContent = this.content.timingLabel;
-      summary.append(meta);
-    }
-
-    contentRoot.append(summary);
-
-    if (this.content.expanded && this.content.outputLines && this.content.outputLines.length > 0) {
-      const body = document.createElement("pre");
-      body.className = "cm-commandWidgetBody cm-commandWidgetCopyRow";
-      body.dataset.copyText = this.content.outputLines.join("\n");
-      body.textContent = this.content.outputLines.join("\n");
-      contentRoot.append(body);
-    }
-
-    if (
-      this.content.expanded
-      && (
-        this.content.inlineDiffFiles?.length
-        || this.content.rawInlineDiff
-        || this.content.inlineDiffStateMessage
-      )
-    ) {
-      const inlineDiff = document.createElement("div");
-      inlineDiff.className = [
-        "cm-commandWidgetInlineDiff",
-        this.content.inlineDiffStateClass ?? "",
-      ].filter(Boolean).join(" ");
-
-      if (this.content.inlineDiffFiles && this.content.inlineDiffFiles.length > 0) {
-        for (const file of this.content.inlineDiffFiles) {
-          const fileRoot = document.createElement("section");
-          fileRoot.className = "cm-inlineDiffFile";
-
-          for (const hunk of file.hunks) {
-            for (const row of hunk.rows) {
-              const rowElement = document.createElement("div");
-              rowElement.className = `cm-inlineDiffRow cm-inlineDiffRow${row.kind[0]!.toUpperCase()}${row.kind.slice(1)}`;
-              const copyText = getInlineDiffRowCopyText(row);
-              if (copyText) {
-                rowElement.classList.add("cm-commandWidgetCopyRow");
-                rowElement.dataset.copyText = copyText;
-              }
-
-              const lineNumber = document.createElement("span");
-              lineNumber.className = "cm-inlineDiffLineNumber";
-              lineNumber.textContent = row.newLineNumber?.toString() ?? row.oldLineNumber?.toString() ?? "";
-
-              const body = document.createElement("span");
-              body.className = "cm-inlineDiffBody";
-
-              const marker = document.createElement("span");
-              marker.className = "cm-inlineDiffMarker";
-              marker.textContent = getInlineDiffRowMarker(row);
-
-              const content = document.createElement("span");
-              content.className = "cm-inlineDiffContent";
-              const contentText = document.createElement("span");
-              contentText.className = "cm-inlineDiffContentText";
-              contentText.textContent = row.text.length > 0 ? row.text : " ";
-              content.append(contentText);
-
-              body.append(marker, content);
-              rowElement.append(lineNumber, body);
-              fileRoot.append(rowElement);
-            }
-          }
-
-          inlineDiff.append(fileRoot);
-        }
-      } else if (this.content.rawInlineDiff) {
-        const rawFallback = document.createElement("pre");
-        rawFallback.className = "cm-inlineDiffFallback cm-commandWidgetCopyRow";
-        rawFallback.dataset.copyText = this.content.rawInlineDiff;
-        rawFallback.textContent = this.content.rawInlineDiff;
-        inlineDiff.append(rawFallback);
-      } else if (this.content.inlineDiffStateMessage) {
-        const stateMessage = document.createElement("div");
-        stateMessage.className = "cm-inlineDiffStateMessage";
-        stateMessage.textContent = this.content.inlineDiffStateMessage;
-        inlineDiff.append(stateMessage);
-      }
-
-      contentRoot.append(inlineDiff);
-    }
-
-    root.append(gutter, contentRoot);
-
-    const syncRail = (shouldRenderRail: boolean) => {
-      root.classList.toggle("cm-commandWidgetSurfaceToggleable", shouldRenderRail);
-      root.dataset.commandWidgetExpandable = shouldRenderRail ? "true" : "false";
-    };
-
-    let railMeasureQueued = false;
-    const scheduleRailSync = () => {
-      if (railMeasureQueued) {
-        return;
-      }
-      railMeasureQueued = true;
-      view.requestMeasure({
-        read: () =>
-          shouldRenderCommandWidgetToggleRail({
-            expanded: this.content.expanded,
-            hasHiddenExpansionContent: this.content.hasHiddenExpansionContent,
-            summaryOverflowing:
-              !this.content.expanded
-              && !this.content.hasHiddenExpansionContent
-              && isCommandWidgetSummaryOverflowing(command),
-          }),
-        write: (shouldRenderRail: boolean) => {
-          railMeasureQueued = false;
-          if (!root.isConnected) {
-            return;
-          }
-          syncRail(shouldRenderRail);
-        },
-      });
-    };
-
-    scheduleRailSync();
-
-    if (typeof ResizeObserver !== "undefined") {
-      const observer = new ResizeObserver(() => {
-        scheduleRailSync();
-      });
-      observer.observe(root);
-      commandWidgetResizeObservers.set(root, observer);
-    }
-
-    return root;
-  }
-}
-
-function buildCodeBlockReplacements(
-  allLines: ReadonlyArray<AnnotatedLine>,
-  positioned: ReadonlyArray<PositionedLine>,
-) {
-  const replacements: PositionedReplacement[] = [];
-
-  for (let index = 0; index < allLines.length; index += 1) {
-    if (allLines[index]?.kind !== "codeFenceSeparator" || allLines[index + 1]?.kind !== "codeFenceHeader") {
-      continue;
-    }
-
-    let closingIndex = index + 2;
-    while (closingIndex < allLines.length && allLines[closingIndex]?.kind === "codeFenceBody") {
-      closingIndex += 1;
-    }
-
-    if (allLines[closingIndex]?.kind !== "codeFenceSeparator") {
-      continue;
-    }
-
-    const startLine = positioned[index];
-    const endLine = positioned[closingIndex];
-    if (!startLine || !endLine) {
-      continue;
-    }
-
-    const languageLabel = allLines[index + 1]?.text ?? "code";
-    const language = languageLabel.startsWith("code · ") ? languageLabel.slice("code · ".length) : "";
-    const codeLines = allLines.slice(index + 2, closingIndex).map((line) =>
-      line.highlightSpans ? { text: line.text, highlightSpans: line.highlightSpans } : { text: line.text });
-    const code = codeLines.map((line) => line.text).join("\n");
-
-    replacements.push({
-      from: startLine.from,
-      to: endLine.to,
-      widget: new CodeBlockWidget({
-        signature: `${startLine.from}:${endLine.to}:${language}:${code}`,
-        code,
-        lines: codeLines,
-      }),
-      signature: `${startLine.from}:${endLine.to}:${language}:${code}`,
-    });
-
-    index = closingIndex;
-  }
-
-  return replacements;
-}
-
-function buildMarkdownTableReplacements(
-  allLines: ReadonlyArray<AnnotatedLine>,
-  positioned: ReadonlyArray<PositionedLine>,
+export function resolveTranscriptLinkUrl(
+  link: {
+    kind: "url" | "file";
+    target: string;
+  },
   cwd?: string | null,
 ) {
-  const replacements: PositionedReplacement[] = [];
-
-  for (let index = 0; index < allLines.length; index += 1) {
-    const tableData = allLines[index]?.tableData;
-    if (!tableData || allLines[index]?.kind !== "table") {
-      continue;
-    }
-
-    let closingIndex = index;
-    while (closingIndex + 1 < allLines.length && allLines[closingIndex + 1]?.kind === "table") {
-      closingIndex += 1;
-    }
-
-    const startLine = positioned[index];
-    const endLine = positioned[closingIndex];
-    if (!startLine || !endLine) {
-      continue;
-    }
-
-    const signature = `${startLine.from}:${endLine.to}:${JSON.stringify(tableData)}`;
-    const widgetContent = cwd === undefined
-      ? {
-          signature,
-          table: tableData,
-        }
-      : {
-          signature,
-          table: tableData,
-          cwd,
-        };
-    replacements.push({
-      from: startLine.from,
-      to: endLine.to,
-      widget: new MarkdownTableWidget(widgetContent),
-      signature,
-    });
-
-    index = closingIndex;
+  if (link.kind === "url") {
+    return link.target;
   }
 
-  return replacements;
+  const normalizedTarget = link.target.replace(/\//g, "\\");
+  if (/^[A-Za-z]:\\/.test(normalizedTarget) || normalizedTarget.startsWith("\\\\")) {
+    return windowsPathToFileUrl(normalizedTarget);
+  }
+  if (!cwd) {
+    return null;
+  }
+
+  try {
+    const baseUrl = new URL(windowsPathToFileUrl(cwd.endsWith("\\") ? cwd : `${cwd}\\`));
+    return new URL(link.target.replace(/\\/g, "/"), baseUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
+function resolveBlockHistoryLinkFromEventTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) {
+    return null;
+  }
+  const interactiveElement = target.closest<HTMLElement>("[data-link-kind][data-link-target]");
+  if (!interactiveElement) {
+    return null;
+  }
+  const kind = interactiveElement.dataset.linkKind;
+  const linkTarget = interactiveElement.dataset.linkTarget;
+  if ((kind !== "url" && kind !== "file") || !linkTarget) {
+    return null;
+  }
+  return {
+    kind,
+    target: linkTarget,
+  } as const;
+}
+
+export function resolveCommandWidgetToggleSignatureFromEventTarget(target: unknown) {
+  if (!target || typeof target !== "object") {
+    return null;
+  }
+
+  const targetElement =
+    "closest" in target && typeof target.closest === "function"
+      ? target
+      : "parentElement" in target && target.parentElement && typeof target.parentElement === "object"
+        ? target.parentElement
+        : null;
+  if (!targetElement || !("closest" in targetElement) || typeof targetElement.closest !== "function") {
+    return null;
+  }
+
+  const blockHistoryRail = targetElement.closest(".transcript-blockHistory__commandWidgetRail");
+  if (blockHistoryRail && typeof blockHistoryRail === "object" && "dataset" in blockHistoryRail) {
+    const signature = blockHistoryRail.dataset?.commandWidgetSignature;
+    if (typeof signature === "string" && signature.length > 0) {
+      return signature;
+    }
+  }
+
+  const commandRail = targetElement.closest(".cm-commandWidgetRail");
+  if (!commandRail || typeof commandRail !== "object") {
+    return null;
+  }
+
+  const commandSurface =
+    "closest" in commandRail && typeof commandRail.closest === "function"
+      ? commandRail.closest(".cm-commandWidgetSurface")
+      : null;
+  if (!commandSurface || typeof commandSurface !== "object" || !("dataset" in commandSurface)) {
+    return null;
+  }
+
+  if (commandSurface.dataset?.commandWidgetExpandable !== "true") {
+    return null;
+  }
+
+  const signature = commandSurface.dataset?.commandWidgetSignature;
+  if (typeof signature === "string" && signature.length > 0) {
+    return signature;
+  }
+
+  return null;
+}
+
+async function openTranscriptLink(
+  link: {
+    kind: "url" | "file";
+    target: string;
+  },
+  cwd?: string | null,
+) {
+  const resolved = resolveTranscriptLinkUrl(link, cwd);
+  if (!resolved) {
+    return false;
+  }
+
+  if (typeof window !== "undefined" && window.desktopBridge) {
+    return window.desktopBridge.openExternal(resolved);
+  }
+
+  if (typeof window !== "undefined") {
+    window.open(resolved, "_blank", "noopener,noreferrer");
+    return true;
+  }
+
+  return false;
 }
 
 function isBlockBoundarySpacerLine(line: AnnotatedLine) {
@@ -2045,23 +470,6 @@ function shouldShowMessageTurnSeparator(
   return false;
 }
 
-function getPendingHighlightSignature(
-  pendingUserInputHighlight?: {
-    readonly requestId: string;
-    readonly questionIndex: number;
-    readonly optionIndex?: number;
-  },
-) {
-  if (!pendingUserInputHighlight) {
-    return "";
-  }
-  return [
-    pendingUserInputHighlight.requestId,
-    pendingUserInputHighlight.questionIndex,
-    pendingUserInputHighlight.optionIndex ?? "",
-  ].join(":");
-}
-
 function applyPendingHighlightToLines(
   lines: ReadonlyArray<AnnotatedLine>,
   pendingUserInputHighlight?: {
@@ -2094,1742 +502,43 @@ function applyPendingHighlightToLines(
   });
 }
 
-function buildFlattenedBlockSegment(
-  block: TranscriptBlock,
-  previousVisibleBlock: TranscriptBlock | null,
-  pendingUserInputHighlight?: {
-    readonly requestId: string;
-    readonly questionIndex: number;
-    readonly optionIndex?: number;
-  },
-): FlattenedBlockSegment {
-  const rawBlockLines = trimBlockBoundarySpacerLines(blockToLines(block));
-  const blockLines = applyPendingHighlightToLines(rawBlockLines, pendingUserInputHighlight);
-  const lines =
-    blockLines.length > 0 && shouldInsertBlockGap(previousVisibleBlock, block)
-      ? [
-          {
-            text: "",
-            kind: "blockGap",
-            ...(shouldShowMessageTurnSeparator(previousVisibleBlock, block)
-              ? { extraClasses: ["cm-line-messageTurnSeparator"] }
-              : {}),
-          } satisfies AnnotatedLine,
-          ...blockLines,
-        ]
-      : blockLines;
-  const widgetEntries: FlattenedBlockWidgetEntry[] = [];
-
-  if (block.type === "user-message" && block.attachments && block.attachments.length > 0) {
-    const attachmentLineOffsets = [...lines]
-      .map((line, index) => ({ line, index }))
-      .filter(({ line }) => line.kind === "attachmentPanel")
-      .map(({ index }) => index);
-    const attachmentLineOffset = attachmentLineOffsets[0];
-
-    if (attachmentLineOffset !== undefined) {
-      widgetEntries.push({
-        lineOffset: attachmentLineOffset,
-        widget: new ImageAttachmentPanelWidget(block.attachments),
-        side: 1,
-        signature: buildAttachmentPanelSignature(block.attachments),
-      });
-    }
-  }
-
-  return {
-    blockSignature: JSON.stringify(block),
-    block,
-    lines,
-    widgetEntries,
-  };
-}
-
-function assembleFlattenedBlocks(
-  segments: ReadonlyArray<FlattenedBlockSegment>,
-) {
-  const allLines: AnnotatedLine[] = [];
-  const widgetsByLineIndex = new Map<
-    number,
-    { widget: WidgetType; side: -1 | 1; signature: string }
-  >();
-
-  for (const segment of segments) {
-    const startLineIndex = allLines.length;
-    allLines.push(...segment.lines);
-    for (const widgetEntry of segment.widgetEntries) {
-      widgetsByLineIndex.set(startLineIndex + widgetEntry.lineOffset, {
-        widget: widgetEntry.widget,
-        side: widgetEntry.side,
-        signature: widgetEntry.signature,
-      });
-    }
-  }
-
-  return {
-    lines: allLines,
-    widgetsByLineIndex,
-  };
-}
-
-function flattenBlocksIncremental(
-  blocks: ReadonlyArray<TranscriptBlock>,
-  pendingUserInputHighlight?: {
-    readonly requestId: string;
-    readonly questionIndex: number;
-    readonly optionIndex?: number;
-  },
-  previous?: FlattenedBlocksBuild | null,
-): FlattenedBlocksBuild {
-  const highlightSignature = getPendingHighlightSignature(pendingUserInputHighlight);
-  const previousSegments =
-    previous && previous.highlightSignature === highlightSignature
-      ? previous.segments
-      : [];
-  const comparableBlockCount = Math.min(previousSegments.length, blocks.length);
-  let reusablePrefixBlockCount = 0;
-
-  while (reusablePrefixBlockCount < comparableBlockCount) {
-    const previousSegment = previousSegments[reusablePrefixBlockCount];
-    if (!previousSegment || previousSegment.blockSignature !== JSON.stringify(blocks[reusablePrefixBlockCount])) {
-      break;
-    }
-    reusablePrefixBlockCount += 1;
-  }
-
-  if (previousSegments.length === blocks.length && reusablePrefixBlockCount === blocks.length && previous) {
-    return {
-      ...previous,
-      firstChangedLineIndex: previous.lines.length,
-    };
-  }
-
-  const segments = previousSegments.slice(0, reusablePrefixBlockCount);
-  let previousVisibleBlock: TranscriptBlock | null = null;
-  for (let index = segments.length - 1; index >= 0; index -= 1) {
-    const segment = segments[index];
-    if (segment && segment.lines.length > 0) {
-      previousVisibleBlock = segment.block;
-      break;
-    }
-  }
-
-  for (let index = reusablePrefixBlockCount; index < blocks.length; index += 1) {
-    const segment = buildFlattenedBlockSegment(blocks[index]!, previousVisibleBlock, pendingUserInputHighlight);
-    segments.push(segment);
-    if (segment.lines.length > 0) {
-      previousVisibleBlock = segment.block;
-    }
-  }
-
-  const assembled = assembleFlattenedBlocks(segments);
-  const firstChangedLineIndex = segments
-    .slice(0, reusablePrefixBlockCount)
-    .reduce((total, segment) => total + segment.lines.length, 0);
-
-  return {
-    highlightSignature,
-    segments,
-    lines: assembled.lines,
-    widgetsByLineIndex: assembled.widgetsByLineIndex,
-    firstChangedLineIndex,
-  };
-}
-
 export function flattenBlocks(
   blocks: ReadonlyArray<TranscriptBlock>,
+  precomputedBlockLines?: ReadonlyArray<ReadonlyArray<AnnotatedLine>>,
   pendingUserInputHighlight?: {
     readonly requestId: string;
     readonly questionIndex: number;
     readonly optionIndex?: number;
   },
 ) {
-  const flattened = flattenBlocksIncremental(blocks, pendingUserInputHighlight);
-  return {
-    lines: flattened.lines,
-    widgetsByLineIndex: flattened.widgetsByLineIndex,
-  };
-}
+  const lines: AnnotatedLine[] = [];
+  let previousVisibleBlock: TranscriptBlock | null = null;
 
-function countReusablePositionedPrefix<T>(
-  values: ReadonlyArray<T>,
-  isReusable: (value: T) => boolean,
-) {
-  let count = 0;
-  while (count < values.length && isReusable(values[count]!)) {
-    count += 1;
-  }
-  return count;
-}
-
-function transcriptDocumentInputsMatch(
-  left: AppliedDecorationInputs,
-  right: AppliedDecorationInputs,
-) {
-  return (
-    left.expandedCommandSignatures === right.expandedCommandSignatures
-    && left.collapsedFileChangeSignatures === right.collapsedFileChangeSignatures
-    && left.resolvedInlineDiffBySignature === right.resolvedInlineDiffBySignature
-    && left.cwd === right.cwd
-    && left.projectRoot === right.projectRoot
-    && left.highlightSignature === right.highlightSignature
-  );
-}
-
-function collectCommandWidgetMetadata(
-  line: AnnotatedLine,
-  expandedCommandSignatures: ReadonlySet<string>,
-  collapsedFileChangeSignatures: ReadonlySet<string>,
-  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>,
-  fileChangeWidgetSignatures: Set<string>,
-  inlineDiffLookupsBySignature: Map<string, InlineDiffLookup>,
-  inlineDiffContentBySignature: Map<string, string>,
-  defaultExpandedInlineDiffSignatures: Map<string, InlineDiffLookup>,
-) {
-  const isFileChangeWidget =
-    line.commandWidgetSignature !== undefined
-    && (
-      line.inlineUnifiedDiff !== undefined
-      || line.inlineDiffLookup !== undefined
-      || line.inlineDiffChangedFiles !== undefined
-    );
-  if (isFileChangeWidget && line.commandWidgetSignature) {
-    fileChangeWidgetSignatures.add(line.commandWidgetSignature);
-  }
-  const isExpandedCommand =
-    line.commandWidgetSignature !== undefined
-    && (
-      isFileChangeWidget
-        ? !collapsedFileChangeSignatures.has(line.commandWidgetSignature)
-        : expandedCommandSignatures.has(line.commandWidgetSignature)
-    );
-  if (line.commandWidgetSignature) {
-    if (line.inlineDiffLookup) {
-      inlineDiffLookupsBySignature.set(line.commandWidgetSignature, line.inlineDiffLookup);
-      if (isFileChangeWidget && isExpandedCommand) {
-        defaultExpandedInlineDiffSignatures.set(line.commandWidgetSignature, line.inlineDiffLookup);
-      }
+  blocks.forEach((block, blockIndex) => {
+    const rawBlockLines = trimBlockBoundarySpacerLines(precomputedBlockLines?.[blockIndex] ?? blockToLines(block));
+    const blockLines = applyPendingHighlightToLines(rawBlockLines, pendingUserInputHighlight);
+    if (blockLines.length === 0) {
+      return;
     }
-    const resolvedInlineDiffState = resolvedInlineDiffBySignature.get(line.commandWidgetSignature);
-    const effectiveInlineDiff =
-      line.inlineUnifiedDiff
-      ?? (resolvedInlineDiffState?.status === "ready" ? resolvedInlineDiffState.diff : undefined);
-    if (effectiveInlineDiff) {
-      inlineDiffContentBySignature.set(line.commandWidgetSignature, effectiveInlineDiff);
-    }
-  }
-  return {
-    isExpandedCommand,
-    isFileChangeWidget,
-  };
-}
 
-function buildTranscriptDocument(
-  blocks: ReadonlyArray<TranscriptBlock>,
-  expandedCommandSignatures: ReadonlySet<string>,
-  collapsedFileChangeSignatures: ReadonlySet<string>,
-  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>,
-  cwd?: string | null,
-  projectRoot?: string | null,
-  pendingUserInputHighlight?: {
-    readonly requestId: string;
-    readonly questionIndex: number;
-    readonly optionIndex?: number;
-  },
-  buildInputs?: AppliedDecorationInputs,
-  previousFlattened?: FlattenedBlocksBuild | null,
-  previousBuild?: TranscriptDocumentBuildState | null,
-): { docModel: TranscriptDocumentModel; flattened: FlattenedBlocksBuild } {
-  const flattened = flattenBlocksIncremental(blocks, pendingUserInputHighlight, previousFlattened);
-  const { lines: historyLines, widgetsByLineIndex } = flattened;
-  const allLines: AnnotatedLine[] = [...historyLines];
-  const includeCommandWidgets = DEBUG_ENABLE_COMMAND_WIDGETS;
-  const includeCodeBlockWidgets = DEBUG_ENABLE_CODE_BLOCK_WIDGETS;
-  const includeMarkdownTableWidgets = DEBUG_ENABLE_MARKDOWN_TABLE_WIDGETS;
-  const includeLineWidgets = DEBUG_ENABLE_LINE_WIDGETS;
-  const includeLoadingReplacements = DEBUG_ENABLE_LOADING_REPLACEMENTS;
-
-  const canReuseDocumentPrefix =
-    buildInputs !== undefined
-    && previousBuild !== null
-    && previousBuild !== undefined
-    && flattened.firstChangedLineIndex > 0
-    && transcriptDocumentInputsMatch(previousBuild.inputs, buildInputs);
-  const reusableHistoryLineCount = canReuseDocumentPrefix
-    ? Math.min(
-        flattened.firstChangedLineIndex,
-        previousBuild.docModel.historyLineCount,
-        historyLines.length,
-      )
-    : 0;
-  if (
-    canReuseDocumentPrefix
-    && previousBuild.docModel.historyLineCount === historyLines.length
-    && reusableHistoryLineCount === historyLines.length
-  ) {
-    return {
-      docModel: previousBuild.docModel,
-      flattened,
-    };
-  }
-
-  const boundaryOffset =
-    reusableHistoryLineCount > 0
-      ? reusableHistoryLineCount < previousBuild!.docModel.lines.length
-        ? (previousBuild!.docModel.lines[reusableHistoryLineCount]?.from ?? previousBuild!.docModel.promptStart)
-        : previousBuild!.docModel.promptStart
-      : 0;
-  const textParts: string[] =
-    reusableHistoryLineCount > 0 ? [previousBuild!.docModel.text.slice(0, boundaryOffset)] : [];
-  let offset = boundaryOffset;
-  const positioned: PositionedLine[] =
-    reusableHistoryLineCount > 0 ? previousBuild!.docModel.lines.slice(0, reusableHistoryLineCount) : [];
-  const marks: PositionedMark[] =
-    reusableHistoryLineCount > 0
-      ? previousBuild!.docModel.marks.slice(0, countReusablePositionedPrefix(previousBuild!.docModel.marks, (mark) => mark.to <= boundaryOffset))
-      : [];
-  const widgets: PositionedWidget[] =
-    reusableHistoryLineCount > 0
-      ? previousBuild!.docModel.widgets.slice(0, countReusablePositionedPrefix(previousBuild!.docModel.widgets, (widget) => widget.position < boundaryOffset))
-      : [];
-  const replacements: PositionedReplacement[] =
-    reusableHistoryLineCount > 0
-      ? previousBuild!.docModel.replacements.slice(0, countReusablePositionedPrefix(previousBuild!.docModel.replacements, (replacement) => replacement.to <= boundaryOffset))
-      : [];
-  const fileChangeWidgetSignatures = new Set<string>();
-  const inlineDiffLookupsBySignature = new Map<string, InlineDiffLookup>();
-  const inlineDiffContentBySignature = new Map<string, string>();
-  const defaultExpandedInlineDiffSignatures = new Map<string, InlineDiffLookup>();
-
-  for (let index = 0; index < reusableHistoryLineCount; index += 1) {
-    collectCommandWidgetMetadata(
-      allLines[index]!,
-      expandedCommandSignatures,
-      collapsedFileChangeSignatures,
-      resolvedInlineDiffBySignature,
-      fileChangeWidgetSignatures,
-      inlineDiffLookupsBySignature,
-      inlineDiffContentBySignature,
-      defaultExpandedInlineDiffSignatures,
-    );
-  }
-
-  for (let index = reusableHistoryLineCount; index < allLines.length; index += 1) {
-    const line = allLines[index]!;
-    const from = offset;
-    const lineEnd = from + line.text.length;
-    const { isExpandedCommand, isFileChangeWidget } = collectCommandWidgetMetadata(
-      line,
-      expandedCommandSignatures,
-      collapsedFileChangeSignatures,
-      resolvedInlineDiffBySignature,
-      fileChangeWidgetSignatures,
-      inlineDiffLookupsBySignature,
-      inlineDiffContentBySignature,
-      defaultExpandedInlineDiffSignatures,
-    );
-    const hasHiddenExpansionContent = Boolean(
-      (line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0)
-      || line.inlineUnifiedDiff
-      || line.inlineDiffLookup,
-    );
-    positioned.push({
-      from,
-      to: lineEnd,
-      kind: line.kind,
-      ...(line.extraClasses || line.commandWidgetSignature
-        ? {
-            extraClasses: [
-              ...(line.extraClasses ?? []),
-              ...(isExpandedCommand ? ["cm-line-commandExecExpanded"] : []),
-            ],
-          }
-        : {}),
-      ...(line.commandWidgetSignature ? { commandWidgetSignature: line.commandWidgetSignature } : {}),
-    });
-    if (line.highlightSpans) {
-      for (const span of line.highlightSpans) {
-        if (span.from >= span.to) {
-          continue;
-        }
-        marks.push({
-          from: from + span.from,
-          to: from + span.to,
-          className: span.className,
-          ...(span.link ? { link: span.link } : {}),
-        });
-      }
-    }
-    textParts.push(line.text);
-
-    offset += line.text.length;
-    const widget = includeLineWidgets ? widgetsByLineIndex.get(index) : undefined;
-    if (widget) {
-      widgets.push({
-        position: widget.side > 0 ? lineEnd : from,
-        side: widget.side,
-        widget: widget.widget,
-        signature: widget.signature,
+    if (shouldInsertBlockGap(previousVisibleBlock, block)) {
+      lines.push({
+        text: "",
+        kind: "blockGap",
+        ...(shouldShowMessageTurnSeparator(previousVisibleBlock, block)
+          ? { extraClasses: ["cm-line-messageTurnSeparator"] }
+          : {}),
       });
     }
-    if (includeCommandWidgets && line.commandWidgetSignature) {
-      const parsed = getParsedCommandWidgetText(line.text, line.timingLabel);
-      if (parsed) {
-        const statusClass = (line.extraClasses ?? []).find((entry) => entry.startsWith("cm-line-workItem"));
-        const isRunning = statusClass === "cm-line-workItemRunning";
-        const resolvedInlineDiffState = resolvedInlineDiffBySignature.get(line.commandWidgetSignature);
-        const effectiveInlineDiff =
-          line.inlineUnifiedDiff
-          ?? (resolvedInlineDiffState?.status === "ready" ? resolvedInlineDiffState.diff : undefined);
-        const includeCommandWidgetExpansionContent = DEBUG_ENABLE_COMMAND_WIDGET_EXPANSION_CONTENT && isExpandedCommand;
-        const inlineDiffFiles =
-          effectiveInlineDiff && includeCommandWidgetExpansionContent
-            ? parseInlineDiffFiles(effectiveInlineDiff, line.inlineDiffChangedFiles)
-            : undefined;
-        const inlineDiffStateMessage =
-          includeCommandWidgetExpansionContent && !effectiveInlineDiff
-            ? resolvedInlineDiffState?.status === "loading"
-              ? "Loading diff..."
-              : resolvedInlineDiffState?.status === "error"
-                ? "Diff unavailable."
-                : undefined
-            : undefined;
-        replacements.push({
-          from,
-          to: lineEnd,
-          widget: new CommandWidgetLine({
-            signature: line.commandWidgetSignature,
-            ...parsed,
-            command: relativizeProjectPath(parsed.command, projectRoot),
-             ...(includeCommandWidgetExpansionContent
-               && line.commandWidgetOutputLines
-               && line.commandWidgetOutputLines.length > 0
-               ? { outputLines: line.commandWidgetOutputLines.map((entry) => formatCommandWidgetOutputLine(entry, projectRoot)) }
-               : {}),
-             ...(inlineDiffFiles && inlineDiffFiles.length > 0 ? { inlineDiffFiles } : {}),
-             ...(effectiveInlineDiff
-               && includeCommandWidgetExpansionContent
-               && (!inlineDiffFiles || inlineDiffFiles.length === 0)
-               ? { rawInlineDiff: effectiveInlineDiff }
-               : {}),
-            ...(inlineDiffStateMessage
-              ? {
-                  inlineDiffStateMessage,
-                  inlineDiffStateClass:
-                    resolvedInlineDiffState?.status === "loading"
-                      ? "cm-commandWidgetInlineDiffLoading"
-                      : "cm-commandWidgetInlineDiffError",
-                }
-              : {}),
-            expanded: includeCommandWidgetExpansionContent,
-            hasHiddenExpansionContent,
-            isFileChange: isFileChangeWidget,
-            isRunning,
-            ...(statusClass ? { statusClass } : {}),
-          }),
-          signature:
-            `${line.commandWidgetSignature}:${line.text}:${isExpandedCommand}:${statusClass ?? ""}:`
-            + `${effectiveInlineDiff ?? ""}:${resolvedInlineDiffState?.status ?? ""}:`
-            + `${line.commandWidgetOutputLines?.join("\n") ?? ""}:${hasHiddenExpansionContent ? "1" : "0"}`,
-        });
-      }
-    }
-    if (includeLoadingReplacements && line.animatedText?.kind === "loading" && line.text.length > 0) {
-      const animatedFrom = Math.max(0, Math.min(line.text.length, line.animatedText.from));
-      const animatedTo = Math.max(animatedFrom, Math.min(line.text.length, line.animatedText.to));
-      replacements.push({
-        from,
-        to: lineEnd,
-        widget: new AnimatedLoadingTextLine(
-          line.text.slice(animatedFrom, animatedTo),
-          line.text.slice(animatedTo),
-          "cm-workingLineAnimatedText",
-        ),
-        signature: `loading:${line.kind}:${line.text.slice(animatedFrom, animatedTo)}:${line.text.slice(animatedTo)}`,
-      });
-    }
-    if (index < allLines.length - 1) {
-      textParts.push("\n");
-      offset += 1;
-    }
-  }
 
-  const replacementStartIndex = reusableHistoryLineCount > 0 ? reusableHistoryLineCount : 0;
-  if (includeCodeBlockWidgets) {
-    replacements.push(
-      ...buildCodeBlockReplacements(
-        allLines.slice(replacementStartIndex),
-        positioned.slice(replacementStartIndex),
-      ),
-    );
-  }
-  if (includeMarkdownTableWidgets) {
-    replacements.push(
-      ...buildMarkdownTableReplacements(
-        allLines.slice(replacementStartIndex),
-        positioned.slice(replacementStartIndex),
-        cwd,
-      ),
-    );
-  }
-
-  const text = textParts.join("");
+    lines.push(...blockLines);
+    previousVisibleBlock = block;
+  });
 
   return {
-    docModel: {
-      text,
-      historyLineCount: historyLines.length,
-      lines: positioned,
-      marks,
-      widgets,
-      replacements,
-      fileChangeWidgetSignatures: includeCommandWidgets ? fileChangeWidgetSignatures : new Set(),
-      inlineDiffLookupsBySignature: includeCommandWidgets ? inlineDiffLookupsBySignature : new Map(),
-      inlineDiffContentBySignature: includeCommandWidgets ? inlineDiffContentBySignature : new Map(),
-      defaultExpandedInlineDiffSignatures:
-        includeCommandWidgets ? defaultExpandedInlineDiffSignatures : new Map(),
-      separatorStart: text.length,
-      promptStart: text.length,
-    },
-    flattened,
+    lines,
+    widgetsByLineIndex: new Map<number, never>(),
   };
-}
-
-function createLineDecorationRange(line: PositionedLine) {
-  return Decoration.line({
-    class: [`cm-line-${line.kind}`, ...(line.extraClasses ?? [])].join(" "),
-  }).range(line.from);
-}
-
-function createMarkDecorationRange(mark: PositionedMark) {
-  return Decoration.mark({
-    class: `cm-codeToken ${mark.className}${mark.link ? " cm-inlineLink" : ""}`,
-  }).range(mark.from, mark.to);
-}
-
-function createWidgetDecorationRange({ position, side, widget }: PositionedWidget) {
-  return Decoration.widget({ widget, side }).range(position);
-}
-
-function createReplacementDecorationRange({ from, to, widget }: PositionedReplacement) {
-  return Decoration.replace({ widget, block: true }).range(from, to);
-}
-
-function createPromptLineDecorationRange(from: number) {
-  return Decoration.line({ class: "cm-line-promptStart" }).range(from);
-}
-
-type DecorationRange = ReturnType<typeof createLineDecorationRange>;
-
-interface BuiltDecorationState {
-  readonly lineRanges: ReadonlyArray<DecorationRange>;
-  readonly markRanges: ReadonlyArray<DecorationRange>;
-  readonly widgetRanges: ReadonlyArray<DecorationRange>;
-  readonly replacementRanges: ReadonlyArray<DecorationRange>;
-  readonly promptLineRange?: DecorationRange;
-  readonly set: DecorationSet;
-}
-
-interface AppliedDecorationInputs {
-  readonly expandedCommandSignatures: ReadonlySet<string>;
-  readonly collapsedFileChangeSignatures: ReadonlySet<string>;
-  readonly resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>;
-  readonly cwd: string | null;
-  readonly projectRoot: string | null;
-  readonly highlightSignature: string;
-}
-
-function buildDecorationState(
-  lines: ReadonlyArray<PositionedLine>,
-  marks: ReadonlyArray<PositionedMark>,
-  widgets: ReadonlyArray<PositionedWidget>,
-  replacements: ReadonlyArray<PositionedReplacement>,
-) {
-  const lineRanges = lines.map(createLineDecorationRange);
-  const markRanges = marks.map(createMarkDecorationRange);
-  const widgetRanges = widgets.map(createWidgetDecorationRange);
-  const replacementRanges = replacements.map(createReplacementDecorationRange);
-  const promptLine = lines.find((line) => line.kind === "promptInput");
-  const promptLineRange = promptLine ? createPromptLineDecorationRange(promptLine.from) : undefined;
-  const ranges = [
-    ...lineRanges,
-    ...markRanges,
-    ...widgetRanges,
-    ...replacementRanges,
-    ...(promptLineRange ? [promptLineRange] : []),
-  ];
-  return {
-    lineRanges,
-    markRanges,
-    widgetRanges,
-    replacementRanges,
-    ...(promptLineRange ? { promptLineRange } : {}),
-    set: Decoration.set(ranges, true),
-  };
-}
-
-function countReusablePrefix<T>(
-  values: ReadonlyArray<T>,
-  isReusable: (value: T) => boolean,
-) {
-  let count = 0;
-  while (count < values.length && isReusable(values[count]!)) {
-    count += 1;
-  }
-  return count;
-}
-
-function buildDecorationStateIncremental(
-  docModel: TranscriptDocumentModel,
-  previousDocModel: TranscriptDocumentModel,
-  previousDecorationState: BuiltDecorationState,
-  firstChangedLineIndex: number,
-) {
-  const reusableLineCount = Math.min(
-    firstChangedLineIndex,
-    previousDocModel.lines.length,
-    previousDecorationState.lineRanges.length,
-    docModel.lines.length,
-  );
-  const boundaryFrom = docModel.lines[reusableLineCount]?.from ?? docModel.promptStart;
-  const reusableMarkCount = Math.min(
-    countReusablePrefix(docModel.marks, (mark) => mark.to <= boundaryFrom),
-    previousDecorationState.markRanges.length,
-  );
-  const reusableWidgetCount = Math.min(
-    countReusablePrefix(docModel.widgets, (widget) => widget.position < boundaryFrom),
-    previousDecorationState.widgetRanges.length,
-  );
-  const reusableReplacementCount = Math.min(
-    countReusablePrefix(docModel.replacements, (replacement) => replacement.to <= boundaryFrom),
-    previousDecorationState.replacementRanges.length,
-  );
-
-  const lineRanges = [
-    ...previousDecorationState.lineRanges.slice(0, reusableLineCount),
-    ...docModel.lines.slice(reusableLineCount).map(createLineDecorationRange),
-  ];
-  const markRanges = [
-    ...previousDecorationState.markRanges.slice(0, reusableMarkCount),
-    ...docModel.marks.slice(reusableMarkCount).map(createMarkDecorationRange),
-  ];
-  const widgetRanges = [
-    ...previousDecorationState.widgetRanges.slice(0, reusableWidgetCount),
-    ...docModel.widgets.slice(reusableWidgetCount).map(createWidgetDecorationRange),
-  ];
-  const replacementRanges = [
-    ...previousDecorationState.replacementRanges.slice(0, reusableReplacementCount),
-    ...docModel.replacements.slice(reusableReplacementCount).map(createReplacementDecorationRange),
-  ];
-  const promptLine = docModel.lines.find((line) => line.kind === "promptInput");
-  const promptLineRange = promptLine ? createPromptLineDecorationRange(promptLine.from) : undefined;
-  const ranges = [
-    ...lineRanges,
-    ...markRanges,
-    ...widgetRanges,
-    ...replacementRanges,
-    ...(promptLineRange ? [promptLineRange] : []),
-  ];
-  return {
-    lineRanges,
-    markRanges,
-    widgetRanges,
-    replacementRanges,
-    ...(promptLineRange ? { promptLineRange } : {}),
-    set: Decoration.set(ranges, true),
-  } satisfies BuiltDecorationState;
-}
-
-function buildSearchDecorations(
-  searchMatches: ReadonlyArray<TranscriptSearchMatch>,
-  activeSearchMatchIndex: number,
-) {
-  return Decoration.set(
-    searchMatches.map((match, index) =>
-      Decoration.mark({
-        class: index === activeSearchMatchIndex
-          ? "cm-transcriptSearchMatch cm-transcriptSearchMatch--active"
-          : "cm-transcriptSearchMatch",
-      }).range(match.from, match.to),
-    ),
-    true,
-  );
-}
-
-function buildDecorationSignature(docModel: TranscriptDocumentModel) {
-  let hash = 2166136261;
-  hash = hashNumber(hash, docModel.promptStart);
-  hash = hashNumber(hash, docModel.lines.length);
-  for (const line of docModel.lines) {
-    hash = hashNumber(hash, line.from);
-    hash = hashNumber(hash, line.to);
-    hash = hashString(hash, line.kind);
-    hash = hashStringArray(hash, line.extraClasses);
-    hash = hashOptionalString(hash, line.commandWidgetSignature);
-  }
-  hash = hashNumber(hash, docModel.marks.length);
-  for (const mark of docModel.marks) {
-    hash = hashNumber(hash, mark.from);
-    hash = hashNumber(hash, mark.to);
-    hash = hashString(hash, mark.className);
-    hash = hashOptionalString(hash, mark.link ? `${mark.link.kind}:${mark.link.target}` : undefined);
-  }
-  hash = hashNumber(hash, docModel.widgets.length);
-  for (const widget of docModel.widgets) {
-    hash = hashNumber(hash, widget.position);
-    hash = hashNumber(hash, widget.side);
-    hash = hashString(hash, widget.signature);
-  }
-  hash = hashNumber(hash, docModel.replacements.length);
-  for (const replacement of docModel.replacements) {
-    hash = hashNumber(hash, replacement.from);
-    hash = hashNumber(hash, replacement.to);
-    hash = hashString(hash, replacement.signature);
-  }
-  return hash.toString(36);
-}
-
-function buildSearchDecorationSignature(
-  searchMatches: ReadonlyArray<TranscriptSearchMatch>,
-  activeSearchMatchIndex: number,
-) {
-  let hash = hashNumber(2166136261, activeSearchMatchIndex);
-  hash = hashNumber(hash, searchMatches.length);
-  for (const match of searchMatches) {
-    hash = hashNumber(hash, match.from);
-    hash = hashNumber(hash, match.to);
-  }
-  return hash.toString(36);
-}
-
-function buildAppliedDecorationInputs(
-  expandedCommandSignatures: ReadonlySet<string>,
-  collapsedFileChangeSignatures: ReadonlySet<string>,
-  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>,
-  cwd: string | null | undefined,
-  projectRoot: string | null | undefined,
-  highlightSignature: string,
-): AppliedDecorationInputs {
-  return {
-    expandedCommandSignatures,
-    collapsedFileChangeSignatures,
-    resolvedInlineDiffBySignature,
-    cwd: cwd ?? null,
-    projectRoot: projectRoot ?? null,
-    highlightSignature,
-  };
-}
-
-function isCachedTranscriptRenderStateCurrent(
-  entry: CachedTranscriptRenderState | null | undefined,
-  blocks: ReadonlyArray<TranscriptBlock>,
-  inputs: AppliedDecorationInputs,
-) {
-  return Boolean(
-    entry
-    && entry.blocks === blocks
-    && entry.inputs.expandedCommandSignatures === inputs.expandedCommandSignatures
-    && entry.inputs.collapsedFileChangeSignatures === inputs.collapsedFileChangeSignatures
-    && entry.inputs.resolvedInlineDiffBySignature === inputs.resolvedInlineDiffBySignature
-    && entry.inputs.cwd === inputs.cwd
-    && entry.inputs.projectRoot === inputs.projectRoot
-    && entry.inputs.highlightSignature === inputs.highlightSignature,
-  );
-}
-
-function computeMinimalDocChange(currentText: string, nextText: string) {
-  if (currentText === nextText) {
-    return null;
-  }
-
-  let prefix = 0;
-  const maxPrefix = Math.min(currentText.length, nextText.length);
-  while (prefix < maxPrefix && currentText[prefix] === nextText[prefix]) {
-    prefix += 1;
-  }
-
-  let currentSuffix = currentText.length;
-  let nextSuffix = nextText.length;
-  while (
-    currentSuffix > prefix
-    && nextSuffix > prefix
-    && currentText[currentSuffix - 1] === nextText[nextSuffix - 1]
-  ) {
-    currentSuffix -= 1;
-    nextSuffix -= 1;
-  }
-
-  return {
-    from: prefix,
-    to: currentSuffix,
-    insert: nextText.slice(prefix, nextSuffix),
-  };
-}
-
-function buildEditorTheme() {
-  return EditorView.theme(
-    {
-      "&": {
-        height: DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER ? "100%" : "auto",
-        minHeight: "100%",
-        flex: "1 1 auto",
-        width: "100%",
-        minWidth: "0",
-        display: "flex",
-        flexDirection: "column",
-        color: "#c5ccd3",
-        backgroundColor: "transparent",
-        fontFamily:
-          '"Cascadia Code", "Cascadia Mono", "Iosevka Term", "JetBrains Mono", Consolas, monospace',
-        fontSize: "15px",
-      },
-      ".cm-scroller": {
-        display: "flex",
-        flexDirection: "column",
-        flex: "1 1 auto",
-        fontFamily: "inherit",
-        overflowX: DEBUG_DISABLE_TRANSCRIPT_LINE_WRAPPING ? "auto" : "hidden",
-        overflowY: DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER ? "auto" : "visible",
-        height: DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER ? "100%" : "auto",
-        width: "100%",
-        minWidth: "0",
-        minHeight: "100%",
-        padding: "18px 0 18px",
-        lineHeight: "1.3",
-      },
-      ".cm-content": {
-        boxSizing: "border-box",
-        display: "flex",
-        flex: "1 0 auto",
-        flexDirection: "column",
-        width: "100%",
-        minWidth: "0",
-        maxWidth: "100%",
-        minHeight: "100%",
-        padding: "0 22px 6px",
-        caretColor: "#cfd6dd",
-      },
-      ".cm-cursor, .cm-dropCursor": {
-        borderLeftColor: "#cfd6dd",
-      },
-      "&.cm-editor-historyActive .cm-cursor": {
-        display: "none",
-      },
-      ".cm-selectionBackground": {
-        backgroundColor: "#e6e6e6 !important",
-      },
-      ".cm-content ::selection": {
-        backgroundColor: "#e6e6e6",
-        color: "#000000",
-      },
-      ".cm-line::selection": {
-        backgroundColor: "#e6e6e6",
-        color: "#000000",
-      },
-      ".cm-line > span::selection": {
-        backgroundColor: "#e6e6e6",
-        color: "#000000",
-      },
-      ".cm-content .cm-selectionBackground": {
-        color: "#000000",
-      },
-      ".cm-focused": {
-        outline: "none",
-      },
-      ".cm-line": {
-        boxSizing: "border-box",
-        width: "100%",
-        minWidth: "0",
-        maxWidth: "100%",
-        padding: "0",
-        whiteSpace: DEBUG_DISABLE_TRANSCRIPT_LINE_WRAPPING ? "pre" : "pre-wrap",
-      },
-      ".cm-line-blockGap": {
-        height: "0",
-        minHeight: "0",
-        lineHeight: "0",
-        fontSize: "0",
-        paddingTop: "1.8rem",
-      },
-      ".cm-line-meta": { color: "#5f676f" },
-      ".cm-line-body": { color: "#d5dbe1" },
-      ".cm-line-reasoningSeparator": {
-        position: "relative",
-        minHeight: "8px",
-      },
-      ".cm-line-reasoningSeparator::before": {
-        display: "none",
-      },
-      ".cm-line-reasoningSummary": {
-        color: "#84919f",
-        fontSize: "13px",
-        fontStyle: "italic",
-        paddingTop: "2px",
-        paddingBottom: "4px",
-      },
-      ".cm-line-reasoning": {
-        color: "#84919f",
-        fontSize: "13px",
-        fontStyle: "italic",
-      },
-      ".cm-line-table": {
-        color: "#d8dde2",
-      },
-      ".cm-line-codeFenceSeparator": {
-        color: "transparent",
-      },
-      ".cm-line-codeFenceHeader": {
-        color: "transparent",
-      },
-      ".cm-line-codeFenceBody": {
-        color: "transparent",
-      },
-      ".cm-line-blockquote": {
-        color: "#aeb6bf",
-      },
-      ".cm-codeToken.tok-keyword": { color: "#d39bff" },
-      ".cm-codeToken.tok-comment": { color: "#6e7d8b", fontStyle: "italic" },
-      ".cm-codeToken.tok-string": { color: "#a8d38f" },
-      ".cm-codeToken.tok-number": { color: "#f0c57a" },
-      ".cm-codeToken.tok-bool": { color: "#f0c57a" },
-      ".cm-codeToken.tok-null": { color: "#f0c57a" },
-      ".cm-codeToken.tok-variableName": { color: "#d7dde4" },
-      ".cm-codeToken.tok-definition": { color: "#7dc4ff" },
-      ".cm-codeToken.tok-propertyName": { color: "#8fd6ff" },
-      ".cm-codeToken.tok-typeName": { color: "#79c8b6" },
-      ".cm-codeToken.tok-className": { color: "#79c8b6" },
-      ".cm-codeToken.tok-function": { color: "#7dc4ff" },
-      ".cm-codeToken.tok-operator": { color: "#d0d7df" },
-      ".cm-codeToken.tok-punctuation": { color: "#8b96a1" },
-      ".cm-codeToken.tok-meta": { color: "#8aa5c2" },
-      ".cm-codeToken.tok-tagName": { color: "#f0957a" },
-      ".cm-codeToken.tok-attributeName": { color: "#e7c26f" },
-      ".cm-codeToken.tok-attributeValue": { color: "#a8d38f" },
-      ".cm-codeToken.tok-special.tok-string": { color: "#9adf8f" },
-      ".cm-codeToken.tok-added": { color: "#63f28a" },
-      ".cm-codeToken.tok-removed": { color: "#ff7575" },
-      ".cm-codeToken.tok-inlineCode": {
-        color: "#c7cdd3",
-        backgroundColor: "rgba(214, 220, 226, 0.08)",
-        borderRadius: "4px",
-      },
-      ".cm-codeToken.tok-inlineCode.tok-markdownLink": {
-        color: "#d8e0e8",
-      },
-      ".cm-codeToken.tok-inlineCode.tok-linkUrl": {
-        color: "#d8e0e8",
-      },
-      ".cm-codeToken.tok-inlineCode.tok-linkFile": {
-        color: "#d8e0e8",
-      },
-      ".cm-inlineLink": {
-        cursor: "pointer",
-        borderRadius: "2px",
-        transition:
-          "color 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 220ms cubic-bezier(0.22, 1, 0.36, 1), filter 220ms cubic-bezier(0.22, 1, 0.36, 1)",
-      },
-      ".cm-codeToken.tok-markdownLink": {
-        textDecoration: "none",
-        boxShadow:
-          "0 10px 0 0 rgba(182, 233, 248, 0), inset 0 -0.125em 0 rgba(129, 184, 244, 0.18)",
-      },
-      ".cm-codeToken.tok-linkUrl": {
-        color: "#9bd2ff",
-      },
-      ".cm-codeToken.tok-linkFile": {
-        color: "#9ae2f3",
-      },
-      ".cm-codeToken.cm-inlineLink:hover": {
-        boxShadow:
-          "0 1px 0 4px rgba(146, 208, 255, 0.12), inset 0 -1.6em 0 rgba(146, 208, 255, 0.16)",
-        filter: "brightness(1.08) saturate(1.08)",
-      },
-      ".cm-codeToken.tok-linkUrl.cm-inlineLink:hover": {
-        color: "#edf7ff",
-      },
-      ".cm-codeToken.tok-linkFile.cm-inlineLink:hover": {
-        color: "#edfdfa",
-      },
-      ".cm-codeToken.tok-inlineCode.cm-inlineLink:hover": {
-        backgroundColor: "rgba(214, 220, 226, 0.12)",
-      },
-      ".cm-codeToken.tok-markdownStrong": {
-        color: "#eef3f8",
-        fontWeight: "600",
-      },
-      ".cm-codeToken.tok-markdownEmphasis": {
-        color: "#d8dee5",
-        fontStyle: "italic",
-      },
-      ".cm-line-markdownHeading": {
-        color: "#eef3f8",
-        fontWeight: "600",
-      },
-      ".cm-line-markdownHeading1": {
-        fontSize: "1.16em",
-      },
-      ".cm-line-markdownHeading2": {
-        fontSize: "1.08em",
-      },
-      ".cm-line-markdownHeading3": {
-        fontSize: "1.03em",
-      },
-      ".cm-line-list": { color: "#c7ccd1" },
-      ".cm-line-userPromptSeparator": {
-        position: "relative",
-        height: "0",
-        minHeight: "0",
-        lineHeight: "0",
-        fontSize: "16px",
-        paddingTop: "1.8em",
-        paddingBottom: "1.8em",
-        overflow: "visible",
-      },
-      ".cm-line-userPromptSeparator::before": {
-        content: '""',
-        position: "absolute",
-           left: "-17px",
-        right: "-17px",
-        top: "50%",
-        borderTop: "1px solid rgba(236, 241, 246, 0.285)",
-        transform: "translateY(-50%)",
-      },
-      ".cm-line-userPromptSeparator.cm-line-userPromptSeparatorHidden": {
-        height: "0",
-        minHeight: "0",
-        lineHeight: "0",
-        fontSize: "0",
-        paddingTop: "0",
-        paddingBottom: "0",
-      },
-      ".cm-line-userPromptSeparator.cm-line-userPromptSeparatorHidden::before": {
-        display: "none",
-      },
-      ".cm-line-workGroupSeparator": {
-        position: "relative",
-        minHeight: "10px",
-      },
-      ".cm-line-workGroupSeparator::before": {
-        display: "none",
-      },
-      ".cm-line-workGroupHeader": {
-        color: "#9fa7af",
-        fontSize: "12px",
-        paddingTop: "2px",
-      },
-      ".cm-line-fileChangeSummary": {
-        color: "#d7dde3",
-      },
-      ".cm-line-planSeparator": {
-        position: "relative",
-        height: "0",
-        minHeight: "0",
-        lineHeight: "0",
-        fontSize: "16px",
-        paddingTop: "2.4em",
-        paddingBottom: "2.4em",
-        overflow: "visible",
-      },
-      ".cm-line-planSeparator::before": {
-        content: '""',
-        position: "absolute",
-        left: "-17px",
-        right: "-17px",
-        top: "50%",
-        borderTop: "1px solid rgba(210, 225, 216, 0.21)",
-        transform: "translateY(-50%)",
-      },
-      ".cm-line-planHeader": {
-        color: "#9dc5a3",
-        fontSize: "12px",
-        textTransform: "uppercase",
-        paddingTop: "2px",
-      },
-      ".cm-line-planHeader.cm-line-proposedPlanHeader": {
-        color: "#b4d7b8",
-      },
-      ".cm-line-planExplanation": {
-        color: "#c4cbc5",
-      },
-      ".cm-line-planStepPending": {
-        color: "#8d949b",
-      },
-      ".cm-line-planStepInProgress": {
-        color: "#d7c17a",
-      },
-      ".cm-line-planStepCompleted": {
-        color: "#9fc6a5",
-      },
-      ".cm-line-proposedPlanBody": {
-        color: "#bcc4cb",
-      },
-      ".cm-line-checkpointSeparator": {
-        position: "relative",
-        height: "0",
-        minHeight: "0",
-        lineHeight: "0",
-        fontSize: "16px",
-        paddingTop: "2.4em",
-        paddingBottom: "2.4em",
-        overflow: "visible",
-      },
-      ".cm-line-checkpointSeparator::before": {
-        content: '""',
-        position: "absolute",
-        left: "-17px",
-        right: "-17px",
-        top: "50%",
-        borderTop: "1px solid rgba(224, 230, 236, 0.21)",
-        transform: "translateY(-50%)",
-      },
-      ".cm-line-checkpointHeader": {
-        color: "#a9b2bb",
-        fontSize: "12px",
-        textTransform: "uppercase",
-        paddingTop: "2px",
-      },
-      ".cm-line-checkpointSummary": {
-        color: "#c2c9cf",
-      },
-      ".cm-line-checkpointFile": {
-        color: "#9098a1",
-      },
-      ".cm-line-workingLine": {
-        color: "#7f8790",
-        fontSize: "13px",
-      },
-      ".cm-workingLineAnimatedText": {
-        display: "inline-flex",
-        alignItems: "baseline",
-        gap: "0",
-        fontSize: "13px",
-        color: "#7f8790",
-      },
-      ".cm-workingLineAnimatedPrefix, .cm-workingLineAnimatedSuffix": {
-        fontSize: "inherit",
-        color: "inherit",
-      },
-      ".cm-line-promptInput": {
-        color: "#d6dbe0",
-      },
-      ".cm-line-attachmentPanel": {
-        paddingLeft: "0.5ch",
-      },
-      ".cm-line-promptStart": {
-        position: "relative",
-        overflow: "visible",
-      },
-      ".cm-line-userMessageStart": {
-        position: "relative",
-        overflow: "visible",
-      },
-      ".cm-line-promptStart::before, .cm-line-userMessageStart::before": {
-        content: '"›"',
-        position: "absolute",
-        left: "-2ch",
-        top: "0",
-        userSelect: "none",
-        pointerEvents: "none",
-        fontSize: "18px",
-        lineHeight: "1",
-      },
-      ".cm-line-promptStart::before": {
-        color: "#ffffff",
-      },
-      ".cm-line-userMessageStart::before": {
-        color: "#8e959d",
-      },
-      ".cm-line-promptSeparator": {
-        position: "relative",
-        height: "0",
-        minHeight: "0",
-        lineHeight: "0",
-        fontSize: "16px",
-        paddingTop: "2.4em",
-        paddingBottom: "2.4em",
-        overflow: "visible",
-      },
-      ".cm-line-promptSeparator::before": {
-        content: '""',
-        position: "absolute",
-        left: "-17px",
-        right: "-17px",
-        top: "50%",
-        borderTop: "1px solid rgba(230, 236, 242, 0.255)",
-        transform: "translateY(-50%)",
-      },
-      ".cm-line-promptSeparator.cm-line-promptSeparatorPlan::before": {
-        content: '"──── Plan mode "',
-        position: "absolute",
-        left: "0",
-        top: "50%",
-        color: "#7fc96d",
-        backgroundColor: "#0e1419",
-        paddingRight: "1ch",
-        transform: "translateY(-50%)",
-      },
-      ".cm-line-promptSeparator.cm-line-promptSeparatorPlan::after": {
-        content: '""',
-        position: "absolute",
-        left: "18ch",
-        right: "-17px",
-        top: "50%",
-        borderTop: "1px solid rgba(127, 201, 109, 0.465)",
-        transform: "translateY(-50%)",
-      },
-      ".cm-line-blockGap.cm-line-messageTurnSeparator": {
-        position: "relative",
-        overflow: "visible",
-      },
-      ".cm-line-blockGap.cm-line-messageTurnSeparator::after": {
-        content: '""',
-        position: "absolute",
-        left: "-17px",
-        right: "-17px",
-        top: "0.95rem",
-        borderTop: "1px solid rgba(153, 164, 174, 0.165)",
-        pointerEvents: "none",
-        userSelect: "none",
-      },
-      ".cm-line-userMessage": { color: "#e0e4e8" },
-      ".cm-line-toolCall": { color: "#5aa8f3" },
-      ".cm-line-toolResult": { color: "#7a828b" },
-      ".cm-line-diffRemoved": {
-        color: "#8f7b7d",
-        backgroundColor: "rgba(84, 30, 27, 0.86)",
-      },
-      ".cm-line-diffAdded": {
-        color: "#b8c9b8",
-        backgroundColor: "rgba(28, 66, 41, 0.84)",
-      },
-      ".cm-line-diffContext": { color: "#717981" },
-      ".cm-line-diffHeader": { color: "#8b929a", fontWeight: "500" },
-      ".cm-line-divider": { color: "#40464d" },
-      ".cm-line-status": { color: "#6c737b", fontStyle: "italic" },
-      ".cm-line-approvalPrompt": {
-        color: "#aab2bb",
-        overflowWrap: "anywhere",
-      },
-      ".cm-line-userInputQuestion": {
-        color: "#c5ccd4",
-        overflowWrap: "anywhere",
-      },
-      ".cm-line-userInputOption": {
-        color: "#aab2bb",
-        overflowWrap: "anywhere",
-      },
-      ".cm-line-userInputResolved": { opacity: "0.54" },
-      ".cm-line-userInputResolvedOption": {
-        color: "#737a82",
-        opacity: "0.72",
-      },
-      ".cm-line-userInputAnsweredOption": {
-        color: "#dde4eb",
-        backgroundColor: "rgba(77, 96, 119, 0.26)",
-        fontWeight: "600",
-        opacity: "1",
-      },
-      ".cm-line-userInputActiveQuestion": {},
-      ".cm-line-userInputActiveOption": {
-        color: "#e3e8ee",
-        backgroundColor: "rgba(77, 96, 119, 0.22)",
-      },
-      ".cm-line-commandExec": {
-        minWidth: "0",
-      },
-      ".cm-commandWidgetSurface": {
-        color: "#ced5dc",
-        display: "flex",
-        alignItems: "stretch",
-        gap: "0",
-        boxSizing: "border-box",
-        width: "100%",
-        maxWidth: "100%",
-        minWidth: "0",
-        fontSize: "12px",
-        lineHeight: "1.45",
-        padding: "3px 0",
-        backgroundColor: "transparent",
-      },
-      ".cm-commandWidgetRail": {
-        flex: "0 0 16px",
-        width: "16px",
-        alignSelf: "stretch",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "flex-start",
-        paddingLeft: "4px",
-        cursor: "pointer",
-      },
-      ".cm-commandWidgetSurface:not(.cm-commandWidgetSurfaceToggleable) .cm-commandWidgetRail": {
-        cursor: "default",
-      },
-      ".cm-commandWidgetRailVisual": {
-        width: "2px",
-        alignSelf: "stretch",
-        borderRadius: "0",
-        backgroundColor: "rgba(244, 247, 250, 0.28)",
-        opacity: "0",
-        transition:
-          "background-color 140ms ease, opacity 140ms ease, width 180ms cubic-bezier(0.25, 0.46, 0.45, 0.94)",
-      },
-      ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetRailVisual": {
-        opacity: "1",
-      },
-      ".cm-commandWidgetSurface:not(.cm-commandWidgetSurfaceExpanded):hover .cm-commandWidgetRailVisual": {
-        opacity: "1",
-      },
-      ".cm-commandWidgetSurface:hover .cm-commandWidgetRailVisual": {
-        backgroundColor: "rgba(244, 247, 250, 0.38)",
-      },
-      ".cm-commandWidgetRail:hover .cm-commandWidgetRailVisual": {
-        width: "5px",
-        backgroundColor: "rgba(244, 247, 250, 0.52)",
-      },
-      ".cm-commandWidgetSurfaceExpanded": {
-        alignItems: "flex-start",
-      },
-      ".cm-commandWidgetSurfaceWithBody": {
-        alignItems: "flex-start",
-      },
-      ".cm-commandWidgetContent": {
-        flex: "1 1 auto",
-        minWidth: "0",
-        userSelect: "text",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetRailVisual": {
-        backgroundColor: "rgba(244, 247, 250, 0.4)",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemError": {
-        color: "#f0cbcb",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemDeclined": {
-        color: "#e0d1ae",
-      },
-      ".cm-commandWidgetLead": {
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "6px",
-        flexShrink: "0",
-        whiteSpace: "nowrap",
-      },
-      ".cm-commandWidgetSummary": {
-        display: "flex",
-        alignItems: "center",
-        flexWrap: "nowrap",
-        gap: "10px",
-        width: "100%",
-        minWidth: "0",
-        userSelect: "text",
-      },
-      ".cm-commandWidgetGlyph": {
-        position: "relative",
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        width: "20px",
-        height: "20px",
-        color: "#d8e0e8",
-        fontWeight: "700",
-        flexShrink: "0",
-      },
-      ".cm-commandWidgetPrefix": {
-        color: "#a7b0b8",
-        fontWeight: "600",
-        flexShrink: "0",
-      },
-      ".cm-commandWidgetCommand": {
-        color: "#8a939d",
-        flex: "1 1 auto",
-        minWidth: "0",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
-      },
-      ".cm-commandWidgetMeta": {
-        color: "#7f8891",
-        marginLeft: "18px",
-        flexShrink: "0",
-        whiteSpace: "nowrap",
-      },
-      ".cm-commandWidgetCounts": {
-        display: "inline-flex",
-        flexShrink: "0",
-        color: "#9aa4ad",
-        whiteSpace: "nowrap",
-      },
-      ".cm-commandWidgetCountAdded": {
-        color: "#63f28a",
-      },
-      ".cm-commandWidgetCountRemoved": {
-        color: "#ff7575",
-      },
-      ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetCommand": {
-        flex: "1 1 auto",
-        width: "auto",
-        minWidth: "0",
-        overflow: "visible",
-        textOverflow: "clip",
-        whiteSpace: "pre-wrap",
-        overflowWrap: "anywhere",
-      },
-      ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetSummary": {
-        flexWrap: "nowrap",
-        alignItems: "flex-start",
-      },
-      ".cm-commandWidgetSurfaceExpanded .cm-commandWidgetMeta": {
-        marginLeft: "auto",
-      },
-      ".cm-commandWidgetBody": {
-        width: "100%",
-        minWidth: "0",
-        margin: "2px 0 0",
-        color: "#7a828b",
-        whiteSpace: "pre-wrap",
-        overflowWrap: "anywhere",
-        padding: "0",
-        fontFamily: "inherit",
-        userSelect: "text",
-      },
-      ".cm-commandWidgetInlineDiff": {
-        flexBasis: "100%",
-        minWidth: "0",
-        marginTop: "0",
-        paddingTop: "0",
-        borderTop: "none",
-        userSelect: "text",
-      },
-      ".cm-inlineDiffStateMessage": {
-        padding: "4px 0 0",
-        color: "#a3adb7",
-        fontSize: "12px",
-      },
-      ".cm-commandWidgetInlineDiffError .cm-inlineDiffStateMessage": {
-        color: "#d8a6a6",
-      },
-      ".cm-inlineDiffFile": {
-        minWidth: "0",
-        overflow: "hidden",
-      },
-      ".cm-inlineDiffFile + .cm-inlineDiffFile": {
-        marginTop: "6px",
-      },
-      ".cm-inlineDiffRow": {
-        display: "grid",
-        gridTemplateColumns: "52px minmax(0, 1fr)",
-        columnGap: "8px",
-        alignItems: "start",
-        minWidth: "0",
-        padding: "0 10px 0 4px",
-        borderRadius: "4px",
-      },
-      ".cm-inlineDiffBody": {
-        display: "inline-grid",
-        gridTemplateColumns: "12px minmax(0, 1fr)",
-        columnGap: "8px",
-        alignItems: "start",
-        justifySelf: "start",
-        width: "fit-content",
-        maxWidth: "100%",
-        minWidth: "0",
-      },
-      ".cm-inlineDiffRowAddition": {
-        backgroundColor: "rgba(20, 60, 38, 0.5)",
-      },
-      ".cm-inlineDiffRowDeletion": {
-        backgroundColor: "rgba(66, 26, 29, 0.5)",
-      },
-      ".cm-inlineDiffLineNumber": {
-        color: "#72808d",
-        textAlign: "right",
-        userSelect: "none",
-      },
-      ".cm-inlineDiffMarker": {
-        color: "#8b97a3",
-      },
-      ".cm-inlineDiffContent": {
-        minWidth: "0",
-      },
-      ".cm-inlineDiffContentText": {
-        display: "inline",
-        whiteSpace: "pre-wrap",
-        overflowWrap: "anywhere",
-        userSelect: "text",
-      },
-      ".cm-inlineDiffRowAddition .cm-inlineDiffMarker, .cm-inlineDiffRowAddition .cm-inlineDiffContentText": {
-        color: "#9cf0b4",
-      },
-      ".cm-inlineDiffRowDeletion .cm-inlineDiffMarker, .cm-inlineDiffRowDeletion .cm-inlineDiffContentText": {
-        color: "rgba(255, 177, 177, 0.6)",
-      },
-      ".cm-inlineDiffRowAddition .cm-inlineDiffMarker, .cm-inlineDiffRowDeletion .cm-inlineDiffMarker": {
-        fontWeight: "700",
-      },
-      ".cm-inlineDiffRowGap .cm-inlineDiffMarker": {
-        color: "#7a8692",
-      },
-      ".cm-inlineDiffFallback": {
-        margin: "0",
-        padding: "10px 12px",
-        color: "#c6d0d8",
-        backgroundColor: "rgba(11, 16, 21, 0.74)",
-        borderRadius: "10px",
-        whiteSpace: "pre-wrap",
-        overflowWrap: "anywhere",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetGlyph": {
-        color: "transparent",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetPrefix": {
-        color: "#82bff2",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemRunning .cm-commandWidgetCommand": {
-        color: "#96a1ab",
-      },
-      ".cm-commandWidgetAnimatedText": {
-        display: "inline",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemDone .cm-commandWidgetPrefix": {
-        color: "#c8d0d8",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemDone .cm-commandWidgetGlyph": {
-        color: "#63f28a",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemError .cm-commandWidgetPrefix": {
-        color: "#ff9d9d",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemError .cm-commandWidgetGlyph": {
-        color: "#ff9d9d",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemDeclined .cm-commandWidgetPrefix": {
-        color: "#f0c36a",
-      },
-      ".cm-commandWidgetSurface.cm-line-workItemDeclined .cm-commandWidgetGlyph": {
-        color: "#f0c36a",
-      },
-      ".cm-codeBlockSurface": {
-        position: "relative",
-        boxSizing: "border-box",
-        width: "100%",
-        maxWidth: "100%",
-        minWidth: "0",
-        margin: "0",
-        padding: "20px 16px",
-        borderRadius: "12px",
-        backgroundColor: "rgba(22, 29, 36, 0.9)",
-        overflow: "hidden",
-      },
-      ".cm-codeBlockContent": {
-        minWidth: "0",
-        paddingRight: "72px",
-        margin: "0",
-        whiteSpace: "pre-wrap",
-        overflowWrap: "anywhere",
-        userSelect: "text",
-      },
-      ".cm-codeBlockLine": {
-        display: "inline",
-        color: "#c7d0d8",
-        fontSize: "13px",
-        lineHeight: "1.55",
-      },
-      ".cm-codeBlockCopyButton": {
-        position: "absolute",
-        top: "10px",
-        right: "10px",
-        display: "inline-grid",
-        placeItems: "center",
-        appearance: "none",
-        border: "1px solid rgba(160, 172, 183, 0.22)",
-        borderRadius: "999px",
-        backgroundColor: "rgba(37, 47, 57, 0.95)",
-        color: "#b6c0c9",
-        padding: "4px 10px",
-        fontSize: "11px",
-        lineHeight: "1.2",
-        fontFamily: "inherit",
-        cursor: "pointer",
-        opacity: "0",
-        transform: "translateY(-2px) scale(0.96)",
-        pointerEvents: "none",
-        transition:
-          "opacity 160ms ease, transform 90ms ease",
-        transitionDelay: "0ms, 0ms",
-      },
-      ".cm-codeBlockCopyButtonLabel": {
-        display: "block",
-        gridArea: "1 / 1",
-        transition: "opacity 60ms ease",
-      },
-      ".cm-codeBlockCopyButtonStatus": {
-        display: "inline-block",
-        gridArea: "1 / 1",
-        textAlign: "center",
-        opacity: "0",
-        transform: "scale(0.85)",
-        transition: "opacity 60ms ease, transform 80ms ease",
-      },
-      ".cm-codeBlockSurface:hover .cm-codeBlockCopyButton": {
-        opacity: "1",
-        transform: "translateY(0) scale(1)",
-        pointerEvents: "auto",
-        transitionDelay: "100ms, 100ms",
-      },
-      ".cm-codeBlockSurface:focus-within .cm-codeBlockCopyButton": {
-        opacity: "1",
-        transform: "translateY(0) scale(1)",
-        pointerEvents: "auto",
-        transitionDelay: "0ms, 0ms",
-      },
-      ".cm-codeBlockSurfaceCopyFeedbackActive .cm-codeBlockCopyButton": {
-        opacity: "1",
-        transform: "translateY(0) scale(1)",
-        pointerEvents: "auto",
-        transitionDelay: "0ms, 0ms",
-      },
-      ".cm-codeBlockCopyButton:hover": {
-        backgroundColor: "rgba(48, 60, 71, 0.98)",
-        borderColor: "rgba(190, 200, 210, 0.34)",
-        color: "#e0e7ed",
-      },
-      ".cm-codeBlockCopyButtonCopied": {
-        backgroundColor: "rgba(48, 60, 71, 0.98)",
-        borderColor: "rgba(190, 200, 210, 0.34)",
-        color: "#e0e7ed",
-        animation: "cm-codeBlockCopyFeedback 110ms ease",
-      },
-      ".cm-codeBlockCopyButtonCopied .cm-codeBlockCopyButtonLabel": {
-        opacity: "0",
-      },
-      ".cm-codeBlockCopyButtonCopied .cm-codeBlockCopyButtonStatus": {
-        opacity: "1",
-        transform: "scale(1)",
-      },
-      ".cm-codeBlockCopyButtonFailed": {
-        backgroundColor: "rgba(84, 34, 40, 0.98)",
-        borderColor: "rgba(224, 112, 126, 0.48)",
-        color: "#ffe1e4",
-        animation: "cm-codeBlockCopyFeedback 220ms ease",
-      },
-      ".cm-codeBlockCopyButtonFailed .cm-codeBlockCopyButtonLabel": {
-        opacity: "0",
-      },
-      ".cm-codeBlockCopyButtonFailed .cm-codeBlockCopyButtonStatus": {
-        opacity: "1",
-        transform: "scale(1)",
-      },
-      "@keyframes cm-codeBlockCopyFeedback": {
-        "0%": {
-          transform: "translateY(0) scale(0.92)",
-        },
-        "55%": {
-          transform: "translateY(0) scale(1.05)",
-        },
-        "100%": {
-          transform: "translateY(0) scale(1)",
-        },
-      },
-      ".cm-markdownTableSurface": {
-        boxSizing: "border-box",
-        width: "100%",
-        maxWidth: "100%",
-        minWidth: "0",
-        padding: "6px 0 4px",
-        borderRadius: "10px",
-        backgroundColor: "transparent",
-        overflowX: "auto",
-      },
-      ".cm-markdownTableLines": {
-        minWidth: "0",
-      },
-      ".cm-markdownTableLine": {
-        whiteSpace: "pre",
-        fontSize: "13px",
-        lineHeight: "1.2",
-        letterSpacing: "0",
-      },
-      ".cm-markdownTableBorderGlyph": {
-        color: "#6f7b87",
-        fontWeight: "400",
-      },
-      ".cm-markdownTableCell": {
-        display: "inline",
-      },
-      ".cm-markdownTableCell--header": {
-        color: "#e5ebf1",
-        fontWeight: "600",
-      },
-      ".cm-markdownTableCell--body": {
-        color: "#c8d0d8",
-      },
-      ".cm-markdownTableLine--border": {
-        color: "#6f7b87",
-      },
-      ".cm-markdownTableLine--header": {
-        color: "#d6dee6",
-      },
-      ".cm-markdownTableLine--body": {
-        color: "#c8d0d8",
-      },
-      ".cm-line-commandOutput": { color: "#7a828b" },
-      ...(DEBUG_FLATTEN_TRANSCRIPT_LINE_GEOMETRY
-        ? {
-            ".cm-line-blockGap, .cm-line-reasoningSeparator, .cm-line-userPromptSeparator, .cm-line-workGroupSeparator, .cm-line-planSeparator, .cm-line-checkpointSeparator, .cm-line-promptSeparator":
-              {
-                height: "auto",
-                minHeight: "0",
-                lineHeight: "inherit",
-                fontSize: "inherit",
-                paddingTop: "0",
-                paddingBottom: "0",
-                overflow: "visible",
-              },
-            ".cm-line-reasoningSummary, .cm-line-reasoning, .cm-line-markdownHeading1, .cm-line-markdownHeading2, .cm-line-markdownHeading3, .cm-line-workGroupHeader, .cm-line-planHeader, .cm-line-checkpointHeader, .cm-line-workingLine":
-              {
-                fontSize: "inherit",
-                paddingTop: "0",
-                paddingBottom: "0",
-                minHeight: "0",
-              },
-            ".cm-line-userPromptSeparator::before, .cm-line-planSeparator::before, .cm-line-checkpointSeparator::before, .cm-line-promptSeparator::before, .cm-line-promptSeparator.cm-line-promptSeparatorPlan::after, .cm-line-blockGap.cm-line-messageTurnSeparator::after":
-              {
-                display: "none",
-              },
-          }
-        : {}),
-    },
-    { dark: true },
-  );
-}
-
-function findConversationScrollContainer(start: HTMLElement | null) {
-  let current = start;
-  while (current) {
-    const { overflowY } = window.getComputedStyle(current);
-    if ((overflowY === "auto" || overflowY === "scroll") && current.scrollHeight > current.clientHeight) {
-      return current;
-    }
-    current = current.parentElement;
-  }
-  return null;
-}
-
-function getConversationScrollContainer(view: EditorView) {
-  const viewScrollDom = view.scrollDOM;
-  const { overflowY } = window.getComputedStyle(viewScrollDom);
-  if (
-    (overflowY === "auto" || overflowY === "scroll")
-    && viewScrollDom.scrollHeight > viewScrollDom.clientHeight
-  ) {
-    return viewScrollDom;
-  }
-  return findConversationScrollContainer(view.dom);
-}
-
-interface ScrollPositionSnapshot {
-  readonly element: HTMLElement;
-  readonly scrollTop: number;
-  readonly scrollLeft: number;
 }
 
 function collectScrollableAncestors(start: HTMLElement | null) {
@@ -3873,181 +582,6 @@ function restoreScrollPositionSnapshots(snapshots: ReadonlyArray<ScrollPositionS
   }
 }
 
-const USER_MESSAGE_COPY_PREFIX = "> ";
-
-function collectSelectedUserMessageStartSegments(
-  state: EditorState,
-  ranges: ReadonlyArray<{ from: number; to: number; empty: boolean }>,
-  userMessageStartLineStarts: ReadonlySet<number>,
-) {
-  const segments: string[] = [];
-
-  for (const range of ranges) {
-    let position = range.from;
-    while (position <= range.to) {
-      const line = state.doc.lineAt(position);
-      const segmentFrom = Math.max(range.from, line.from);
-      const segmentTo = Math.min(range.to, line.to);
-
-      if (
-        segmentTo > segmentFrom
-        && segmentFrom === line.from
-        && userMessageStartLineStarts.has(line.from)
-      ) {
-        segments.push(state.sliceDoc(segmentFrom, segmentTo));
-      }
-
-      if (line.to >= range.to) {
-        break;
-      }
-
-      const nextPosition = line.to + 1;
-      if (nextPosition > state.doc.length) {
-        break;
-      }
-      position = nextPosition;
-    }
-  }
-
-  return segments;
-}
-
-function collectUserMessageStartLineStarts(lines: ReadonlyArray<UserMessageCopyLine>) {
-  return new Set(
-    lines
-      .filter((line) => line.extraClasses?.includes("cm-line-userMessageStart"))
-      .map((line) => line.from),
-  );
-}
-
-export function prefixCopiedLinesInOrder(
-  text: string,
-  orderedExactMatches: ReadonlyArray<string>,
-  prefix: string,
-) {
-  if (text.length === 0 || orderedExactMatches.length === 0) {
-    return text;
-  }
-
-  const lines = text.split("\n");
-  let matchIndex = 0;
-  const prefixedLines = lines.map((line) => {
-    if (matchIndex < orderedExactMatches.length && line === orderedExactMatches[matchIndex]) {
-      matchIndex += 1;
-      return `${prefix}${line}`;
-    }
-    return line;
-  });
-
-  return matchIndex > 0 ? prefixedLines.join("\n") : text;
-}
-
-export function prefixCopiedUserMessageStarts(
-  text: string,
-  state: EditorState,
-  lines: ReadonlyArray<UserMessageCopyLine>,
-) {
-  if (text.length === 0) {
-    return text;
-  }
-
-  const nonEmptyRanges = state.selection.ranges.filter((range) => !range.empty);
-  if (nonEmptyRanges.length === 0) {
-    return text;
-  }
-
-  const userMessageStartLineStarts = collectUserMessageStartLineStarts(lines);
-  if (userMessageStartLineStarts.size === 0) {
-    return text;
-  }
-
-  const selectedSegments = collectSelectedUserMessageStartSegments(
-    state,
-    nonEmptyRanges,
-    userMessageStartLineStarts,
-  );
-
-  return prefixCopiedLinesInOrder(text, selectedSegments, USER_MESSAGE_COPY_PREFIX);
-}
-
-const pendingConversationScrollRestoreFrames = new WeakMap<HTMLElement, {
-  primary?: number;
-  secondary?: number;
-}>();
-
-function clearPendingConversationScrollRestoreFrames(scrollContainer: HTMLElement) {
-  const pending = pendingConversationScrollRestoreFrames.get(scrollContainer);
-  if (pending?.primary !== undefined) {
-    cancelAnimationFrame(pending.primary);
-  }
-  if (pending?.secondary !== undefined) {
-    cancelAnimationFrame(pending.secondary);
-  }
-  pendingConversationScrollRestoreFrames.delete(scrollContainer);
-}
-
-function restoreConversationScrollPositionIfNeeded(
-  scrollContainer: HTMLElement,
-  scrollTop: number,
-  scrollLeft: number,
-) {
-  const needsTopRestore = Math.abs(scrollContainer.scrollTop - scrollTop) > 0.5;
-  const needsLeftRestore = Math.abs(scrollContainer.scrollLeft - scrollLeft) > 0.5;
-  if (!needsTopRestore && !needsLeftRestore) {
-    return false;
-  }
-  if (needsTopRestore) {
-    scrollContainer.scrollTop = scrollTop;
-  }
-  if (needsLeftRestore) {
-    scrollContainer.scrollLeft = scrollLeft;
-  }
-  return true;
-}
-
-function preserveConversationScrollPosition(view: EditorView, update: () => void) {
-  const scrollContainer = getConversationScrollContainer(view);
-  if (!scrollContainer) {
-    update();
-    return;
-  }
-
-  const { scrollTop, scrollLeft } = scrollContainer;
-  clearPendingConversationScrollRestoreFrames(scrollContainer);
-  update();
-  const primary = requestAnimationFrame(() => {
-    const didRestore = restoreConversationScrollPositionIfNeeded(scrollContainer, scrollTop, scrollLeft);
-    if (!didRestore) {
-      pendingConversationScrollRestoreFrames.delete(scrollContainer);
-      return;
-    }
-    const secondary = requestAnimationFrame(() => {
-      restoreConversationScrollPositionIfNeeded(scrollContainer, scrollTop, scrollLeft);
-      pendingConversationScrollRestoreFrames.delete(scrollContainer);
-    });
-    pendingConversationScrollRestoreFrames.set(scrollContainer, { secondary });
-  });
-  pendingConversationScrollRestoreFrames.set(scrollContainer, { primary });
-}
-
-function isConversationScrollNearBottom(view: EditorView, thresholdPx = 24) {
-  const scrollContainer = getConversationScrollContainer(view);
-  if (!scrollContainer) {
-    return false;
-  }
-
-  return readConversationScrollOffsetFromBottom(scrollContainer) <= thresholdPx;
-}
-
-function scrollConversationToBottom(view: EditorView) {
-  const scrollContainer = getConversationScrollContainer(view);
-  if (!scrollContainer) {
-    return;
-  }
-
-  scrollContainer.scrollTop = resolveInitialConversationScrollTop(scrollContainer, null);
-}
-
 export function readConversationScrollOffsetFromBottom(scrollContainer: {
   readonly scrollHeight: number;
   readonly scrollTop: number;
@@ -4072,108 +606,6 @@ export function resolveInitialConversationScrollTop(scrollContainer: {
   }
 
   return resolveConversationScrollTopForOffsetFromBottom(scrollContainer, offsetFromBottom);
-}
-
-function restoreConversationScrollOffsetFromBottom(view: EditorView, offsetFromBottom: number) {
-  const scrollContainer = getConversationScrollContainer(view);
-  if (!scrollContainer) {
-    return;
-  }
-
-  scrollContainer.scrollTop = resolveConversationScrollTopForOffsetFromBottom(scrollContainer, offsetFromBottom);
-}
-
-function keepCursorWithinViewportPadding(view: EditorView) {
-  const scrollContainer = getConversationScrollContainer(view);
-  if (!scrollContainer || !view.hasFocus) {
-    return;
-  }
-
-  const cursor = view.state.selection.main.head;
-  const cursorRect = view.coordsAtPos(cursor, 1) ?? view.coordsAtPos(cursor, -1);
-  if (!cursorRect) {
-    return;
-  }
-
-  const scrollRect = scrollContainer.getBoundingClientRect();
-  const padding = view.defaultLineHeight * CURSOR_VIEWPORT_PADDING_LINES;
-  const minTop = scrollRect.top + padding;
-  const maxBottom = scrollRect.bottom - padding;
-
-  if (cursorRect.top < minTop) {
-    scrollContainer.scrollTop += cursorRect.top - minTop;
-  } else if (cursorRect.bottom > maxBottom) {
-    scrollContainer.scrollTop += cursorRect.bottom - maxBottom;
-  }
-}
-
-function keepSearchMatchWithinViewport(
-  view: EditorView,
-  activeMatchElement: HTMLElement,
-  overlayHeightPx: number,
-) {
-  const scrollContainer = getConversationScrollContainer(view);
-  if (!scrollContainer) {
-    return;
-  }
-
-  const matchRect = activeMatchElement.getBoundingClientRect();
-  const scrollRect = scrollContainer.getBoundingClientRect();
-  const topPadding = overlayHeightPx + SEARCH_MATCH_VIEWPORT_PADDING_PX;
-  const bottomPadding = SEARCH_MATCH_VIEWPORT_PADDING_PX;
-  const minTop = scrollRect.top + topPadding;
-  const maxBottom = scrollRect.bottom - bottomPadding;
-
-  if (matchRect.top < minTop) {
-    scrollContainer.scrollTop += matchRect.top - minTop;
-  } else if (matchRect.bottom > maxBottom) {
-    scrollContainer.scrollTop += matchRect.bottom - maxBottom;
-  }
-}
-
-export function getHistorySelectionLimitForPromptStart(doc: Text, promptStart: number) {
-  if (promptStart >= doc.length) {
-    return doc.length;
-  }
-  const promptLine = doc.lineAt(promptStart);
-  if (promptLine.number <= 1) {
-    return 0;
-  }
-
-  const separatorLine = doc.line(promptLine.number - 1);
-  return Math.max(0, separatorLine.from - 1);
-}
-
-export function getHistorySelectionLimit(state: EditorState) {
-  return getHistorySelectionLimitForPromptStart(state.doc, state.field(promptStartField));
-}
-
-export function resolveTranscriptRegionForPosition(
-  historyLimit: number,
-  position: number | null,
-): TranscriptRegion | null {
-  if (position === null) {
-    return null;
-  }
-
-  return position <= historyLimit ? "history" : "prompt";
-}
-
-export function resolveTranscriptRegionForPointer(
-  historyLimit: number,
-  precisePosition: number | null,
-  fallbackPosition: number | null,
-): TranscriptRegion | null {
-  return resolveTranscriptRegionForPosition(
-    historyLimit,
-    precisePosition ?? fallbackPosition,
-  );
-}
-
-export function promptSeparatorClassesForInteractionMode(
-  interactionMode: "default" | "plan",
-) {
-  return interactionMode === "plan" ? ["cm-line-promptSeparatorPlan"] : [];
 }
 
 export function shouldRenderPromptSeparator(historyLineCount: number) {
@@ -4242,6 +674,39 @@ function readPromptTextareaLayoutMetrics(
   };
 }
 
+let promptCaretMeasureElements: PromptCaretMeasureElements | null = null;
+
+function getPromptCaretMeasureElements(doc: Document): PromptCaretMeasureElements {
+  if (promptCaretMeasureElements) {
+    return promptCaretMeasureElements;
+  }
+
+  const mirror = doc.createElement("div");
+  mirror.style.position = "fixed";
+  mirror.style.left = "-100000px";
+  mirror.style.top = "0";
+  mirror.style.visibility = "hidden";
+  mirror.style.pointerEvents = "none";
+  mirror.style.whiteSpace = "pre-wrap";
+  mirror.style.overflowWrap = "break-word";
+  mirror.style.wordBreak = "break-word";
+  mirror.style.boxSizing = "border-box";
+
+  const textNode: globalThis.Text = doc.createTextNode("");
+  const marker = doc.createElement("span");
+  marker.style.display = "inline-block";
+  mirror.append(textNode, marker);
+  doc.body.append(mirror);
+
+  const elements: PromptCaretMeasureElements = {
+    mirror,
+    textNode,
+    marker,
+  };
+  promptCaretMeasureElements = elements;
+  return elements;
+}
+
 function measurePromptCaretBox(
   textarea: HTMLTextAreaElement,
   selection: StoredPromptSelection,
@@ -4295,39 +760,6 @@ function measurePromptCaretBox(
   }
 
   return { top, left, width, height, text: displayCharacter };
-}
-
-let promptCaretMeasureElements: PromptCaretMeasureElements | null = null;
-
-function getPromptCaretMeasureElements(doc: Document): PromptCaretMeasureElements {
-  if (promptCaretMeasureElements) {
-    return promptCaretMeasureElements;
-  }
-
-  const mirror = doc.createElement("div");
-  mirror.style.position = "fixed";
-  mirror.style.left = "-100000px";
-  mirror.style.top = "0";
-  mirror.style.visibility = "hidden";
-  mirror.style.pointerEvents = "none";
-  mirror.style.whiteSpace = "pre-wrap";
-  mirror.style.overflowWrap = "break-word";
-  mirror.style.wordBreak = "break-word";
-  mirror.style.boxSizing = "border-box";
-
-  const textNode: globalThis.Text = doc.createTextNode("");
-  const marker = doc.createElement("span");
-  marker.style.display = "inline-block";
-  mirror.append(textNode, marker);
-  doc.body.append(mirror);
-
-  const elements: PromptCaretMeasureElements = {
-    mirror,
-    textNode,
-    marker,
-  };
-  promptCaretMeasureElements = elements;
-  return elements;
 }
 
 export function shouldRedirectHistoryTypingToPrompt(
@@ -4475,75 +907,122 @@ export function shouldRedirectPlainTextPasteToPrompt(input: {
   return !input.targetIsPrompt && !input.hasFiles && !input.promptInputDisabled && input.text.length > 0;
 }
 
-export function shouldKeepCursorPaddingForTransactions(
-  transactions: ReadonlyArray<{
-    isUserEvent(event: string): boolean;
-  }>,
+function isFileChangeWidgetLine(line: AnnotatedLine) {
+  return (
+    line.inlineUnifiedDiff !== undefined
+    || line.inlineDiffLookup !== undefined
+    || line.inlineDiffChangedFiles !== undefined
+  );
+}
+
+function collectExpandedInlineDiffLookups(
+  blocks: ReadonlyArray<TranscriptBlock>,
+  precomputedBlockLines: ReadonlyArray<ReadonlyArray<AnnotatedLine>> | undefined,
+  expandedCommandSignatures: ReadonlySet<string>,
+  collapsedFileChangeSignatures: ReadonlySet<string>,
+  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionState>,
 ) {
-  return transactions.some((transaction) => transaction.isUserEvent("select.keyboard"));
+  const lookups = new Map<string, InlineDiffLookup>();
+  blocks.forEach((block, blockIndex) => {
+    for (const line of precomputedBlockLines?.[blockIndex] ?? blockToLines(block)) {
+      const signature = line.commandWidgetSignature;
+      const lookup = line.inlineDiffLookup;
+      if (!signature || !lookup || line.inlineUnifiedDiff) {
+        continue;
+      }
+      const resolvedStatus = resolvedInlineDiffBySignature.get(signature)?.status;
+      if (resolvedStatus === "loading" || resolvedStatus === "ready") {
+        continue;
+      }
+      const isExpanded = isFileChangeWidgetLine(line)
+        ? !collapsedFileChangeSignatures.has(signature)
+        : expandedCommandSignatures.has(signature);
+      if (isExpanded) {
+        lookups.set(signature, lookup);
+      }
+    }
+  });
+  return lookups;
 }
 
-function clampStoredSelectionToHistory(
-  state: EditorState,
-  selection: StoredSelection,
-): StoredSelection {
-  return resolveHistorySelectionForDocument(
-    state.doc,
-    state.field(promptStartField),
-    selection,
-  );
-}
-
-export function resolvePromptSelectionForDocument(
-  promptStart: number,
-  docLength: number,
-  stored: StoredPromptSelection | null,
-): StoredSelection {
-  const maxOffset = Math.max(0, docLength - promptStart);
-  const anchorOffset = Math.min(stored?.anchorOffset ?? maxOffset, maxOffset);
-  const headOffset = Math.min(stored?.headOffset ?? maxOffset, maxOffset);
-  return {
-    anchor: promptStart + anchorOffset,
-    head: promptStart + headOffset,
-  };
-}
-
-export function resolveHistorySelectionForDocument(
-  doc: Text,
-  promptStart: number,
-  stored: StoredSelection | null,
-): StoredSelection {
-  const historyLimit = getHistorySelectionLimitForPromptStart(doc, promptStart);
-  if (!stored) {
-    return { anchor: historyLimit, head: historyLimit };
+function resolveAttachmentViewerFitScale(
+  naturalSize: AttachmentViewerNaturalSize,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  if (naturalSize.width <= 0 || naturalSize.height <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
+    return 1;
   }
+  const availableWidth = Math.max(1, viewportWidth - 96);
+  const availableHeight = Math.max(1, viewportHeight - 96);
+  return Math.min(1, availableWidth / naturalSize.width, availableHeight / naturalSize.height);
+}
+
+function resolveAttachmentViewerPanLimits(
+  scale: number,
+  naturalSize: AttachmentViewerNaturalSize,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  const availableWidth = Math.max(1, viewportWidth - 96);
+  const availableHeight = Math.max(1, viewportHeight - 96);
+  const scaledWidth = naturalSize.width * scale;
+  const scaledHeight = naturalSize.height * scale;
   return {
-    anchor: Math.min(stored.anchor, historyLimit),
-    head: Math.min(stored.head, historyLimit),
+    maxX: Math.max(0, (scaledWidth - availableWidth) / 2),
+    maxY: Math.max(0, (scaledHeight - availableHeight) / 2),
   };
 }
 
-function resolveHistorySelection(
-  state: EditorState,
-  stored: StoredSelection | null,
-): StoredSelection {
-  return resolveHistorySelectionForDocument(
-    state.doc,
-    state.field(promptStartField),
-    stored,
+function canPanAttachmentViewer(
+  scale: number,
+  naturalSize: AttachmentViewerNaturalSize,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  if (naturalSize.width <= 0 || naturalSize.height <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
+    return false;
+  }
+  const { maxX, maxY } = resolveAttachmentViewerPanLimits(scale, naturalSize, viewportWidth, viewportHeight);
+  return maxX > 0 || maxY > 0;
+}
+
+function clampAttachmentViewerPan(
+  pan: AttachmentViewerPan,
+  scale: number,
+  naturalSize: AttachmentViewerNaturalSize,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  if (naturalSize.width <= 0 || naturalSize.height <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
+    return pan;
+  }
+
+  const { maxX, maxY } = resolveAttachmentViewerPanLimits(
+    scale,
+    naturalSize,
+    viewportWidth,
+    viewportHeight,
   );
+
+  return {
+    x: Math.min(maxX, Math.max(-maxX, pan.x)),
+    y: Math.min(maxY, Math.max(-maxY, pan.y)),
+  };
 }
 
 export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, TranscriptRendererProps>(
   function TranscriptRenderer(
     {
       blocks,
+      precomputedBlockLines,
+      precomputedBlockRows,
       historyCacheKey = null,
       historyState = "ready",
       historyStateMessage,
       composerAttachments = [],
       cwd,
-      projectRoot,
+      projectRoot: _projectRoot,
       paneActive = false,
       interactionMode: _interactionMode = "default",
       initialScrollOffsetFromBottom = null,
@@ -4561,19 +1040,21 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     ref,
   ) {
     const surfaceRef = useRef<HTMLDivElement | null>(null);
-    const editorRef = useRef<HTMLDivElement | null>(null);
-    const viewRef = useRef<EditorView | null>(null);
-    const attachmentViewerCanvasRef = useRef<HTMLDivElement | null>(null);
-    const syncingViewRef = useRef(false);
-    const submittingRef = useRef(false);
+    const blockHistoryRef = useRef<HTMLDivElement | null>(null);
+    const historyScrollContainerRef = useRef<HTMLDivElement | null>(null);
+    const historySelectAllTextRef = useRef<HTMLPreElement | null>(null);
+    const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+    const promptCaretRef = useRef<HTMLDivElement | null>(null);
+    const searchInputRef = useRef<HTMLInputElement | null>(null);
     const promptLayoutSyncFrameRef = useRef<number | null>(null);
-    const activeRegionRef = useRef<TranscriptRegion>("prompt");
-    const historySelectionRef = useRef<StoredSelection | null>(null);
+    const blockHistoryScrollIdleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const dragDepthRef = useRef(0);
     const draftRef = useRef("");
-    const promptSelectionRef = useRef<StoredPromptSelection>({
-      anchorOffset: 0,
-      headOffset: 0,
-    });
+    const submittingRef = useRef(false);
+    const promptSelectionRef = useRef<StoredPromptSelection>({ anchorOffset: 0, headOffset: 0 });
+    const activeRegionRef = useRef<TranscriptRegion>("prompt");
+    const searchReturnRegionRef = useRef<TranscriptRegion>("prompt");
+    const paneActiveRef = useRef(paneActive);
     const onSubmitRef = useRef(onSubmit);
     const onDraftChangeRef = useRef(onDraftChange);
     const onScrollOffsetFromBottomChangeRef = useRef(onScrollOffsetFromBottomChange);
@@ -4583,18 +1064,10 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const promptFocusDisabledRef = useRef(promptFocusDisabled);
     const promptInputDisabledRef = useRef(promptInputDisabled);
     const composerAttachmentsRef = useRef(composerAttachments);
-    const expandedCommandSignaturesRef = useRef<ReadonlySet<string>>(new Set());
-    const collapsedFileChangeSignaturesRef = useRef<ReadonlySet<string>>(new Set());
-    const flattenedBlocksRef = useRef<FlattenedBlocksBuild | null>(null);
-    const cachedRenderStatesRef = useRef<Map<string, CachedTranscriptRenderState>>(new Map());
-    const docBuildStateRef = useRef<TranscriptDocumentBuildState | null>(null);
-    const appliedDocModelRef = useRef<TranscriptDocumentModel | null>(null);
-    const appliedDecorationStateRef = useRef<BuiltDecorationState | null>(null);
-    const appliedDecorationInputsRef = useRef<AppliedDecorationInputs | null>(null);
-    const appliedDecorationSignatureRef = useRef("");
-    const appliedSearchDecorationSignatureRef = useRef("");
-    const activeHistoryCacheKeyRef = useRef<string | null>(historyCacheKey);
-    const dragDepthRef = useRef(0);
+    const lastHistoryCacheKeyRef = useRef<string | null>(historyCacheKey);
+    const scrollOffsetFromBottomRef = useRef(initialScrollOffsetFromBottom ?? 0);
+    const pendingHistoryRestoreOffsetRef = useRef<number | null>(initialScrollOffsetFromBottom);
+    const historyInitialScrollAppliedRef = useRef(false);
     const [expandedCommandSignatures, setExpandedCommandSignatures] = useState<ReadonlySet<string>>(
       () => new Set(),
     );
@@ -4604,13 +1077,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const [resolvedInlineDiffBySignature, setResolvedInlineDiffBySignature] = useState<
       ReadonlyMap<string, InlineDiffResolutionState>
     >(() => new Map());
-    const [isDraggingImages, setIsDraggingImages] = useState(false);
     const [searchVisible, setSearchVisible] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(-1);
+    const [historySelectAllEnabled, setHistorySelectAllEnabled] = useState(false);
     const [blockHistoryScrollTop, setBlockHistoryScrollTop] = useState(0);
     const [blockHistoryViewportHeight, setBlockHistoryViewportHeight] = useState(0);
     const [blockHistoryScrolling, setBlockHistoryScrolling] = useState(false);
+    const [isDraggingImages, setIsDraggingImages] = useState(false);
     const [attachmentViewerImage, setAttachmentViewerImage] = useState<AttachmentViewerImage | null>(null);
     const [attachmentViewerNaturalSize, setAttachmentViewerNaturalSize] = useState<AttachmentViewerNaturalSize>({
       width: 0,
@@ -4621,10 +1095,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const [attachmentViewerDragging, setAttachmentViewerDragging] = useState(false);
     const attachmentViewerScaleRef = useRef<number | null>(null);
     const attachmentViewerPanRef = useRef<AttachmentViewerPan>({ x: 0, y: 0 });
-    const attachmentViewerNaturalSizeRef = useRef<AttachmentViewerNaturalSize>({
-      width: 0,
-      height: 0,
-    });
+    const attachmentViewerNaturalSizeRef = useRef<AttachmentViewerNaturalSize>({ width: 0, height: 0 });
     const attachmentViewerFitScaleRef = useRef(1);
     const attachmentViewerDragStateRef = useRef<AttachmentViewerDragState | null>(null);
     const useNativePromptCaret = useMemo(
@@ -4636,45 +1107,58 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         ),
       [],
     );
-    const paneActiveRef = useRef(paneActive);
-    const promptCaretRef = useRef<HTMLDivElement | null>(null);
-    const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-    const searchOverlayRef = useRef<HTMLDivElement | null>(null);
-    const searchInputRef = useRef<HTMLInputElement | null>(null);
-    const searchReturnRegionRef = useRef<TranscriptRegion>("prompt");
-    const blockHistoryRef = useRef<HTMLDivElement | null>(null);
-    const historyScrollContainerRef = useRef<HTMLDivElement | null>(null);
-    const blockHistoryLastMetricsRef = useRef<BlockHistoryScrollMetrics | null>(null);
-    const blockHistoryScrollIdleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const handleBlockHistoryMeasuredHeightApplied = useCallback((
-      updates: ReadonlyArray<TranscriptHistoryMeasurementUpdate>,
-    ) => {
-      const scrollContainer = historyScrollContainerRef.current;
-      if (!scrollContainer || !DEBUG_BLOCK_HISTORY_SCROLL_DIAGNOSTICS) {
-        return;
-      }
-      const metrics = readBlockHistoryScrollMetrics(scrollContainer);
-      for (const update of updates) {
-        recordBlockHistoryScrollDiagnostic(
-          "geometry",
-          "measurement-applied",
-          metrics,
-          false,
-          {
-            blockIndex: update.blockIndex,
-            blockType: update.blockType,
-            blockKey: update.blockKey,
-            measurementKey: update.measurementKey,
-            previousHeight: update.previousHeight,
-            nextHeight: update.nextHeight,
-            deltaHeight: update.deltaHeight,
-            ...(update.commandWidgetSignatures.length > 0
-              ? { commandWidgetSignatures: update.commandWidgetSignatures.join(", ") }
-              : {}),
-          },
+
+    const historyPlainText = useMemo(
+      () =>
+        historySelectAllEnabled
+          ? flattenBlocks(blocks, precomputedBlockLines, pendingUserInputHighlight).lines.map((line) => line.text).join("\n")
+          : "",
+      [blocks, historySelectAllEnabled, pendingUserInputHighlight, precomputedBlockLines],
+    );
+    const compactPendingUserInputPrompt =
+      pendingUserInputHighlight !== undefined && !shouldRenderPromptSeparator(blocks.length);
+
+    const blockSearchMatches = useMemo(
+      () => (searchVisible ? findTranscriptHistoryBlockSearchMatches(blocks, searchQuery, precomputedBlockLines) : []),
+      [blocks, searchQuery, searchVisible, precomputedBlockLines],
+    );
+    const searchMatchCount = blockSearchMatches.length;
+    const resolvedActiveSearchMatchIndex =
+      searchMatchCount === 0
+        ? -1
+        : activeSearchMatchIndex >= 0 && activeSearchMatchIndex < searchMatchCount
+          ? activeSearchMatchIndex
+          : 0;
+    const activeBlockSearchMatch =
+      resolvedActiveSearchMatchIndex >= 0
+        ? blockSearchMatches[resolvedActiveSearchMatchIndex] ?? null
+        : null;
+    const expandedInlineDiffLookups = useMemo(
+      () => {
+        const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+        const lookups = collectExpandedInlineDiffLookups(
+          blocks,
+          precomputedBlockLines,
+          expandedCommandSignatures,
+          collapsedFileChangeSignatures,
+          resolvedInlineDiffBySignature,
         );
-      }
-    }, []);
+        recordSlowTranscriptSwitchDiagnostic({
+          label: "expanded-inline-diff-lookups",
+          historyCacheKey,
+          blockCount: blocks.length,
+        }, startedAt, 12);
+        return lookups;
+      },
+      [
+        blocks,
+        historyCacheKey,
+        precomputedBlockLines,
+        collapsedFileChangeSignatures,
+        expandedCommandSignatures,
+        resolvedInlineDiffBySignature,
+      ],
+    );
 
     useLayoutEffect(() => {
       onSubmitRef.current = onSubmit;
@@ -4686,16 +1170,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       promptFocusDisabledRef.current = promptFocusDisabled;
       promptInputDisabledRef.current = promptInputDisabled;
       composerAttachmentsRef.current = composerAttachments;
-      expandedCommandSignaturesRef.current = expandedCommandSignatures;
-      collapsedFileChangeSignaturesRef.current = collapsedFileChangeSignatures;
+      paneActiveRef.current = paneActive;
     }, [
-      collapsedFileChangeSignatures,
       composerAttachments,
-      expandedCommandSignatures,
       initialScrollOffsetFromBottom,
       onDraftChange,
       onScrollOffsetFromBottomChange,
       onSubmit,
+      paneActive,
       promptFocusDisabled,
       promptInputDisabled,
       resolveInlineDiff,
@@ -4709,382 +1191,25 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     }, [attachmentViewerNaturalSize, attachmentViewerPan, attachmentViewerScale]);
 
     useEffect(() => {
-      if (!DEBUG_USE_BLOCK_HISTORY) {
-        return undefined;
+      if (historyCacheKey !== lastHistoryCacheKeyRef.current) {
+        lastHistoryCacheKeyRef.current = historyCacheKey;
+        historyInitialScrollAppliedRef.current = false;
+        pendingHistoryRestoreOffsetRef.current = initialScrollOffsetFromBottomRef.current;
       }
+    }, [historyCacheKey]);
 
-      const scrollContainer = historyScrollContainerRef.current;
-      if (!scrollContainer) {
-        return undefined;
+    useEffect(() => {
+      if (initialScrollOffsetFromBottom !== null) {
+        scrollOffsetFromBottomRef.current = initialScrollOffsetFromBottom;
       }
+    }, [initialScrollOffsetFromBottom]);
 
-      let frameId: number | null = null;
-      let pendingSyncSource: "scroll" | "geometry" = "geometry";
-      blockHistoryLastMetricsRef.current = readBlockHistoryScrollMetrics(scrollContainer);
-      recordBlockHistoryScrollDiagnostic(
-        "geometry",
-        "effect-start",
-        blockHistoryLastMetricsRef.current,
-        false,
+    const syncBlockHistoryActiveState = useCallback(() => {
+      blockHistoryRef.current?.classList.toggle(
+        "transcript-history__blockRoot--active",
+        activeRegionRef.current === "history",
       );
-      const syncFromContainer = () => {
-        frameId = null;
-        const source = pendingSyncSource;
-        pendingSyncSource = "geometry";
-        setBlockHistoryScrollTop((current) =>
-          (() => {
-            const nextWindowTop =
-              Math.max(0, Math.floor(scrollContainer.scrollTop / BLOCK_HISTORY_SCROLL_WINDOW_STEP_PX))
-              * BLOCK_HISTORY_SCROLL_WINDOW_STEP_PX;
-            return current === nextWindowTop ? current : nextWindowTop;
-          })());
-        setBlockHistoryViewportHeight((current) =>
-          current === scrollContainer.clientHeight ? current : scrollContainer.clientHeight);
-        onScrollOffsetFromBottomChangeRef.current?.(
-          scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight,
-        );
-        const nextMetrics = readBlockHistoryScrollMetrics(scrollContainer);
-        const previousMetrics = blockHistoryLastMetricsRef.current;
-        blockHistoryLastMetricsRef.current = nextMetrics;
-        recordBlockHistoryScrollDiagnostic(
-          source,
-          source === "scroll" ? "container-scroll" : "geometry-sync",
-          nextMetrics,
-          false,
-          {
-            ...(previousMetrics ? { deltaTop: nextMetrics.scrollTop - previousMetrics.scrollTop } : {}),
-            ...(previousMetrics ? { deltaHeight: nextMetrics.scrollHeight - previousMetrics.scrollHeight } : {}),
-          },
-        );
-      };
-      const scheduleSync = () => {
-        if (frameId !== null) {
-          return;
-        }
-        frameId = requestAnimationFrame(syncFromContainer);
-      };
-      const handleScroll = () => {
-        setBlockHistoryScrolling((current) => current ? current : true);
-        if (blockHistoryScrollIdleTimeoutRef.current !== null) {
-          clearTimeout(blockHistoryScrollIdleTimeoutRef.current);
-        }
-        blockHistoryScrollIdleTimeoutRef.current = setTimeout(() => {
-          blockHistoryScrollIdleTimeoutRef.current = null;
-          setBlockHistoryScrolling(false);
-        }, BLOCK_HISTORY_SCROLL_IDLE_MS);
-        pendingSyncSource = "scroll";
-        scheduleSync();
-      };
-
-      syncFromContainer();
-      scrollContainer.addEventListener("scroll", handleScroll, { passive: true });
-
-      let resizeObserver: ResizeObserver | null = null;
-      if (typeof ResizeObserver !== "undefined") {
-        resizeObserver = new ResizeObserver(() => {
-          pendingSyncSource = "geometry";
-          scheduleSync();
-        });
-        resizeObserver.observe(scrollContainer);
-        if (blockHistoryRef.current) {
-          resizeObserver.observe(blockHistoryRef.current);
-        }
-      }
-
-      return () => {
-        scrollContainer.removeEventListener("scroll", handleScroll);
-        resizeObserver?.disconnect();
-        if (frameId !== null) {
-          cancelAnimationFrame(frameId);
-        }
-        if (blockHistoryScrollIdleTimeoutRef.current !== null) {
-          clearTimeout(blockHistoryScrollIdleTimeoutRef.current);
-          blockHistoryScrollIdleTimeoutRef.current = null;
-        }
-      };
-    }, [blocks, collapsedFileChangeSignatures, expandedCommandSignatures, resolvedInlineDiffBySignature]);
-
-    const closeAttachmentViewer = useCallback(() => {
-      attachmentViewerDragStateRef.current = null;
-      setAttachmentViewerDragging(false);
-      setAttachmentViewerImage(null);
-      setAttachmentViewerNaturalSize({ width: 0, height: 0 });
-      setAttachmentViewerScale(null);
-      setAttachmentViewerPan({ x: 0, y: 0 });
-      attachmentViewerScaleRef.current = null;
-      attachmentViewerPanRef.current = { x: 0, y: 0 };
-      attachmentViewerNaturalSizeRef.current = { width: 0, height: 0 };
-      attachmentViewerFitScaleRef.current = 1;
     }, []);
-
-    const openAttachmentViewer = useCallback((src: string, name: string) => {
-      attachmentViewerDragStateRef.current = null;
-      setAttachmentViewerDragging(false);
-      setAttachmentViewerImage({ src, name });
-      setAttachmentViewerNaturalSize({ width: 0, height: 0 });
-      setAttachmentViewerScale(null);
-      setAttachmentViewerPan({ x: 0, y: 0 });
-      attachmentViewerScaleRef.current = null;
-      attachmentViewerPanRef.current = { x: 0, y: 0 };
-      attachmentViewerNaturalSizeRef.current = { width: 0, height: 0 };
-      attachmentViewerFitScaleRef.current = 1;
-    }, []);
-
-    const updateAttachmentViewerScaleAndPan = useCallback((
-      nextScale: number,
-      nextPan: AttachmentViewerPan,
-    ) => {
-      const clampedPan = clampAttachmentViewerPan(
-        nextPan,
-        nextScale,
-        attachmentViewerNaturalSizeRef.current,
-        window.innerWidth,
-        window.innerHeight,
-      );
-      attachmentViewerScaleRef.current = nextScale;
-      attachmentViewerPanRef.current = clampedPan;
-      setAttachmentViewerScale(nextScale);
-      setAttachmentViewerPan(clampedPan);
-    }, []);
-
-    useEffect(() => {
-      if (!promptInputDisabled) {
-        return;
-      }
-      const textarea = promptTextareaRef.current;
-      if (textarea && document.activeElement === textarea) {
-        textarea.blur();
-      }
-    }, [promptInputDisabled]);
-
-    useEffect(() => {
-      if (!attachmentViewerImage) {
-        return;
-      }
-
-      const handleKeyDown = (event: KeyboardEvent) => {
-        if (event.key !== "Escape") {
-          return;
-        }
-        event.preventDefault();
-        closeAttachmentViewer();
-      };
-
-      window.addEventListener("keydown", handleKeyDown);
-      return () => {
-        window.removeEventListener("keydown", handleKeyDown);
-      };
-    }, [attachmentViewerImage, closeAttachmentViewer]);
-
-    useEffect(() => {
-      const surface = surfaceRef.current;
-      if (!surface) {
-        return undefined;
-      }
-
-      const handleAttachmentPreviewClick = (event: MouseEvent) => {
-        const target = event.target;
-        if (!(target instanceof HTMLElement)) {
-          return;
-        }
-        const previewTrigger = target.closest<HTMLElement>("[data-attachment-viewer-src]");
-        const src = previewTrigger?.dataset.attachmentViewerSrc;
-        const name = previewTrigger?.dataset.attachmentViewerName;
-        if (!src || !name) {
-          return;
-        }
-        event.preventDefault();
-        openAttachmentViewer(src, name);
-      };
-
-      surface.addEventListener("click", handleAttachmentPreviewClick);
-      return () => {
-        surface.removeEventListener("click", handleAttachmentPreviewClick);
-      };
-    }, [openAttachmentViewer]);
-
-    useEffect(() => {
-      if (!attachmentViewerImage || attachmentViewerScaleRef.current === null) {
-        return;
-      }
-
-      const handleResize = () => {
-        const currentScale = attachmentViewerScaleRef.current;
-        if (currentScale === null) {
-          return;
-        }
-        const nextFitScale = resolveAttachmentViewerFitScale(
-          attachmentViewerNaturalSizeRef.current,
-          window.innerWidth,
-          window.innerHeight,
-        );
-        const shouldSnapToFit = Math.abs(currentScale - attachmentViewerFitScaleRef.current) < 0.001;
-        attachmentViewerFitScaleRef.current = nextFitScale;
-        if (shouldSnapToFit) {
-          attachmentViewerScaleRef.current = nextFitScale;
-          attachmentViewerPanRef.current = { x: 0, y: 0 };
-          setAttachmentViewerScale(nextFitScale);
-          setAttachmentViewerPan({ x: 0, y: 0 });
-          return;
-        }
-        const clampedPan = clampAttachmentViewerPan(
-          attachmentViewerPanRef.current,
-          currentScale,
-          attachmentViewerNaturalSizeRef.current,
-          window.innerWidth,
-          window.innerHeight,
-        );
-        attachmentViewerPanRef.current = clampedPan;
-        setAttachmentViewerPan(clampedPan);
-      };
-
-      window.addEventListener("resize", handleResize);
-      return () => {
-        window.removeEventListener("resize", handleResize);
-      };
-    }, [attachmentViewerImage]);
-
-    const docBuildInputs = useMemo(
-      () =>
-        buildAppliedDecorationInputs(
-          expandedCommandSignatures,
-          collapsedFileChangeSignatures,
-          resolvedInlineDiffBySignature,
-          cwd,
-          projectRoot,
-          getPendingHighlightSignature(pendingUserInputHighlight),
-        ),
-      [collapsedFileChangeSignatures, cwd, expandedCommandSignatures, pendingUserInputHighlight, projectRoot, resolvedInlineDiffBySignature],
-    );
-    const cachedRenderState =
-      historyCacheKey !== null
-        ? (cachedRenderStatesRef.current.get(historyCacheKey) ?? null)
-        : null;
-    const docBuild = useMemo(
-      () =>
-        measureTranscriptSwitchDiagnostic({
-          label: "transcript-renderer-doc-build",
-          historyCacheKey,
-          blockCount: blocks.length,
-          cacheHit: cachedRenderState ? isCachedTranscriptRenderStateCurrent(cachedRenderState, blocks, docBuildInputs) : false,
-        }, () => {
-          if (cachedRenderState && isCachedTranscriptRenderStateCurrent(cachedRenderState, blocks, docBuildInputs)) {
-            return cachedRenderState.docBuild;
-          }
-          return buildTranscriptDocument(
-            blocks,
-            expandedCommandSignatures,
-            collapsedFileChangeSignatures,
-            resolvedInlineDiffBySignature,
-            cwd,
-            projectRoot,
-            pendingUserInputHighlight,
-            docBuildInputs,
-            cachedRenderState?.docBuild.flattened ?? flattenedBlocksRef.current,
-            cachedRenderState
-              ? {
-                  ...cachedRenderState.docBuild,
-                  inputs: cachedRenderState.inputs,
-                }
-              : docBuildStateRef.current,
-          );
-        }),
-      [
-        blocks,
-        cachedRenderState,
-        collapsedFileChangeSignatures,
-        cwd,
-        docBuildInputs,
-        expandedCommandSignatures,
-        pendingUserInputHighlight,
-        projectRoot,
-        resolvedInlineDiffBySignature,
-        historyCacheKey,
-      ],
-    );
-    const docModel = docBuild.docModel;
-    const compactPendingUserInputPrompt =
-      pendingUserInputHighlight !== undefined && !shouldRenderPromptSeparator(docModel.historyLineCount);
-    const searchHaystack = useMemo(
-      () =>
-        searchVisible && docModel.promptStart > 0
-          ? docModel.text.slice(0, docModel.promptStart).toLocaleLowerCase()
-          : "",
-      [docModel.promptStart, docModel.text, searchVisible],
-    );
-    const searchMatches = useMemo(
-      () =>
-        searchVisible
-          ? findTranscriptSearchMatchesInHaystack(searchHaystack, searchQuery.toLocaleLowerCase())
-          : [],
-      [searchHaystack, searchQuery, searchVisible],
-    );
-    const blockSearchMatches = useMemo(
-      () =>
-        searchVisible
-          ? findTranscriptHistoryBlockSearchMatches(blocks, searchQuery)
-          : [],
-      [blocks, searchQuery, searchVisible],
-    );
-    const searchMatchCount = DEBUG_USE_BLOCK_HISTORY ? blockSearchMatches.length : searchMatches.length;
-    const resolvedActiveSearchMatchIndex =
-      searchMatchCount === 0
-        ? -1
-        : activeSearchMatchIndex >= 0 && activeSearchMatchIndex < searchMatchCount
-          ? activeSearchMatchIndex
-          : 0;
-    const activeSearchMatch =
-      !DEBUG_USE_BLOCK_HISTORY && resolvedActiveSearchMatchIndex >= 0
-        ? searchMatches[resolvedActiveSearchMatchIndex] ?? null
-        : null;
-    const activeBlockSearchMatch =
-      DEBUG_USE_BLOCK_HISTORY && resolvedActiveSearchMatchIndex >= 0
-        ? blockSearchMatches[resolvedActiveSearchMatchIndex] ?? null
-        : null;
-    const initialDocModelRef = useRef(docModel);
-    const initialDecorationStateRef = useRef(
-      cachedRenderState && isCachedTranscriptRenderStateCurrent(cachedRenderState, blocks, docBuildInputs)
-        ? cachedRenderState.decorationState
-        : buildDecorationState(
-            docModel.lines,
-            docModel.marks,
-            docModel.widgets,
-            docModel.replacements,
-        ),
-    );
-    const docModelRef = useRef(docModel);
-    const storeCachedRenderState = useCallback((
-      decorationState: BuiltDecorationState,
-      decorationSignature: string,
-    ) => {
-      if (historyCacheKey === null) {
-        return;
-      }
-      cachedRenderStatesRef.current.set(historyCacheKey, {
-        blocks,
-        docBuild,
-        inputs: docBuildInputs,
-        decorationState,
-        decorationSignature,
-      });
-    }, [blocks, docBuild, docBuildInputs, historyCacheKey]);
-
-    useEffect(() => {
-      flattenedBlocksRef.current = docBuild.flattened;
-      docBuildStateRef.current = {
-        ...docBuild,
-        inputs: docBuildInputs,
-      };
-      docModelRef.current = docModel;
-    }, [docBuild, docBuild.flattened, docBuildInputs, docModel]);
-
-    useEffect(() => {
-      const decorationState = appliedDecorationStateRef.current;
-      if (!decorationState || appliedDocModelRef.current !== docModel) {
-        return;
-      }
-      storeCachedRenderState(decorationState, appliedDecorationSignatureRef.current);
-    }, [docModel, storeCachedRenderState]);
 
     const setPromptSelectionValue = useCallback((anchorOffset: number, headOffset: number) => {
       promptSelectionRef.current = { anchorOffset, headOffset };
@@ -5126,7 +1251,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           || activeElement instanceof HTMLTextAreaElement
           || activeElement.isContentEditable,
         isPromptElement: activeElement === textarea,
-        isHistoryElement: editorRef.current?.contains(activeElement) === true,
+        isHistoryElement: blockHistoryRef.current?.contains(activeElement) === true,
       });
     }, []);
 
@@ -5159,6 +1284,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
       applyPromptCaretBox(measurePromptCaretBox(textarea, promptSelectionRef.current, layoutMetrics));
     }, [applyPromptCaretBox, isFocusedEditableWithinPane, useNativePromptCaret]);
+
     const syncPromptSelection = useCallback((
       textarea = promptTextareaRef.current,
       layoutMetrics?: PromptTextareaLayoutMetrics,
@@ -5170,60 +1296,16 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       syncPromptCaretBox(textarea, layoutMetrics);
     }, [setPromptSelectionValue, syncPromptCaretBox]);
 
-    useEffect(() => {
-      paneActiveRef.current = paneActive;
-      const textarea = promptTextareaRef.current;
-      if (!paneActive && textarea && document.activeElement === textarea) {
-        setPromptSelectionValue(
-          textarea.selectionStart ?? draftRef.current.length,
-          textarea.selectionEnd ?? draftRef.current.length,
-        );
-        textarea.blur();
-      }
-      syncPromptCaretBox(textarea);
-    }, [paneActive, setPromptSelectionValue, syncPromptCaretBox]);
-
-    const getHistoryContainer = useCallback(() => {
-      return DEBUG_USE_BLOCK_HISTORY ? blockHistoryRef.current : editorRef.current;
-    }, []);
-
     const clearHistorySelection = useCallback(() => {
       if (typeof window === "undefined") {
         return;
       }
       const selection = window.getSelection();
-      if (!hasNonCollapsedSelectionInsideElement(selection, getHistoryContainer())) {
+      if (!hasNonCollapsedSelectionInsideElement(selection, blockHistoryRef.current)) {
         return;
       }
       selection?.removeAllRanges();
-    }, [getHistoryContainer]);
-
-    const syncBlockHistoryActiveState = useCallback(() => {
-      blockHistoryRef.current?.classList.toggle(
-        "transcript-history__blockRoot--active",
-        activeRegionRef.current === "history",
-      );
     }, []);
-
-    const focusPromptInput = useCallback((_options?: FocusPromptOptions) => {
-      if (promptFocusDisabledRef.current) {
-        return;
-      }
-      activeRegionRef.current = "prompt";
-      syncBlockHistoryActiveState();
-      const textarea = promptTextareaRef.current;
-      if (!textarea) {
-        return;
-      }
-      textarea.focus({ preventScroll: true });
-      const maxOffset = textarea.value.length;
-      const { anchorOffset: storedAnchorOffset, headOffset: storedHeadOffset } = promptSelectionRef.current;
-      const anchorOffset = Math.min(storedAnchorOffset, maxOffset);
-      const headOffset = Math.min(storedHeadOffset, maxOffset);
-      textarea.setSelectionRange(anchorOffset, headOffset);
-      setPromptSelectionValue(anchorOffset, headOffset);
-      syncPromptCaretBox(textarea);
-    }, [setPromptSelectionValue, syncBlockHistoryActiveState, syncPromptCaretBox]);
 
     const preparePromptInteraction = useCallback(() => {
       clearHistorySelection();
@@ -5245,6 +1327,99 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       collapsePromptSelectionToCaret();
     }, [collapsePromptSelectionToCaret]);
 
+    const syncHistoryMetrics = useCallback(() => {
+      const scrollContainer = historyScrollContainerRef.current;
+      if (!scrollContainer) {
+        return;
+      }
+      setBlockHistoryScrollTop((current) => current === scrollContainer.scrollTop ? current : scrollContainer.scrollTop);
+      setBlockHistoryViewportHeight((current) =>
+        current === scrollContainer.clientHeight ? current : scrollContainer.clientHeight);
+      const offset = readConversationScrollOffsetFromBottom(scrollContainer);
+      scrollOffsetFromBottomRef.current = offset;
+      onScrollOffsetFromBottomChangeRef.current?.(offset);
+    }, []);
+
+    const scheduleHistoryScrollRestore = useCallback((offsetFromBottom?: number | null) => {
+      if (offsetFromBottom === null) {
+        pendingHistoryRestoreOffsetRef.current = null;
+        return;
+      }
+      if (typeof offsetFromBottom === "number") {
+        pendingHistoryRestoreOffsetRef.current = Math.max(0, offsetFromBottom);
+        return;
+      }
+      const scrollContainer = historyScrollContainerRef.current;
+      pendingHistoryRestoreOffsetRef.current = scrollContainer
+        ? readConversationScrollOffsetFromBottom(scrollContainer)
+        : scrollOffsetFromBottomRef.current;
+    }, []);
+
+    useEffect(() => {
+      const scrollContainer = historyScrollContainerRef.current;
+      if (!scrollContainer) {
+        return undefined;
+      }
+
+      const handleScroll = () => {
+        setBlockHistoryScrolling((current) => current ? current : true);
+        if (blockHistoryScrollIdleTimeoutRef.current !== null) {
+          clearTimeout(blockHistoryScrollIdleTimeoutRef.current);
+        }
+        blockHistoryScrollIdleTimeoutRef.current = setTimeout(() => {
+          blockHistoryScrollIdleTimeoutRef.current = null;
+          setBlockHistoryScrolling(false);
+        }, 120);
+        syncHistoryMetrics();
+      };
+
+      syncHistoryMetrics();
+      scrollContainer.addEventListener("scroll", handleScroll, { passive: true });
+
+      let resizeObserver: ResizeObserver | null = null;
+      if (typeof ResizeObserver !== "undefined") {
+        resizeObserver = new ResizeObserver(() => {
+          syncHistoryMetrics();
+        });
+        resizeObserver.observe(scrollContainer);
+        if (blockHistoryRef.current) {
+          resizeObserver.observe(blockHistoryRef.current);
+        }
+      }
+
+      return () => {
+        scrollContainer.removeEventListener("scroll", handleScroll);
+        resizeObserver?.disconnect();
+        if (blockHistoryScrollIdleTimeoutRef.current !== null) {
+          clearTimeout(blockHistoryScrollIdleTimeoutRef.current);
+          blockHistoryScrollIdleTimeoutRef.current = null;
+        }
+      };
+    }, [syncHistoryMetrics]);
+
+    useLayoutEffect(() => {
+      const scrollContainer = historyScrollContainerRef.current;
+      if (!scrollContainer) {
+        return;
+      }
+
+      const targetOffset = historyInitialScrollAppliedRef.current
+        ? pendingHistoryRestoreOffsetRef.current ?? scrollOffsetFromBottomRef.current
+        : initialScrollOffsetFromBottomRef.current;
+      scrollContainer.scrollTop = resolveInitialConversationScrollTop(scrollContainer, targetOffset ?? null);
+      historyInitialScrollAppliedRef.current = true;
+      pendingHistoryRestoreOffsetRef.current = null;
+      syncHistoryMetrics();
+    }, [
+      blocks,
+      collapsedFileChangeSignatures,
+      expandedCommandSignatures,
+      historyCacheKey,
+      historyState,
+      resolvedInlineDiffBySignature,
+      syncHistoryMetrics,
+    ]);
+
     const autosizePromptInput = useCallback((
       textarea = promptTextareaRef.current,
       layoutMetrics?: PromptTextareaLayoutMetrics,
@@ -5253,28 +1428,15 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         return;
       }
 
-      const view = viewRef.current;
-      const scrollSnapshots = captureScrollPositionSnapshots(
-        textarea,
-        view ? getConversationScrollContainer(view) : null,
+      const scrollSnapshots = captureScrollPositionSnapshots(textarea, historyScrollContainerRef.current);
+      textarea.style.height = "auto";
+      const resolvedLayoutMetrics = layoutMetrics ?? readPromptTextareaLayoutMetrics(textarea);
+      const { height, overflowY } = resolvePromptTextareaLayout(
+        resolvedLayoutMetrics.resolvedLineHeight,
+        textarea.scrollHeight,
       );
-
-      const applyAutosize = () => {
-        textarea.style.height = "auto";
-        const resolvedLayoutMetrics = layoutMetrics ?? readPromptTextareaLayoutMetrics(textarea);
-        const { height, overflowY } = resolvePromptTextareaLayout(
-          resolvedLayoutMetrics.resolvedLineHeight,
-          textarea.scrollHeight,
-        );
-        const nextTextareaHeight = `${height}px`;
-        if (textarea.style.height !== nextTextareaHeight) {
-          textarea.style.height = nextTextareaHeight;
-        }
-        if (textarea.style.overflowY !== overflowY) {
-          textarea.style.overflowY = overflowY;
-        }
-      };
-      applyAutosize();
+      textarea.style.height = `${height}px`;
+      textarea.style.overflowY = overflowY;
       restoreScrollPositionSnapshots(scrollSnapshots);
     }, []);
 
@@ -5314,6 +1476,43 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         promptLayoutSyncFrameRef.current = null;
       }
     }, []);
+
+    const focusPromptInput = useCallback((_options?: FocusPromptOptions) => {
+      if (promptFocusDisabledRef.current) {
+        return;
+      }
+      activeRegionRef.current = "prompt";
+      syncBlockHistoryActiveState();
+      const textarea = promptTextareaRef.current;
+      if (!textarea) {
+        return;
+      }
+      textarea.focus({ preventScroll: true });
+      const maxOffset = textarea.value.length;
+      const { anchorOffset: storedAnchorOffset, headOffset: storedHeadOffset } = promptSelectionRef.current;
+      const anchorOffset = Math.min(storedAnchorOffset, maxOffset);
+      const headOffset = Math.min(storedHeadOffset, maxOffset);
+      textarea.setSelectionRange(anchorOffset, headOffset);
+      setPromptSelectionValue(anchorOffset, headOffset);
+      syncPromptCaretBox(textarea);
+    }, [setPromptSelectionValue, syncBlockHistoryActiveState, syncPromptCaretBox]);
+
+    const focusPromptRegion = useCallback((options?: FocusPromptOptions) => {
+      activeRegionRef.current = "prompt";
+      syncBlockHistoryActiveState();
+      preparePromptInteraction();
+      requestAnimationFrame(() => {
+        focusPromptInput(options);
+      });
+    }, [focusPromptInput, preparePromptInteraction, syncBlockHistoryActiveState]);
+
+    const focusHistoryRegion = useCallback(() => {
+      prepareHistoryInteraction();
+      activeRegionRef.current = "history";
+      syncPromptCaretBox();
+      syncBlockHistoryActiveState();
+      blockHistoryRef.current?.focus({ preventScroll: true });
+    }, [prepareHistoryInteraction, syncBlockHistoryActiveState, syncPromptCaretBox]);
 
     const insertTextIntoDraft = useCallback((text: string) => {
       preparePromptInteraction();
@@ -5379,12 +1578,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       });
     }, [autosizePromptInput, preparePromptInteraction, setDraftValue, setPromptSelectionValue, syncPromptSelection]);
 
-    const handlePromptInputChange = useCallback((event: ReactChangeEvent<HTMLTextAreaElement>) => {
-      preparePromptInteraction();
-      setDraftValue(event.target.value, event.target);
-      schedulePromptLayoutSync(event.target);
-    }, [preparePromptInteraction, schedulePromptLayoutSync, setDraftValue]);
-
     const submitDraft = useCallback(async () => {
       const value = draftRef.current.trim();
       if (
@@ -5414,11 +1607,11 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       return true;
     }, [autosizePromptInput, focusPromptInput, setDraftValue]);
 
-    const selectAllHistoryText = useCallback(() => {
+    const applyHistoryTextSelection = useCallback(() => {
       if (typeof window === "undefined" || typeof document === "undefined") {
         return false;
       }
-      const container = getHistoryContainer();
+      const container = historySelectAllTextRef.current ?? blockHistoryRef.current;
       const selection = window.getSelection();
       if (!container || !selection) {
         return false;
@@ -5428,8 +1621,219 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       selection.removeAllRanges();
       selection.addRange(range);
       prepareHistoryInteraction();
+      activeRegionRef.current = "history";
+      syncBlockHistoryActiveState();
       return true;
-    }, [getHistoryContainer, prepareHistoryInteraction]);
+    }, [prepareHistoryInteraction, syncBlockHistoryActiveState]);
+    const selectAllHistoryText = useCallback(() => {
+      if (!historySelectAllEnabled) {
+        setHistorySelectAllEnabled(true);
+        if (typeof window !== "undefined") {
+          window.requestAnimationFrame(() => {
+            applyHistoryTextSelection();
+          });
+        }
+        return true;
+      }
+      return applyHistoryTextSelection();
+    }, [applyHistoryTextSelection, historySelectAllEnabled]);
+
+    const requestInlineDiff = useCallback((signature: string, lookup: InlineDiffLookup) => {
+      const resolver = resolveInlineDiffRef.current;
+      if (!resolver) {
+        return;
+      }
+
+      let shouldFetch = false;
+      scheduleHistoryScrollRestore();
+      setResolvedInlineDiffBySignature((current) => {
+        const existing = current.get(signature);
+        if (existing?.status === "loading" || existing?.status === "ready") {
+          return current;
+        }
+        const next = new Map(current);
+        next.set(signature, { status: "loading" });
+        shouldFetch = true;
+        return next;
+      });
+
+      if (!shouldFetch) {
+        return;
+      }
+
+      void resolver(lookup)
+        .then((diff) => {
+          const normalizedDiff = diff?.trim();
+          scheduleHistoryScrollRestore();
+          setResolvedInlineDiffBySignature((current) => {
+            const next = new Map(current);
+            if (normalizedDiff && normalizedDiff.length > 0) {
+              next.set(signature, { status: "ready", diff: normalizedDiff });
+            } else {
+              next.set(signature, { status: "error" });
+            }
+            return next;
+          });
+        })
+        .catch(() => {
+          scheduleHistoryScrollRestore();
+          setResolvedInlineDiffBySignature((current) => {
+            const next = new Map(current);
+            next.set(signature, { status: "error" });
+            return next;
+          });
+        });
+    }, [scheduleHistoryScrollRestore]);
+
+    useEffect(() => {
+      for (const [signature, lookup] of expandedInlineDiffLookups) {
+        requestInlineDiff(signature, lookup);
+      }
+    }, [expandedInlineDiffLookups, requestInlineDiff]);
+
+    const handleBlockHistoryCommandWidgetToggle = useCallback((
+      input: {
+        readonly signature: string;
+        readonly isFileChange: boolean;
+        readonly inlineDiffLookup?: InlineDiffLookup;
+      },
+    ) => {
+      scheduleHistoryScrollRestore();
+      if (input.isFileChange) {
+        const shouldExpand = collapsedFileChangeSignatures.has(input.signature);
+        if (shouldExpand && input.inlineDiffLookup) {
+          requestInlineDiff(input.signature, input.inlineDiffLookup);
+        }
+        setCollapsedFileChangeSignatures((current) => {
+          const next = new Set(current);
+          if (next.has(input.signature)) {
+            next.delete(input.signature);
+          } else {
+            next.add(input.signature);
+          }
+          return next;
+        });
+        return;
+      }
+
+      const shouldExpand = !expandedCommandSignatures.has(input.signature);
+      if (shouldExpand && input.inlineDiffLookup) {
+        requestInlineDiff(input.signature, input.inlineDiffLookup);
+      }
+      setExpandedCommandSignatures((current) => {
+        const next = new Set(current);
+        if (next.has(input.signature)) {
+          next.delete(input.signature);
+        } else {
+          next.add(input.signature);
+        }
+        return next;
+      });
+    }, [collapsedFileChangeSignatures, expandedCommandSignatures, requestInlineDiff, scheduleHistoryScrollRestore]);
+
+    const focusSearchInput = useCallback(() => {
+      requestAnimationFrame(() => {
+        const input = searchInputRef.current;
+        if (!input) {
+          return;
+        }
+        input.focus({ preventScroll: true });
+        input.select();
+      });
+    }, []);
+
+    const closeSearch = useCallback((options?: { readonly restoreFocus?: boolean }) => {
+      setSearchVisible(false);
+      if (options?.restoreFocus === false) {
+        return;
+      }
+      requestAnimationFrame(() => {
+        if (searchReturnRegionRef.current === "history") {
+          focusHistoryRegion();
+          return;
+        }
+        focusPromptRegion({ reveal: false });
+      });
+    }, [focusHistoryRegion, focusPromptRegion]);
+
+    const openSearch = useCallback(() => {
+      if (!searchVisible) {
+        searchReturnRegionRef.current = activeRegionRef.current;
+      }
+      setHistorySelectAllEnabled(true);
+      setSearchVisible(true);
+      focusSearchInput();
+    }, [focusSearchInput, searchVisible]);
+
+    const moveSearchMatch = useCallback((direction: 1 | -1) => {
+      setActiveSearchMatchIndex((currentIndex) =>
+        getNextTranscriptSearchMatchIndex({
+          currentIndex,
+          matchCount: searchMatchCount,
+          direction,
+        }));
+    }, [searchMatchCount]);
+
+    useEffect(() => {
+      if (!searchVisible) {
+        return;
+      }
+      focusSearchInput();
+    }, [focusSearchInput, searchVisible]);
+
+    useEffect(() => {
+      if (!searchVisible) {
+        return;
+      }
+      if (searchMatchCount === 0) {
+        if (activeSearchMatchIndex !== -1) {
+          setActiveSearchMatchIndex(-1);
+        }
+        return;
+      }
+      if (activeSearchMatchIndex < 0 || activeSearchMatchIndex >= searchMatchCount) {
+        setActiveSearchMatchIndex(0);
+      }
+    }, [activeSearchMatchIndex, searchMatchCount, searchVisible]);
+
+    useEffect(() => {
+      if (!searchVisible || !activeBlockSearchMatch) {
+        return;
+      }
+      requestAnimationFrame(() => {
+        const activeMatchElement = blockHistoryRef.current?.querySelector<HTMLElement>(
+          ".transcript-blockHistory__searchMatch--active",
+        );
+        activeMatchElement?.scrollIntoView({ block: "center" });
+      });
+    }, [activeBlockSearchMatch, searchVisible]);
+
+    const handleSearchInputChange = useCallback((event: ReactChangeEvent<HTMLInputElement>) => {
+      setSearchQuery(event.target.value);
+      setActiveSearchMatchIndex(event.target.value.length > 0 ? 0 : -1);
+    }, []);
+
+    const handleSearchInputKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        moveSearchMatch(event.shiftKey ? -1 : 1);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSearch();
+      }
+    }, [closeSearch, moveSearchMatch]);
+
+    const handleSearchControlMouseDown = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+    }, []);
+
+    const handlePromptInputChange = useCallback((event: ReactChangeEvent<HTMLTextAreaElement>) => {
+      preparePromptInteraction();
+      setDraftValue(event.target.value, event.target);
+      schedulePromptLayoutSync(event.target);
+    }, [preparePromptInteraction, schedulePromptLayoutSync, setDraftValue]);
 
     const handlePromptInputKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
       if (shouldSelectAllPromptFromPromptKeydown(event)) {
@@ -5480,272 +1884,13 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       event.preventDefault();
       preparePromptInteraction();
       focusPromptInput();
-    }, [preparePromptInteraction, focusPromptInput]);
+    }, [focusPromptInput, preparePromptInteraction]);
 
     const handleSurfaceFocusChange = useCallback(() => {
       requestAnimationFrame(() => {
         syncPromptCaretBox();
       });
     }, [syncPromptCaretBox]);
-
-    const requestInlineDiff = useCallback((signature: string, lookup: InlineDiffLookup) => {
-      const resolver = resolveInlineDiffRef.current;
-      if (!resolver) {
-        return;
-      }
-
-      let shouldFetch = false;
-      setResolvedInlineDiffBySignature((current) => {
-        const existing = current.get(signature);
-        if (existing?.status === "loading" || existing?.status === "ready") {
-          return current;
-        }
-        const next = new Map(current);
-        next.set(signature, { status: "loading" });
-        shouldFetch = true;
-        return next;
-      });
-
-      if (!shouldFetch) {
-        return;
-      }
-
-      void resolver(lookup)
-        .then((diff) => {
-          const normalizedDiff = diff?.trim();
-          setResolvedInlineDiffBySignature((current) => {
-            const next = new Map(current);
-            if (normalizedDiff && normalizedDiff.length > 0) {
-              next.set(signature, { status: "ready", diff: normalizedDiff });
-            } else {
-              next.set(signature, { status: "error" });
-            }
-            return next;
-          });
-        })
-        .catch(() => {
-          setResolvedInlineDiffBySignature((current) => {
-            const next = new Map(current);
-            next.set(signature, { status: "error" });
-            return next;
-          });
-        });
-    }, []);
-
-    useEffect(() => {
-      for (const [signature, lookup] of docModel.defaultExpandedInlineDiffSignatures) {
-        requestInlineDiff(signature, lookup);
-      }
-    }, [docModel.defaultExpandedInlineDiffSignatures, requestInlineDiff]);
-
-    const handleBlockHistoryCommandWidgetToggle = useCallback((
-      input: {
-        readonly signature: string;
-        readonly isFileChange: boolean;
-        readonly inlineDiffLookup?: InlineDiffLookup;
-      },
-    ) => {
-      if (input.isFileChange) {
-        const shouldExpand = collapsedFileChangeSignaturesRef.current.has(input.signature);
-        if (shouldExpand && input.inlineDiffLookup) {
-          requestInlineDiff(input.signature, input.inlineDiffLookup);
-        }
-        setCollapsedFileChangeSignatures((current) => {
-          const next = new Set(current);
-          if (next.has(input.signature)) {
-            next.delete(input.signature);
-          } else {
-            next.add(input.signature);
-          }
-          return next;
-        });
-        return;
-      }
-
-      const shouldExpand = !expandedCommandSignaturesRef.current.has(input.signature);
-      if (shouldExpand && input.inlineDiffLookup) {
-        requestInlineDiff(input.signature, input.inlineDiffLookup);
-      }
-      setExpandedCommandSignatures((current) => {
-        const next = new Set(current);
-        if (next.has(input.signature)) {
-          next.delete(input.signature);
-        } else {
-          next.add(input.signature);
-        }
-        return next;
-      });
-    }, [requestInlineDiff]);
-
-    const syncActiveRegionClass = useCallback((view: EditorView) => {
-      view.dom.classList.toggle("cm-editor-historyActive", activeRegionRef.current === "history");
-    }, []);
-
-    const focusPromptRegion = useCallback((options?: FocusPromptOptions) => {
-      activeRegionRef.current = "prompt";
-      syncBlockHistoryActiveState();
-      preparePromptInteraction();
-      requestAnimationFrame(() => {
-        focusPromptInput(options);
-      });
-    }, [focusPromptInput, preparePromptInteraction, syncBlockHistoryActiveState]);
-
-    const focusHistoryRegion = useCallback((view?: EditorView | null) => {
-      prepareHistoryInteraction();
-      activeRegionRef.current = "history";
-      syncPromptCaretBox();
-      syncBlockHistoryActiveState();
-      if (DEBUG_USE_BLOCK_HISTORY) {
-        blockHistoryRef.current?.focus({ preventScroll: true });
-        return;
-      }
-      if (!view) {
-        return;
-      }
-      syncActiveRegionClass(view);
-      const historySelection = resolveHistorySelection(view.state, historySelectionRef.current);
-      historySelectionRef.current = historySelection;
-      view.dispatch({
-        selection: EditorSelection.range(historySelection.anchor, historySelection.head),
-        annotations: syncAnnotation.of(true),
-      });
-      view.focus();
-      view.contentDOM.focus({ preventScroll: true });
-      requestAnimationFrame(() => {
-        keepCursorWithinViewportPadding(view);
-      });
-    }, [prepareHistoryInteraction, syncActiveRegionClass, syncBlockHistoryActiveState, syncPromptCaretBox]);
-
-    const focusSearchInput = useCallback(() => {
-      requestAnimationFrame(() => {
-        const input = searchInputRef.current;
-        if (!input) {
-          return;
-        }
-        input.focus({ preventScroll: true });
-        input.select();
-      });
-    }, []);
-
-    const closeSearch = useCallback((options?: { readonly restoreFocus?: boolean }) => {
-      setSearchVisible(false);
-      if (options?.restoreFocus === false) {
-        return;
-      }
-      requestAnimationFrame(() => {
-        if (searchReturnRegionRef.current === "history") {
-          const view = viewRef.current;
-          if (DEBUG_USE_BLOCK_HISTORY || view) {
-            focusHistoryRegion(view);
-            return;
-          }
-        }
-        focusPromptRegion({ reveal: false });
-      });
-    }, [focusHistoryRegion, focusPromptRegion]);
-
-    const openSearch = useCallback(() => {
-      if (!searchVisible) {
-        searchReturnRegionRef.current = activeRegionRef.current;
-      }
-      setSearchVisible(true);
-      focusSearchInput();
-    }, [focusSearchInput, searchVisible]);
-
-    const moveSearchMatch = useCallback((direction: 1 | -1) => {
-      setActiveSearchMatchIndex((currentIndex) =>
-        getNextTranscriptSearchMatchIndex({
-          currentIndex,
-          matchCount: searchMatchCount,
-          direction,
-        }),
-      );
-    }, [searchMatchCount]);
-
-    useEffect(() => {
-      if (!searchVisible) {
-        return;
-      }
-      focusSearchInput();
-    }, [focusSearchInput, searchVisible]);
-
-    useEffect(() => {
-      if (!searchVisible) {
-        return;
-      }
-      if (searchMatchCount === 0) {
-        if (activeSearchMatchIndex !== -1) {
-          setActiveSearchMatchIndex(-1);
-        }
-        return;
-      }
-      if (activeSearchMatchIndex < 0 || activeSearchMatchIndex >= searchMatchCount) {
-        setActiveSearchMatchIndex(0);
-      }
-    }, [activeSearchMatchIndex, searchMatchCount, searchVisible]);
-
-    useEffect(() => {
-      if (!searchVisible) {
-        return;
-      }
-      if (DEBUG_USE_BLOCK_HISTORY) {
-        if (!activeBlockSearchMatch) {
-          return;
-        }
-        requestAnimationFrame(() => {
-          const activeMatchElement = blockHistoryRef.current?.querySelector<HTMLElement>(
-            ".transcript-blockHistory__searchMatch--active",
-          );
-          activeMatchElement?.scrollIntoView({
-            block: "center",
-          });
-        });
-        return;
-      }
-      if (!activeSearchMatch) {
-        return;
-      }
-      const view = viewRef.current;
-      if (!view) {
-        return;
-      }
-      view.dispatch({
-        effects: EditorView.scrollIntoView(activeSearchMatch.from, { y: "start" }),
-        annotations: syncAnnotation.of(true),
-      });
-      requestAnimationFrame(() => {
-        const activeMatchElement = editorRef.current?.querySelector(".cm-transcriptSearchMatch--active");
-        if (!(activeMatchElement instanceof HTMLElement)) {
-          return;
-        }
-        keepSearchMatchWithinViewport(
-          view,
-          activeMatchElement,
-          searchOverlayRef.current?.offsetHeight ?? 0,
-        );
-      });
-    }, [activeBlockSearchMatch, activeSearchMatch, searchVisible]);
-
-    const handleSearchInputChange = useCallback((event: ReactChangeEvent<HTMLInputElement>) => {
-      setSearchQuery(event.target.value);
-      setActiveSearchMatchIndex(event.target.value.length > 0 ? 0 : -1);
-    }, []);
-
-    const handleSearchInputKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        moveSearchMatch(event.shiftKey ? -1 : 1);
-        return;
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeSearch();
-      }
-    }, [closeSearch, moveSearchMatch]);
-
-    const handleSearchControlMouseDown = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-    }, []);
 
     const handleBlockHistoryFocus = useCallback(() => {
       prepareHistoryInteraction();
@@ -5774,6 +1919,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     }, [cwd]);
 
     const handleBlockHistoryKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.target instanceof HTMLElement && event.target.closest("button, textarea, input")) {
+        return;
+      }
       const link = resolveBlockHistoryLinkFromEventTarget(event.target);
       if (link && (event.key === "Enter" || event.key === " ")) {
         event.preventDefault();
@@ -5799,529 +1947,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       insertTextIntoDraft(event.key);
     }, [cwd, focusPromptInput, insertTextIntoDraft, selectAllHistoryText, syncBlockHistoryActiveState]);
 
-    const redirectHistoryTypingToPrompt = useCallback(
-      (view: EditorView, text: string) => {
-        const currentSelection: StoredSelection = {
-          anchor: view.state.selection.main.anchor,
-          head: view.state.selection.main.head,
-        };
-        historySelectionRef.current = clampStoredSelectionToHistory(view.state, currentSelection);
-        activeRegionRef.current = "prompt";
-        syncActiveRegionClass(view);
-        insertTextIntoDraft(text);
-      },
-      [insertTextIntoDraft, syncActiveRegionClass],
-    );
-
-    const storeSelectionForRegion = useCallback(
-      (state: EditorState, region: TranscriptRegion, selection: StoredSelection) => {
-        if (region === "history") {
-          historySelectionRef.current = clampStoredSelectionToHistory(state, selection);
-        }
-      },
-      [],
-    );
-
-    const updateActiveRegionFromPointer = useCallback(
-      (view: EditorView, event: MouseEvent) => {
-        if (event.button !== 0) {
-          return;
-        }
-
-        const pointerCoords = { x: event.clientX, y: event.clientY };
-        const clickPosition = view.posAtCoords(pointerCoords);
-        const estimatedClickPosition =
-          clickPosition === null ? view.posAtCoords(pointerCoords, false) : clickPosition;
-        const nextRegion = resolveTranscriptRegionForPointer(
-          getHistorySelectionLimit(view.state),
-          clickPosition,
-          estimatedClickPosition,
-        );
-        if (!nextRegion || nextRegion === activeRegionRef.current) {
-          return;
-        }
-
-        const currentSelection: StoredSelection = {
-          anchor: view.state.selection.main.anchor,
-          head: view.state.selection.main.head,
-        };
-        storeSelectionForRegion(view.state, activeRegionRef.current, currentSelection);
-        activeRegionRef.current = nextRegion;
-        syncActiveRegionClass(view);
-        syncPromptCaretBox();
-      },
-      [storeSelectionForRegion, syncActiveRegionClass, syncPromptCaretBox],
-    );
-
-    const resolveCommandWidgetSignatureFromMouseEvent = useCallback(
-      (_view: EditorView, event: MouseEvent) => {
-        return resolveCommandWidgetToggleSignatureFromEventTarget(event.target);
-      },
-      [],
-    );
-
-    useImperativeHandle(ref, () => ({
-      focus() {
-        focusPromptRegion();
-      },
-      focusPrompt(options) {
-        focusPromptRegion(options);
-      },
-      focusHistory() {
-        const view = viewRef.current;
-        focusHistoryRegion(view);
-      },
-      hasFocusWithinPane() {
-        if (typeof document === "undefined") {
-          return false;
-        }
-        const activeElement = document.activeElement;
-        return activeElement instanceof Node && surfaceRef.current?.contains(activeElement) === true;
-      },
-      openSearch() {
-        openSearch();
-      },
-      isHistoryActive() {
-        return activeRegionRef.current === "history";
-      },
-      hasHistorySelection() {
-        if (typeof window === "undefined") {
-          return false;
-        }
-        return hasNonCollapsedSelectionInsideElement(window.getSelection(), getHistoryContainer());
-      },
-      selectAllHistory() {
-        return selectAllHistoryText();
-      },
-      insertPromptText(text) {
-        insertTextIntoDraft(text);
-      },
-      deletePromptBackward() {
-        deletePromptText("backward");
-      },
-      deletePromptForward() {
-        deletePromptText("forward");
-      },
-      submitPrompt() {
-        void submitDraft();
-      },
-      scrollToBottom() {
-        const view = viewRef.current;
-        if (!view) {
-          return;
-        }
-        scrollConversationToBottom(view);
-      },
-    }), [deletePromptText, focusHistoryRegion, focusPromptRegion, getHistoryContainer, insertTextIntoDraft, openSearch, selectAllHistoryText, submitDraft]);
-
-    useLayoutEffect(() => {
-      if (!editorRef.current) {
-        return undefined;
-      }
-
-      const initialDocModel = initialDocModelRef.current;
-
-      const initialState = EditorState.create({
-        doc: initialDocModel.text,
-        selection: EditorSelection.cursor(initialDocModel.text.length),
-        extensions: [
-          promptStartField,
-          EditorState.transactionFilter.of((transaction) => {
-            if (transaction.annotation(syncAnnotation)) {
-              return transaction;
-            }
-
-            const promptStart = transaction.startState.field(promptStartField);
-            if (transaction.docChanged) {
-              let blocked = false;
-              transaction.changes.iterChangedRanges((fromA) => {
-                if (fromA < promptStart) {
-                  blocked = true;
-                }
-              });
-
-              if (blocked) {
-                return [];
-              }
-            }
-
-            const targetSelection = transaction.newSelection;
-            if (!targetSelection) {
-              return transaction;
-            }
-
-            const rawSelection: StoredSelection = {
-              anchor: targetSelection.main.anchor,
-              head: targetSelection.main.head,
-            };
-            const clampedSelection = clampStoredSelectionToHistory(transaction.startState, rawSelection);
-
-            if (
-              clampedSelection.anchor === rawSelection.anchor &&
-              clampedSelection.head === rawSelection.head
-            ) {
-              return transaction;
-            }
-
-            return [
-              transaction,
-              {
-                selection: EditorSelection.range(clampedSelection.anchor, clampedSelection.head),
-              },
-            ];
-          }),
-          keymap.of(defaultKeymap),
-          ...(DEBUG_DISABLE_TRANSCRIPT_LINE_WRAPPING ? [] : [EditorView.lineWrapping]),
-          EditorView.clipboardOutputFilter.of((text, state) =>
-            prefixCopiedUserMessageStarts(
-              text,
-              state,
-              docModelRef.current.lines,
-            )),
-          buildEditorTheme(),
-          decorationsCompartment.of(
-            EditorView.decorations.of(
-              initialDecorationStateRef.current.set,
-            ),
-          ),
-          searchDecorationsField,
-          EditorView.updateListener.of((update) => {
-            if (
-              syncingViewRef.current
-              || update.transactions.some((transaction) => transaction.annotation(syncAnnotation))
-            ) {
-              return;
-            }
-
-            const currentSelection: StoredSelection = {
-              anchor: update.state.selection.main.anchor,
-              head: update.state.selection.main.head,
-            };
-            storeSelectionForRegion(update.state, activeRegionRef.current, currentSelection);
-
-            if (update.selectionSet && shouldKeepCursorPaddingForTransactions(update.transactions)) {
-              requestAnimationFrame(() => {
-                keepCursorWithinViewportPadding(update.view);
-              });
-            }
-          }),
-          EditorView.domEventHandlers({
-            focus(_event, view) {
-              prepareHistoryInteraction();
-              activeRegionRef.current = "history";
-              syncActiveRegionClass(view);
-              syncPromptCaretBox();
-              const nextSelection = resolveHistorySelection(view.state, historySelectionRef.current);
-              view.dispatch({
-                selection: EditorSelection.range(nextSelection.anchor, nextSelection.head),
-                annotations: syncAnnotation.of(true),
-              });
-            },
-            mousedown(_event, view) {
-              const interactiveMark = resolveInteractiveMarkFromMouseEvent(view, _event, docModelRef.current.marks);
-              if (interactiveMark?.link) {
-                _event.preventDefault();
-                return true;
-              }
-              if (resolveCommandWidgetSignatureFromMouseEvent(view, _event)) {
-                _event.preventDefault();
-                return true;
-              }
-              prepareHistoryInteraction();
-              updateActiveRegionFromPointer(view, _event);
-              return false;
-            },
-            click(event, view) {
-              prepareHistoryInteraction();
-              const interactiveMark = resolveInteractiveMarkFromMouseEvent(view, event, docModelRef.current.marks);
-              if (interactiveMark?.link) {
-                event.preventDefault();
-                void openTranscriptLink(interactiveMark.link, cwd);
-                return true;
-              }
-              const signature = resolveCommandWidgetSignatureFromMouseEvent(view, event);
-              if (!signature) {
-                return false;
-              }
-              event.preventDefault();
-              preserveConversationScrollPosition(view, () => {
-                if (docModelRef.current.fileChangeWidgetSignatures.has(signature)) {
-                  const shouldExpand = collapsedFileChangeSignaturesRef.current.has(signature);
-                  if (shouldExpand && !docModelRef.current.inlineDiffContentBySignature.has(signature)) {
-                    const inlineDiffLookup = docModelRef.current.inlineDiffLookupsBySignature.get(signature);
-                    if (inlineDiffLookup) {
-                      requestInlineDiff(signature, inlineDiffLookup);
-                    }
-                  }
-                  setCollapsedFileChangeSignatures((current) => {
-                    const next = new Set(current);
-                    if (next.has(signature)) {
-                      next.delete(signature);
-                    } else {
-                      next.add(signature);
-                    }
-                    return next;
-                  });
-                  return;
-                }
-
-                const shouldExpand = !expandedCommandSignaturesRef.current.has(signature);
-                if (shouldExpand && !docModelRef.current.inlineDiffContentBySignature.has(signature)) {
-                  const inlineDiffLookup = docModelRef.current.inlineDiffLookupsBySignature.get(signature);
-                  if (inlineDiffLookup) {
-                    requestInlineDiff(signature, inlineDiffLookup);
-                  }
-                }
-                setExpandedCommandSignatures((current) => {
-                  const next = new Set(current);
-                  if (next.has(signature)) {
-                    next.delete(signature);
-                  } else {
-                    next.add(signature);
-                  }
-                    return next;
-                  });
-                });
-              return true;
-            },
-            keydown(event, view) {
-              if (activeRegionRef.current !== "history") {
-                return false;
-              }
-              if (shouldSelectAllHistoryFromHistoryKeydown(event, activeRegionRef.current)) {
-                event.preventDefault();
-                selectAllHistoryText();
-                return true;
-              }
-              if (!shouldRedirectHistoryTypingToPrompt(event, {
-                promptFocusDisabled: promptFocusDisabledRef.current,
-                promptInputDisabled: promptInputDisabledRef.current,
-              })) {
-                return false;
-              }
-
-              event.preventDefault();
-              focusPromptInput();
-              redirectHistoryTypingToPrompt(view, event.key);
-              return true;
-            },
-          }),
-          EditorView.editable.of(false),
-          EditorState.readOnly.of(true),
-        ],
-      });
-
-      const view = new EditorView({
-        state: initialState,
-        parent: editorRef.current,
-      });
-      syncActiveRegionClass(view);
-
-      view.dispatch({
-        effects: setPromptStartEffect.of(initialDocModel.promptStart),
-        annotations: syncAnnotation.of(true),
-      });
-
-      viewRef.current = view;
-      const scrollContainer = getConversationScrollContainer(view);
-      const reportScrollOffsetFromBottom = () => {
-        if (!scrollContainer) {
-          return;
-        }
-        onScrollOffsetFromBottomChangeRef.current?.(readConversationScrollOffsetFromBottom(scrollContainer));
-      };
-      if (scrollContainer) {
-        scrollContainer.addEventListener("scroll", reportScrollOffsetFromBottom, { passive: true });
-      }
-      const applyInitialScrollPosition = () => {
-        if (initialScrollOffsetFromBottomRef.current === null) {
-          scrollConversationToBottom(view);
-        } else {
-          restoreConversationScrollOffsetFromBottom(view, initialScrollOffsetFromBottomRef.current);
-        }
-        reportScrollOffsetFromBottom();
-      };
-      applyInitialScrollPosition();
-      let cancelled = false;
-      requestAnimationFrame(() => {
-        if (cancelled) {
-          return;
-        }
-        applyInitialScrollPosition();
-      });
-      appliedDecorationSignatureRef.current = buildDecorationSignature(initialDocModel);
-      appliedSearchDecorationSignatureRef.current = buildSearchDecorationSignature([], -1);
-      appliedDocModelRef.current = initialDocModel;
-      appliedDecorationStateRef.current = initialDecorationStateRef.current;
-      appliedDecorationInputsRef.current = docBuildStateRef.current?.inputs ?? null;
-
-      return () => {
-        cancelled = true;
-        if (scrollContainer) {
-          scrollContainer.removeEventListener("scroll", reportScrollOffsetFromBottom);
-        }
-        view.destroy();
-        viewRef.current = null;
-      };
-    }, [
-      cwd,
-      focusPromptInput,
-      focusPromptRegion,
-      prepareHistoryInteraction,
-      requestInlineDiff,
-      redirectHistoryTypingToPrompt,
-      resolveCommandWidgetSignatureFromMouseEvent,
-      selectAllHistoryText,
-      syncPromptCaretBox,
-      syncActiveRegionClass,
-      storeSelectionForRegion,
-      updateActiveRegionFromPointer,
-    ]);
-
-    useEffect(() => {
-      const view = viewRef.current;
-      if (!view) {
-        return;
-      }
-
-      const currentText = view.state.doc.toString();
-      const currentPromptStart = view.state.field(promptStartField);
-      const nextDecorationSignature = buildDecorationSignature(docModel);
-      const isTextStable = currentText === docModel.text && currentPromptStart === docModel.promptStart;
-      if (isTextStable && appliedDecorationSignatureRef.current === nextDecorationSignature) {
-        activeHistoryCacheKeyRef.current = historyCacheKey;
-        return;
-      }
-
-      const shouldPinToBottom = isConversationScrollNearBottom(view);
-      const historyCacheKeyChanged = activeHistoryCacheKeyRef.current !== historyCacheKey;
-      const minimalDocChange = isTextStable
-        ? null
-        : historyCacheKeyChanged
-          ? { from: 0, to: currentText.length, insert: docModel.text }
-          : computeMinimalDocChange(currentText, docModel.text);
-      const nextDoc = Text.of(docModel.text.split("\n"));
-      const appliedDocModel = appliedDocModelRef.current;
-      const appliedDecorationState = appliedDecorationStateRef.current;
-      const appliedDecorationInputs = appliedDecorationInputsRef.current;
-      const canReuseDecorationPrefix =
-        appliedDocModel !== null
-        && appliedDecorationState !== null
-        && appliedDecorationInputs !== null
-        && docBuild.flattened.firstChangedLineIndex > 0
-        && appliedDecorationInputs.expandedCommandSignatures === expandedCommandSignatures
-        && appliedDecorationInputs.collapsedFileChangeSignatures === collapsedFileChangeSignatures
-        && appliedDecorationInputs.resolvedInlineDiffBySignature === resolvedInlineDiffBySignature
-        && appliedDecorationInputs.cwd === (cwd ?? null)
-        && appliedDecorationInputs.projectRoot === (projectRoot ?? null)
-        && appliedDecorationInputs.highlightSignature === docBuild.flattened.highlightSignature;
-      const cachedDecorationState =
-        cachedRenderState && isCachedTranscriptRenderStateCurrent(cachedRenderState, blocks, docBuildInputs)
-          ? cachedRenderState.decorationState
-          : null;
-      const nextDecorationState =
-        cachedDecorationState
-          ? cachedDecorationState
-          : canReuseDecorationPrefix && appliedDocModel !== null && appliedDecorationState !== null
-          ? buildDecorationStateIncremental(
-              docModel,
-              appliedDocModel,
-              appliedDecorationState,
-              docBuild.flattened.firstChangedLineIndex,
-            )
-          : buildDecorationState(
-              docModel.lines,
-              docModel.marks,
-              docModel.widgets,
-              docModel.replacements,
-            );
-
-      syncingViewRef.current = true;
-      try {
-        const syncedHistorySelection =
-          activeRegionRef.current === "history"
-            ? resolveHistorySelectionForDocument(nextDoc, docModel.promptStart, historySelectionRef.current)
-            : null;
-        if (syncedHistorySelection) {
-          historySelectionRef.current = syncedHistorySelection;
-        }
-        view.dispatch({
-          ...(minimalDocChange ? { changes: minimalDocChange } : {}),
-          ...(syncedHistorySelection
-            ? {
-                selection: EditorSelection.range(
-                  syncedHistorySelection.anchor,
-                  syncedHistorySelection.head,
-                ),
-              }
-            : {}),
-          effects: [
-            decorationsCompartment.reconfigure(
-              EditorView.decorations.of(nextDecorationState.set),
-            ),
-            setPromptStartEffect.of(docModel.promptStart),
-          ],
-          annotations: syncAnnotation.of(true),
-        });
-        appliedDocModelRef.current = docModel;
-        appliedDecorationStateRef.current = nextDecorationState;
-        appliedDecorationInputsRef.current = docBuildInputs;
-      } finally {
-        syncingViewRef.current = false;
-      }
-      appliedDecorationSignatureRef.current = nextDecorationSignature;
-      activeHistoryCacheKeyRef.current = historyCacheKey;
-      storeCachedRenderState(nextDecorationState, nextDecorationSignature);
-
-      if (shouldPinToBottom) {
-        requestAnimationFrame(() => {
-          scrollConversationToBottom(view);
-          onScrollOffsetFromBottomChangeRef.current?.(0);
-        });
-      }
-    }, [
-      collapsedFileChangeSignatures,
-      cwd,
-      docBuild.flattened.firstChangedLineIndex,
-      docBuild.flattened.highlightSignature,
-      docBuildInputs,
-      docModel,
-      expandedCommandSignatures,
-      historyCacheKey,
-      projectRoot,
-      resolvedInlineDiffBySignature,
-      cachedRenderState,
-      blocks,
-      storeCachedRenderState,
-    ]);
-
-    useEffect(() => {
-      const view = viewRef.current;
-      if (!view) {
-        return;
-      }
-
-      const nextSearchDecorationSignature = buildSearchDecorationSignature(
-        searchMatches,
-        resolvedActiveSearchMatchIndex,
-      );
-      if (appliedSearchDecorationSignatureRef.current === nextSearchDecorationSignature) {
-        return;
-      }
-
-      view.dispatch({
-        effects: setSearchDecorationsEffect.of(
-          buildSearchDecorations(searchMatches, resolvedActiveSearchMatchIndex),
-        ),
-        annotations: syncAnnotation.of(true),
-      });
-      appliedSearchDecorationSignatureRef.current = nextSearchDecorationSignature;
-    }, [resolvedActiveSearchMatchIndex, searchMatches]);
-
-    const focusPromptForAttachments = useCallback(() => {
-      focusPromptRegion();
-    }, [focusPromptRegion]);
-
     const handleIncomingFiles = useCallback((files: ReadonlyArray<File>) => {
       const imageFiles = files.filter((file) => file.type.startsWith("image/"));
       if (imageFiles.length === 0) {
@@ -6329,9 +1954,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
 
       onAddImageFiles?.(imageFiles);
-      focusPromptForAttachments();
+      focusPromptRegion();
       return true;
-    }, [focusPromptForAttachments, onAddImageFiles]);
+    }, [focusPromptRegion, onAddImageFiles]);
 
     const handlePasteCapture = useCallback((event: ReactClipboardEvent<HTMLDivElement>) => {
       const files = Array.from(event.clipboardData.files);
@@ -6397,6 +2022,132 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       setIsDraggingImages(false);
       handleIncomingFiles(Array.from(event.dataTransfer.files));
     }, [handleIncomingFiles]);
+
+    const closeAttachmentViewer = useCallback(() => {
+      attachmentViewerDragStateRef.current = null;
+      setAttachmentViewerDragging(false);
+      setAttachmentViewerImage(null);
+      setAttachmentViewerNaturalSize({ width: 0, height: 0 });
+      setAttachmentViewerScale(null);
+      setAttachmentViewerPan({ x: 0, y: 0 });
+      attachmentViewerScaleRef.current = null;
+      attachmentViewerPanRef.current = { x: 0, y: 0 };
+      attachmentViewerNaturalSizeRef.current = { width: 0, height: 0 };
+      attachmentViewerFitScaleRef.current = 1;
+    }, []);
+
+    const openAttachmentViewer = useCallback((src: string, name: string) => {
+      attachmentViewerDragStateRef.current = null;
+      setAttachmentViewerDragging(false);
+      setAttachmentViewerImage({ src, name });
+      setAttachmentViewerNaturalSize({ width: 0, height: 0 });
+      setAttachmentViewerScale(null);
+      setAttachmentViewerPan({ x: 0, y: 0 });
+      attachmentViewerScaleRef.current = null;
+      attachmentViewerPanRef.current = { x: 0, y: 0 };
+      attachmentViewerNaturalSizeRef.current = { width: 0, height: 0 };
+      attachmentViewerFitScaleRef.current = 1;
+    }, []);
+
+    const updateAttachmentViewerScaleAndPan = useCallback((
+      nextScale: number,
+      nextPan: AttachmentViewerPan,
+    ) => {
+      const clampedPan = clampAttachmentViewerPan(
+        nextPan,
+        nextScale,
+        attachmentViewerNaturalSizeRef.current,
+        window.innerWidth,
+        window.innerHeight,
+      );
+      attachmentViewerScaleRef.current = nextScale;
+      attachmentViewerPanRef.current = clampedPan;
+      setAttachmentViewerScale(nextScale);
+      setAttachmentViewerPan(clampedPan);
+    }, []);
+
+    useEffect(() => {
+      if (!promptInputDisabled) {
+        return;
+      }
+      const textarea = promptTextareaRef.current;
+      if (textarea && document.activeElement === textarea) {
+        textarea.blur();
+      }
+    }, [promptInputDisabled]);
+
+    useEffect(() => {
+      paneActiveRef.current = paneActive;
+      const textarea = promptTextareaRef.current;
+      if (!paneActive && textarea && document.activeElement === textarea) {
+        setPromptSelectionValue(
+          textarea.selectionStart ?? draftRef.current.length,
+          textarea.selectionEnd ?? draftRef.current.length,
+        );
+        textarea.blur();
+      }
+      syncPromptCaretBox(textarea);
+    }, [paneActive, setPromptSelectionValue, syncPromptCaretBox]);
+
+    useEffect(() => {
+      if (!attachmentViewerImage) {
+        return;
+      }
+
+      const handleKeyDown = (event: KeyboardEvent) => {
+        if (event.key !== "Escape") {
+          return;
+        }
+        event.preventDefault();
+        closeAttachmentViewer();
+      };
+
+      window.addEventListener("keydown", handleKeyDown);
+      return () => {
+        window.removeEventListener("keydown", handleKeyDown);
+      };
+    }, [attachmentViewerImage, closeAttachmentViewer]);
+
+    useEffect(() => {
+      if (!attachmentViewerImage || attachmentViewerScaleRef.current === null) {
+        return;
+      }
+
+      const handleResize = () => {
+        const currentScale = attachmentViewerScaleRef.current;
+        if (currentScale === null) {
+          return;
+        }
+        const nextFitScale = resolveAttachmentViewerFitScale(
+          attachmentViewerNaturalSizeRef.current,
+          window.innerWidth,
+          window.innerHeight,
+        );
+        const shouldSnapToFit = Math.abs(currentScale - attachmentViewerFitScaleRef.current) < 0.001;
+        attachmentViewerFitScaleRef.current = nextFitScale;
+        if (shouldSnapToFit) {
+          attachmentViewerScaleRef.current = nextFitScale;
+          attachmentViewerPanRef.current = { x: 0, y: 0 };
+          setAttachmentViewerScale(nextFitScale);
+          setAttachmentViewerPan({ x: 0, y: 0 });
+          return;
+        }
+        const clampedPan = clampAttachmentViewerPan(
+          attachmentViewerPanRef.current,
+          currentScale,
+          attachmentViewerNaturalSizeRef.current,
+          window.innerWidth,
+          window.innerHeight,
+        );
+        attachmentViewerPanRef.current = clampedPan;
+        setAttachmentViewerPan(clampedPan);
+      };
+
+      window.addEventListener("resize", handleResize);
+      return () => {
+        window.removeEventListener("resize", handleResize);
+      };
+    }, [attachmentViewerImage]);
 
     const handleAttachmentViewerImageLoad = useCallback((event: ReactSyntheticEvent<HTMLImageElement>) => {
       const image = event.currentTarget;
@@ -6516,6 +2267,60 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         window.innerHeight,
       );
 
+    useImperativeHandle(ref, () => ({
+      focus() {
+        focusPromptRegion();
+      },
+      focusPrompt(options) {
+        focusPromptRegion(options);
+      },
+      focusHistory() {
+        focusHistoryRegion();
+      },
+      hasFocusWithinPane() {
+        if (typeof document === "undefined") {
+          return false;
+        }
+        const activeElement = document.activeElement;
+        return activeElement instanceof Node && surfaceRef.current?.contains(activeElement) === true;
+      },
+      openSearch() {
+        openSearch();
+      },
+      isHistoryActive() {
+        return activeRegionRef.current === "history";
+      },
+      hasHistorySelection() {
+        if (typeof window === "undefined") {
+          return false;
+        }
+        return hasNonCollapsedSelectionInsideElement(window.getSelection(), blockHistoryRef.current);
+      },
+      selectAllHistory() {
+        return selectAllHistoryText();
+      },
+      insertPromptText(text) {
+        insertTextIntoDraft(text);
+      },
+      deletePromptBackward() {
+        deletePromptText("backward");
+      },
+      deletePromptForward() {
+        deletePromptText("forward");
+      },
+      submitPrompt() {
+        void submitDraft();
+      },
+      scrollToBottom() {
+        const scrollContainer = historyScrollContainerRef.current;
+        if (!scrollContainer) {
+          return;
+        }
+        scrollContainer.scrollTop = resolveInitialConversationScrollTop(scrollContainer, null);
+        syncHistoryMetrics();
+      },
+    }), [deletePromptText, focusHistoryRegion, focusPromptRegion, insertTextIntoDraft, openSearch, selectAllHistoryText, submitDraft, syncHistoryMetrics]);
+
     return (
       <div
         ref={surfaceRef}
@@ -6530,7 +2335,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       >
         {searchVisible ? (
           <div
-            ref={searchOverlayRef}
             className="transcript-search"
             role="search"
             aria-label="Find in transcript"
@@ -6585,37 +2389,48 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             </div>
           </div>
         ) : null}
-        <div
-          className={`transcript-history${DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER ? " transcript-history--cmScroller" : ""}`}
-          ref={historyScrollContainerRef}
-        >
-          {DEBUG_USE_BLOCK_HISTORY ? (
-            <div
-              className="transcript-history__blockRoot"
-              ref={blockHistoryRef}
-              tabIndex={0}
-              onFocus={handleBlockHistoryFocus}
-              onMouseDown={handleBlockHistoryMouseDown}
-              onClick={handleBlockHistoryClick}
-              onKeyDown={handleBlockHistoryKeyDown}
+        <div className="transcript-history" ref={historyScrollContainerRef}>
+          <div
+            className="transcript-history__blockRoot"
+            ref={blockHistoryRef}
+            tabIndex={0}
+            onFocus={handleBlockHistoryFocus}
+            onMouseDown={handleBlockHistoryMouseDown}
+            onClick={handleBlockHistoryClick}
+            onKeyDown={handleBlockHistoryKeyDown}
+          >
+            <pre
+              ref={historySelectAllTextRef}
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                left: "-100000px",
+                top: 0,
+                margin: 0,
+                whiteSpace: "pre-wrap",
+                pointerEvents: "none",
+                userSelect: "text",
+              }}
             >
-              <TranscriptHistoryBlocks
-                blocks={blocks}
-                cacheKey={historyCacheKey}
-                searchMatches={blockSearchMatches}
-                activeSearchMatchIndex={resolvedActiveSearchMatchIndex}
-                expandedCommandSignatures={expandedCommandSignatures}
-                collapsedFileChangeSignatures={collapsedFileChangeSignatures}
-                resolvedInlineDiffBySignature={resolvedInlineDiffBySignature}
-                onToggleCommandWidget={handleBlockHistoryCommandWidgetToggle}
-                onMeasuredHeightApplied={handleBlockHistoryMeasuredHeightApplied}
-                scrollTop={blockHistoryScrollTop}
-                viewportHeight={blockHistoryViewportHeight}
-                scrollContainerRef={historyScrollContainerRef}
-                isScrolling={blockHistoryScrolling}
-              />
-            </div>
-          ) : <div className="transcript-history__editor" ref={editorRef} />}
+              {historyPlainText}
+            </pre>
+            <TranscriptHistoryBlocks
+              blocks={blocks}
+              {...(precomputedBlockLines ? { precomputedBlockLines } : {})}
+              {...(precomputedBlockRows ? { precomputedBlockRows } : {})}
+              cacheKey={historyCacheKey}
+              searchMatches={blockSearchMatches}
+              activeSearchMatchIndex={resolvedActiveSearchMatchIndex}
+              expandedCommandSignatures={expandedCommandSignatures}
+              collapsedFileChangeSignatures={collapsedFileChangeSignatures}
+              resolvedInlineDiffBySignature={resolvedInlineDiffBySignature}
+              onToggleCommandWidget={handleBlockHistoryCommandWidgetToggle}
+              scrollTop={blockHistoryScrollTop}
+              viewportHeight={blockHistoryViewportHeight}
+              scrollContainerRef={historyScrollContainerRef}
+              isScrolling={blockHistoryScrolling}
+            />
+          </div>
           {historyState !== "ready" && blocks.length === 0 ? (
             <div
               className={`transcript-history__state transcript-history__state--${historyState}`}
@@ -6647,8 +2462,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                       type="button"
                       className="attachment-tile__media"
                       aria-label={`Open ${attachment.name}`}
-                      data-attachment-viewer-name={attachment.name}
-                      data-attachment-viewer-src={attachment.previewUrl}
+                      onClick={() => {
+                        openAttachmentViewer(attachment.previewUrl!, attachment.name);
+                      }}
                     >
                       <img
                         className="attachment-tile__image"
@@ -6733,7 +2549,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
               <div className="image-viewer__label">{attachmentViewerImage.name}</div>
             </div>
             <div
-              ref={attachmentViewerCanvasRef}
               className="image-viewer__canvas"
               onClick={(event) => {
                 if (event.target === event.currentTarget) {

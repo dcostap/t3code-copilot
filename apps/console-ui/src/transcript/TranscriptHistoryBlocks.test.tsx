@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   estimateTranscriptHistoryBlockHeight,
+  findFirstUnvirtualizedTranscriptBlockIndex,
   findTranscriptHistoryBlockSearchMatches,
   getTranscriptHistoryBlockMeasurementKey,
   TranscriptHistoryBlocks,
@@ -42,7 +43,7 @@ describe("TranscriptHistoryBlocks", () => {
     expect(html).toContain("Checking prior work");
     expect(html).toContain("1 attachment");
     expect(html).toContain("screenshot.png");
-    expect(html).toContain("transcript-blockHistory__virtualBlock--messageTurnSeparator");
+    expect(html).toContain("transcript-blockHistory__staticBlock--messageTurnSeparator");
   });
 
   it("renders work-group items with collapsed commands and expandable file diffs", () => {
@@ -225,6 +226,73 @@ describe("TranscriptHistoryBlocks", () => {
     expect(html).toContain("very-long-component-name.ts");
     expect(html).toContain("transcript-blockHistory__markdownTableLine--body");
     expect(html).toContain("done");
+  });
+
+  it("renders a non-virtualized fallback when no scroll container is available", () => {
+    const blocks: TranscriptBlock[] = [
+      {
+        type: "assistant-text",
+        text: "A tall block\nthat should measure from the real DOM.",
+        streaming: false,
+      },
+    ];
+
+    const html = renderToStaticMarkup(<TranscriptHistoryBlocks blocks={blocks} />);
+
+    expect(html).toContain("transcript-blockHistory__staticBlock");
+    expect(html).not.toContain("transcript-blockHistory__virtualCanvas");
+    expect(html).not.toContain("data-index=");
+    expect(html).not.toContain("overflow:hidden");
+  });
+
+  it("renders flattened virtual rows when scroll metrics are available", () => {
+    const blocks: TranscriptBlock[] = Array.from({ length: 10 }, (_, index) => ({
+      type: "assistant-text",
+      text: `Block ${index}\nSecond line ${index}`,
+      streaming: false,
+    }));
+
+    const html = renderToStaticMarkup(
+      <TranscriptHistoryBlocks
+        blocks={blocks}
+        scrollContainerRef={{ current: {} as HTMLDivElement }}
+        viewportHeight={1000}
+      />,
+    );
+
+    expect(html).toContain("transcript-blockHistory__virtualCanvas");
+    expect(html).toContain("data-index=\"0\"");
+    expect(html).toContain("data-block-index=\"0\"");
+    expect(html).toContain("data-block-index=\"1\"");
+    expect(html).toMatch(/transcript-blockHistory__virtualBlock"[^>]*style="transform:translateY\(0px\)"/);
+  });
+
+  it("keeps the active transcript tail out of virtualization", () => {
+    const blocks: TranscriptBlock[] = [
+      { type: "user-message", text: "Start work" },
+      { type: "assistant-text", text: "Stable answer", streaming: false },
+      { type: "assistant-text", text: "Streaming answer", streaming: true },
+      {
+        type: "work-group",
+        title: "Running command",
+        status: "running",
+        startedAt: "2026-03-13T12:00:00.000Z",
+        endedAt: "2026-03-13T12:00:01.000Z",
+        items: [],
+      },
+    ];
+
+    expect(findFirstUnvirtualizedTranscriptBlockIndex(blocks)).toBe(0);
+  });
+
+  it("fully virtualizes static transcript histories", () => {
+    const blocks: TranscriptBlock[] = [
+      { type: "user-message", text: "Question" },
+      { type: "assistant-text", text: "Answer", streaming: false },
+      { type: "plan-update", explanation: "Explain", steps: [{ step: "One", status: "completed" }] },
+    ];
+
+    expect(findFirstUnvirtualizedTranscriptBlockIndex(blocks)).toBe(blocks.length);
   });
 
   it("renders inline diff loading and error states on block history", () => {

@@ -118,6 +118,8 @@ describe("isTranscriptBlocksCacheEntryCurrent", () => {
       status: "ready" as const,
       requestId: 1,
       blocks: [],
+      blockLines: [],
+      blockRows: [],
     };
 
     expect(isTranscriptBlocksCacheEntryCurrent(entry, input)).toBe(true);
@@ -135,7 +137,7 @@ describe("isTranscriptBlocksCacheEntryCurrent", () => {
     }, {
       ...input,
       effectiveNow: "2026-03-29T18:00:01.000Z",
-    })).toBe(false);
+    })).toBe(true);
   });
 });
 

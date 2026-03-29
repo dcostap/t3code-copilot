@@ -1,5 +1,6 @@
 import {
   Fragment,
+  useEffect,
   useCallback,
   useLayoutEffect,
   useMemo,
@@ -7,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { measureElement as measureVirtualElement, useVirtualizer } from "@tanstack/react-virtual";
 
 import {
   blockToLines,
@@ -26,22 +28,24 @@ import {
   resolveMarkdownTableDisplayWidth,
   type MarkdownTableDisplayLine,
 } from "./markdownTable";
-import { measureTranscriptSwitchDiagnostic } from "../transcriptSwitchDiagnostics";
+import { recordSlowTranscriptSwitchDiagnostic } from "../transcriptSwitchDiagnostics";
+import { deriveTranscriptBlockRowDefinitions, type TranscriptBlockRowDefinition } from "./transcriptRows";
 
 interface TranscriptHistoryBlocksProps {
   readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly precomputedBlockLines?: ReadonlyArray<ReadonlyArray<AnnotatedLine>>;
+  readonly precomputedBlockRows?: ReadonlyArray<ReadonlyArray<TranscriptBlockRowDefinition>>;
   readonly cacheKey?: string | null;
   readonly searchMatches?: ReadonlyArray<TranscriptHistorySearchMatch>;
   readonly activeSearchMatchIndex?: number;
   readonly expandedCommandSignatures?: ReadonlySet<string>;
   readonly collapsedFileChangeSignatures?: ReadonlySet<string>;
   readonly resolvedInlineDiffBySignature?: ReadonlyMap<string, InlineDiffResolutionStateLike>;
-  readonly onToggleCommandWidget?: (input: ToggleCommandWidgetInput) => void;
-  readonly onMeasuredHeightApplied?: (updates: ReadonlyArray<TranscriptHistoryMeasurementUpdate>) => void;
+  readonly onToggleCommandWidget?: ((input: ToggleCommandWidgetInput) => void) | undefined;
   readonly scrollTop?: number;
   readonly viewportHeight?: number;
-  readonly scrollContainerRef?: { readonly current: HTMLDivElement | null };
-  readonly isScrolling?: boolean;
+  readonly scrollContainerRef?: { readonly current: HTMLDivElement | null } | undefined;
+  readonly isScrolling?: boolean | undefined;
 }
 
 export interface TranscriptHistorySearchMatch {
@@ -49,17 +53,6 @@ export interface TranscriptHistorySearchMatch {
   readonly lineIndex: number;
   readonly from: number;
   readonly to: number;
-}
-
-export interface TranscriptHistoryMeasurementUpdate {
-  readonly blockIndex: number;
-  readonly blockType: TranscriptBlock["type"];
-  readonly blockKey: string;
-  readonly measurementKey: string;
-  readonly commandWidgetSignatures: ReadonlyArray<string>;
-  readonly previousHeight: number;
-  readonly nextHeight: number;
-  readonly deltaHeight: number;
 }
 
 interface InlineDiffResolutionStateLike {
@@ -81,52 +74,52 @@ interface IndexedSearchMatch extends TranscriptHistorySearchMatch {
 interface RenderedTranscriptBlock {
   readonly block: TranscriptBlock;
   readonly lines: ReadonlyArray<AnnotatedLine>;
-  readonly key: string;
-  readonly measurementKey: string;
-  readonly showMessageTurnSeparator: boolean;
-}
-
-interface CachedRenderedTranscriptBlockBase {
-  readonly block: TranscriptBlock;
-  readonly lines: ReadonlyArray<AnnotatedLine>;
+  readonly rows: ReadonlyArray<TranscriptBlockRowDefinition>;
   readonly key: string;
   readonly showMessageTurnSeparator: boolean;
 }
 
-interface CachedRenderedTranscriptBlocksState {
-  readonly baseRenderedBlocks: ReadonlyArray<CachedRenderedTranscriptBlockBase>;
-  readonly expandedCommandSignatures: ReadonlySet<string>;
-  readonly collapsedFileChangeSignatures: ReadonlySet<string>;
-  readonly resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>;
-  readonly renderedBlocks: ReadonlyArray<RenderedTranscriptBlock>;
+interface TranscriptBlockRowBase {
+  readonly key: string;
+  readonly lineIndexStart: number;
+  readonly lineIndexEnd: number;
 }
 
-interface CachedBlockGeometryState {
-  readonly renderedBlocks: ReadonlyArray<RenderedTranscriptBlock>;
-  readonly measuredHeights: ReadonlyMap<string, number>;
-  readonly availableWidthPx: number;
-  readonly expandedCommandSignatures: ReadonlySet<string>;
-  readonly collapsedFileChangeSignatures: ReadonlySet<string>;
-  readonly resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>;
-  readonly blockHeights: ReadonlyArray<number>;
-  readonly blockOffsets: ReadonlyArray<number>;
-  readonly totalHeight: number;
-  readonly blockIndexByKey: ReadonlyMap<string, number>;
-}
+type VirtualizedTranscriptRow =
+  | {
+      readonly kind: "content";
+      readonly key: string;
+      readonly blockIndex: number;
+      readonly blockType: TranscriptBlock["type"];
+      readonly row: TranscriptBlockRow;
+      readonly showMessageTurnSeparator: boolean;
+      readonly hasLeadingGap: boolean;
+    }
+  | {
+      readonly kind: "attachmentSummary";
+      readonly key: string;
+      readonly blockIndex: number;
+      readonly blockType: TranscriptBlock["type"];
+      readonly attachments: ReadonlyArray<TranscriptImageAttachment>;
+      readonly showMessageTurnSeparator: boolean;
+      readonly hasLeadingGap: boolean;
+    };
 
-interface VirtualWindow {
-  readonly startIndex: number;
-  readonly endIndex: number;
-  readonly topSpacerHeight: number;
-  readonly bottomSpacerHeight: number;
-}
-
-const DEFAULT_BLOCK_OVERSCAN_PX = 1400;
+const DEFAULT_ROW_OVERSCAN = 20;
 const DEFAULT_LINE_HEIGHT_PX = 20;
 const DEFAULT_ESTIMATED_CHARACTER_WIDTH_PX = 7.8;
 const DEFAULT_WIDTH_BUCKET_PX = 32;
 const DEFAULT_BLOCK_GAP_PX = 4;
-const DEFAULT_PREMEASURE_BLOCK_LIMIT = 12;
+const ALWAYS_UNVIRTUALIZED_TAIL_BLOCKS = 8;
+const renderedBlockCache = new Map<string, {
+  readonly blocks: ReadonlyArray<TranscriptBlock>;
+  readonly renderedBlocks: ReadonlyArray<RenderedTranscriptBlock>;
+}>();
+const flattenedRowCache = new Map<string, {
+  readonly renderedBlocks: ReadonlyArray<RenderedTranscriptBlock>;
+  readonly rows: ReadonlyArray<VirtualizedTranscriptRow>;
+}>();
+const rowEstimateCache = new Map<string, number>();
 
 interface EstimateTranscriptHistoryBlockHeightInput {
   readonly availableWidthPx?: number;
@@ -254,10 +247,6 @@ export function getTranscriptHistoryBlockMeasurementKey(
   );
 }
 
-function isSpacerLine(line: AnnotatedLine) {
-  return line.kind === "meta" || line.kind.endsWith("Separator");
-}
-
 function isCommandWidgetLine(line: AnnotatedLine) {
   return line.kind === "commandExec" && typeof line.commandWidgetSignature === "string";
 }
@@ -353,67 +342,23 @@ function estimateRenderedBlockHeight(
   collapsedFileChangeSignatures: ReadonlySet<string>,
   resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>,
 ) {
-  const plainLineWidthPx = Math.max(120, availableWidthPx);
-  const commandSurfaceWidthPx = Math.max(120, availableWidthPx - 28);
-  const commandBodyWidthPx = Math.max(120, availableWidthPx - 28);
-  const inlineDiffContentWidthPx = Math.max(72, commandBodyWidthPx - 80);
-  const markdownTableWidth = resolveMarkdownTableDisplayWidth(availableWidthPx);
-  let estimatedLineCount = 0;
-  for (let lineIndex = 0; lineIndex < renderedBlock.lines.length; lineIndex += 1) {
-    const line = renderedBlock.lines[lineIndex]!;
-    if (isSpacerLine(line)) {
-      estimatedLineCount += 0.6;
-      continue;
-    }
-    if (line.kind === "table" && line.tableData) {
-      estimatedLineCount += layoutMarkdownTable(line.tableData, markdownTableWidth).length;
-      while (lineIndex + 1 < renderedBlock.lines.length && renderedBlock.lines[lineIndex + 1]?.kind === "table") {
-        lineIndex += 1;
-      }
-      continue;
-    }
-    if (isCommandWidgetLine(line)) {
-      const isExpanded = isExpandedCommandLine(line, expandedCommandSignatures, collapsedFileChangeSignatures);
-      const resolvedInlineDiffState = line.commandWidgetSignature
-        ? resolvedInlineDiffBySignature.get(line.commandWidgetSignature)
-        : undefined;
-      const effectiveInlineDiff =
-        line.inlineUnifiedDiff
-        ?? (resolvedInlineDiffState?.status === "ready" ? resolvedInlineDiffState.diff : undefined);
-      estimatedLineCount +=
-        !isExpanded && hasExpandableCommandSummary(line)
-          ? 1
-          : estimateWrappedTextRows(line.text, commandSurfaceWidthPx);
-      estimatedLineCount += 1;
-      if (!isExpanded) {
-        continue;
-      }
-      if (line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0) {
-        estimatedLineCount += estimateWrappedLogicalLineRows(line.commandWidgetOutputLines, commandBodyWidthPx);
-      }
-      if (effectiveInlineDiff) {
-        const parsedInlineDiffFiles = parseInlineDiffFiles(effectiveInlineDiff, line.inlineDiffChangedFiles);
-        if (parsedInlineDiffFiles.length > 0) {
-          estimatedLineCount += estimateInlineDiffFileRows(parsedInlineDiffFiles, inlineDiffContentWidthPx);
-        } else {
-          estimatedLineCount += 1;
-          estimatedLineCount += Math.max(4, estimateWrappedTextRows(effectiveInlineDiff, commandBodyWidthPx));
-        }
-      }
-      if (!effectiveInlineDiff && line.inlineDiffLookup) {
-        estimatedLineCount += 1;
-      }
-      continue;
-    }
-    estimatedLineCount += estimateWrappedTextRows(line.text, plainLineWidthPx);
-  }
+  const rows = resolveRenderedBlockRows(renderedBlock, 0, new Map());
+  let estimatedHeight = rows.reduce(
+    (sum, row) =>
+      sum
+      + estimateRenderedBlockRowHeight(
+          row,
+          availableWidthPx,
+          expandedCommandSignatures,
+          collapsedFileChangeSignatures,
+          resolvedInlineDiffBySignature,
+        ),
+    0,
+  );
   if (renderedBlock.block.type === "user-message" && renderedBlock.block.attachments?.length) {
-    estimatedLineCount += estimateWrappedTextRows(
-      `${renderedBlock.block.attachments.length} attachments: ${renderedBlock.block.attachments.map((attachment) => attachment.name).join(", ")}`,
-      plainLineWidthPx,
-    );
+    estimatedHeight += estimateAttachmentSummaryHeight(renderedBlock.block.attachments, availableWidthPx);
   }
-  return Math.max(64, Math.ceil(estimatedLineCount * DEFAULT_LINE_HEIGHT_PX + 20));
+  return Math.max(DEFAULT_LINE_HEIGHT_PX, Math.ceil(estimatedHeight));
 }
 
 export function estimateTranscriptHistoryBlockHeight(
@@ -430,8 +375,8 @@ export function estimateTranscriptHistoryBlockHeight(
     {
       block,
       lines,
+      rows: deriveTranscriptBlockRowDefinitions(lines),
       key: getBlockIdentity(block, lines),
-      measurementKey: getBlockIdentity(block, lines),
       showMessageTurnSeparator: false,
     },
     availableWidthPx,
@@ -441,86 +386,45 @@ export function estimateTranscriptHistoryBlockHeight(
   );
 }
 
-function readRenderedVirtualBlockHeight(wrapperElement: HTMLDivElement, blockIndex: number) {
-  const contentElement = wrapperElement.firstElementChild;
-  const contentHeight =
-    contentElement instanceof HTMLElement
-      ? Math.ceil(contentElement.getBoundingClientRect().height)
-      : Math.ceil(wrapperElement.getBoundingClientRect().height);
-  return contentHeight + (blockIndex > 0 ? DEFAULT_BLOCK_GAP_PX : 0);
+function isActiveTranscriptBlock(block: TranscriptBlock) {
+  switch (block.type) {
+    case "assistant-text":
+      return block.streaming;
+    case "work-group":
+    case "tool-call":
+      return block.status === "running";
+    case "user-input-request":
+      return !block.resolved;
+    case "sending-state":
+    case "waiting-state":
+    case "working-state":
+      return true;
+    default:
+      return false;
+  }
 }
 
-function resolveVirtualWindow(
-  renderedBlocks: ReadonlyArray<RenderedTranscriptBlock>,
-  blockHeights: ReadonlyArray<number>,
-  scrollTop: number,
-  viewportHeight: number,
-  activeSearchBlockIndex: number,
-): VirtualWindow {
-  if (renderedBlocks.length === 0) {
-    return {
-      startIndex: 0,
-      endIndex: 0,
-      topSpacerHeight: 0,
-      bottomSpacerHeight: 0,
-    };
+export function findFirstUnvirtualizedTranscriptBlockIndex(blocks: ReadonlyArray<TranscriptBlock>) {
+  const firstTailBlockIndex = Math.max(blocks.length - ALWAYS_UNVIRTUALIZED_TAIL_BLOCKS, 0);
+  const firstActiveBlockIndex = blocks.findIndex((block) => isActiveTranscriptBlock(block));
+  if (firstActiveBlockIndex < 0) {
+    return blocks.length;
   }
 
-  if (viewportHeight <= 0) {
-    return {
-      startIndex: 0,
-      endIndex: renderedBlocks.length,
-      topSpacerHeight: 0,
-      bottomSpacerHeight: 0,
-    };
-  }
-
-  const overscannedTop = Math.max(0, scrollTop - DEFAULT_BLOCK_OVERSCAN_PX);
-  const overscannedBottom = scrollTop + viewportHeight + DEFAULT_BLOCK_OVERSCAN_PX;
-
-  let startIndex = 0;
-  let endIndex = renderedBlocks.length;
-  let topSpacerHeight = 0;
-  let offset = 0;
-
-  for (let index = 0; index < blockHeights.length; index += 1) {
-    const nextOffset = offset + (blockHeights[index] ?? 0);
-    if (nextOffset >= overscannedTop) {
-      startIndex = index;
-      topSpacerHeight = offset;
-      break;
+  for (let index = firstActiveBlockIndex - 1; index >= 0; index -= 1) {
+    const previousBlock = blocks[index];
+    if (!previousBlock) {
+      continue;
     }
-    offset = nextOffset;
-  }
-
-  offset = topSpacerHeight;
-  endIndex = renderedBlocks.length;
-  for (let index = startIndex; index < blockHeights.length; index += 1) {
-    offset += blockHeights[index] ?? 0;
-    if (offset >= overscannedBottom) {
-      endIndex = Math.min(renderedBlocks.length, index + 1);
+    if (previousBlock.type === "user-message") {
+      return Math.min(index, firstTailBlockIndex);
+    }
+    if (previousBlock.type === "assistant-text" && !previousBlock.streaming) {
       break;
     }
   }
 
-  if (activeSearchBlockIndex >= 0) {
-    if (activeSearchBlockIndex < startIndex || activeSearchBlockIndex >= endIndex) {
-      startIndex = Math.max(0, activeSearchBlockIndex - 2);
-      endIndex = Math.min(renderedBlocks.length, activeSearchBlockIndex + 3);
-    }
-    topSpacerHeight = blockHeights.slice(0, startIndex).reduce((sum, height) => sum + height, 0);
-  }
-
-  const renderedHeight = blockHeights.slice(startIndex, endIndex).reduce((sum, height) => sum + height, 0);
-  const totalHeight = blockHeights.reduce((sum, height) => sum + height, 0);
-  const bottomSpacerHeight = Math.max(0, totalHeight - topSpacerHeight - renderedHeight);
-
-  return {
-    startIndex,
-    endIndex,
-    topSpacerHeight,
-    bottomSpacerHeight,
-  };
+  return Math.min(firstActiveBlockIndex, firstTailBlockIndex);
 }
 
 function findTranscriptHistoryLineMatches(lineText: string, query: string) {
@@ -549,6 +453,7 @@ function findTranscriptHistoryLineMatches(lineText: string, query: string) {
 export function findTranscriptHistoryBlockSearchMatches(
   blocks: ReadonlyArray<TranscriptBlock>,
   query: string,
+  precomputedBlockLines?: ReadonlyArray<ReadonlyArray<AnnotatedLine>>,
 ): ReadonlyArray<TranscriptHistorySearchMatch> {
   if (query.length === 0) {
     return [];
@@ -556,7 +461,7 @@ export function findTranscriptHistoryBlockSearchMatches(
 
   const matches: TranscriptHistorySearchMatch[] = [];
   blocks.forEach((block, blockIndex) => {
-    blockToLines(block).forEach((line, lineIndex) => {
+    (precomputedBlockLines?.[blockIndex] ?? blockToLines(block)).forEach((line, lineIndex) => {
       for (const match of findTranscriptHistoryLineMatches(line.text, query)) {
         matches.push({
           blockIndex,
@@ -661,10 +566,9 @@ function renderAnnotatedLineContent(
   return content.length > 0 ? content : "\u00A0";
 }
 
-function renderDividerLine(line: AnnotatedLine, key: string) {
+function TranscriptDividerRow({ line }: { readonly line: AnnotatedLine }) {
   return (
     <div
-      key={key}
       className="transcript-blockHistory__divider"
       aria-hidden="true"
     >
@@ -673,10 +577,9 @@ function renderDividerLine(line: AnnotatedLine, key: string) {
   );
 }
 
-function renderSpacerLine(line: AnnotatedLine, key: string) {
+function TranscriptSpacerRow({ line }: { readonly line: AnnotatedLine }) {
   return (
     <div
-      key={key}
       className={classNames([
         "transcript-blockHistory__spacer",
         `transcript-blockHistory__spacer--${line.kind}`,
@@ -686,7 +589,11 @@ function renderSpacerLine(line: AnnotatedLine, key: string) {
   );
 }
 
-function renderAttachmentSummary(attachments: ReadonlyArray<TranscriptImageAttachment> | undefined) {
+function TranscriptAttachmentSummary({
+  attachments,
+}: {
+  readonly attachments: ReadonlyArray<TranscriptImageAttachment> | undefined;
+}) {
   if (!attachments || attachments.length === 0) {
     return null;
   }
@@ -700,14 +607,21 @@ function renderAttachmentSummary(attachments: ReadonlyArray<TranscriptImageAttac
   );
 }
 
-function renderCommandWidgetLine(
-  line: AnnotatedLine,
-  lineSearchMatches: ReadonlyArray<IndexedSearchMatch>,
-  expandedCommandSignatures: ReadonlySet<string>,
-  collapsedFileChangeSignatures: ReadonlySet<string>,
-  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>,
-  onToggleCommandWidget: TranscriptHistoryBlocksProps["onToggleCommandWidget"],
-) {
+function TranscriptCommandWidgetRow({
+  line,
+  searchMatches,
+  expandedCommandSignatures,
+  collapsedFileChangeSignatures,
+  resolvedInlineDiffBySignature,
+  onToggleCommandWidget,
+}: {
+  readonly line: AnnotatedLine;
+  readonly searchMatches: ReadonlyArray<IndexedSearchMatch>;
+  readonly expandedCommandSignatures: ReadonlySet<string>;
+  readonly collapsedFileChangeSignatures: ReadonlySet<string>;
+  readonly resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>;
+  readonly onToggleCommandWidget: TranscriptHistoryBlocksProps["onToggleCommandWidget"];
+}) {
   const signature = line.commandWidgetSignature;
   if (!signature) {
     return null;
@@ -739,7 +653,7 @@ function renderCommandWidgetLine(
       : undefined;
   const summaryContent = (
     <div className="transcript-blockHistory__commandWidgetSummary">
-      {renderAnnotatedLineContent(line, lineSearchMatches)}
+      {renderAnnotatedLineContent(line, searchMatches)}
     </div>
   );
   const inlineDiffFileOccurrences = new Map<string, number>();
@@ -761,6 +675,7 @@ function renderCommandWidgetLine(
         <button
           type="button"
           className="transcript-blockHistory__commandWidgetRail"
+          data-command-widget-signature={signature}
           aria-label={isExpanded ? "Collapse details" : "Expand details"}
           aria-expanded={isExpanded}
           onClick={() => onToggleCommandWidget?.({
@@ -853,11 +768,16 @@ function renderCommandWidgetLine(
   );
 }
 
-function renderMarkdownTableLine(line: MarkdownTableDisplayLine, key: string) {
+function TranscriptMarkdownTableDisplayLine({
+  line,
+  lineKey,
+}: {
+  readonly line: MarkdownTableDisplayLine;
+  readonly lineKey: string;
+}) {
   if (!line.cells || line.kind === "border") {
     return (
       <div
-        key={key}
         className={classNames([
           "transcript-blockHistory__markdownTableLine",
           `transcript-blockHistory__markdownTableLine--${line.kind}`,
@@ -873,7 +793,6 @@ function renderMarkdownTableLine(line: MarkdownTableDisplayLine, key: string) {
   const cellOccurrences = new Map<string, number>();
   return (
     <div
-      key={key}
       className={classNames([
         "transcript-blockHistory__markdownTableLine",
         `transcript-blockHistory__markdownTableLine--${line.kind}`,
@@ -888,7 +807,7 @@ function renderMarkdownTableLine(line: MarkdownTableDisplayLine, key: string) {
         const cellOccurrence = cellOccurrences.get(cellIdentity) ?? 0;
         cellOccurrences.set(cellIdentity, cellOccurrence + 1);
         return (
-          <Fragment key={`${key}:cell:${cellIdentity}:${cellOccurrence}`}>
+          <Fragment key={`${lineKey}:cell:${cellIdentity}:${cellOccurrence}`}>
           <span
             className={classNames([
               "transcript-blockHistory__markdownTableCell",
@@ -911,22 +830,366 @@ function renderMarkdownTableLine(line: MarkdownTableDisplayLine, key: string) {
   );
 }
 
-function renderMarkdownTableWidget(line: AnnotatedLine, availableWidthPx: number, key: string) {
+function TranscriptMarkdownTableRow({
+  line,
+  availableWidthPx,
+  rowKey,
+}: {
+  readonly line: AnnotatedLine;
+  readonly availableWidthPx: number;
+  readonly rowKey: string;
+}) {
   if (!line.tableData) {
     return null;
   }
 
   const displayLines = layoutMarkdownTable(line.tableData, resolveMarkdownTableDisplayWidth(availableWidthPx));
+  const displayLineOccurrences = new Map<string, number>();
   return (
-    <div key={key} className="transcript-blockHistory__lineFrame">
+    <div className="transcript-blockHistory__lineFrame">
       <div className="transcript-blockHistory__markdownTableSurface">
         <div className="transcript-blockHistory__markdownTableLines">
-          {displayLines.map((displayLine, index) =>
-            renderMarkdownTableLine(displayLine, `${key}:${displayLine.kind}:${index}`))}
+          {displayLines.map((displayLine) => {
+            const displayLineIdentity = `${displayLine.kind}:${displayLine.text}`;
+            const displayLineOccurrence = displayLineOccurrences.get(displayLineIdentity) ?? 0;
+            displayLineOccurrences.set(displayLineIdentity, displayLineOccurrence + 1);
+            const displayLineKey = `${rowKey}:${displayLineIdentity}:${displayLineOccurrence}`;
+            return (
+              <TranscriptMarkdownTableDisplayLine
+                key={displayLineKey}
+                line={displayLine}
+                lineKey={displayLineKey}
+              />
+            );
+          })}
         </div>
       </div>
     </div>
   );
+}
+
+type TranscriptBlockRow =
+  | (TranscriptBlockRowBase & {
+      readonly kind: "table";
+      readonly line: AnnotatedLine;
+    })
+  | (TranscriptBlockRowBase & {
+      readonly kind: "divider";
+      readonly line: AnnotatedLine;
+    })
+  | (TranscriptBlockRowBase & {
+      readonly kind: "spacer";
+      readonly line: AnnotatedLine;
+    })
+  | (TranscriptBlockRowBase & {
+      readonly kind: "commandWidget";
+      readonly line: AnnotatedLine;
+      readonly searchMatches: ReadonlyArray<IndexedSearchMatch>;
+    })
+  | (TranscriptBlockRowBase & {
+      readonly kind: "line";
+      readonly line: AnnotatedLine;
+      readonly searchMatches: ReadonlyArray<IndexedSearchMatch>;
+    });
+
+function resolveRenderedBlockRows(
+  renderedBlock: RenderedTranscriptBlock,
+  blockIndex: number,
+  searchMatchesByLine: ReadonlyMap<string, ReadonlyArray<IndexedSearchMatch>>,
+): ReadonlyArray<TranscriptBlockRow> {
+  return renderedBlock.rows.flatMap((row): ReadonlyArray<TranscriptBlockRow> => {
+    const line = renderedBlock.lines[row.lineIndexStart];
+    if (!line) {
+      return [];
+    }
+    const lineSearchMatches = searchMatchesByLine.get(`${blockIndex}:${row.lineIndexStart}`) ?? [];
+    switch (row.kind) {
+      case "table":
+        return [{ kind: "table", key: row.key, lineIndexStart: row.lineIndexStart, lineIndexEnd: row.lineIndexEnd, line }];
+      case "divider":
+        return [{ kind: "divider", key: row.key, lineIndexStart: row.lineIndexStart, lineIndexEnd: row.lineIndexEnd, line }];
+      case "spacer":
+        return [{ kind: "spacer", key: row.key, lineIndexStart: row.lineIndexStart, lineIndexEnd: row.lineIndexEnd, line }];
+      case "commandWidget":
+        return [{
+          kind: "commandWidget",
+          key: row.key,
+          lineIndexStart: row.lineIndexStart,
+          lineIndexEnd: row.lineIndexEnd,
+          line,
+          searchMatches: lineSearchMatches,
+        }];
+      case "line":
+        return [{
+          kind: "line",
+          key: row.key,
+          lineIndexStart: row.lineIndexStart,
+          lineIndexEnd: row.lineIndexEnd,
+          line,
+          searchMatches: lineSearchMatches,
+        }];
+    }
+  });
+}
+
+function estimateAttachmentSummaryHeight(
+  attachments: ReadonlyArray<TranscriptImageAttachment>,
+  availableWidthPx: number,
+) {
+  return Math.max(
+    DEFAULT_LINE_HEIGHT_PX,
+    Math.ceil(
+      estimateWrappedTextRows(
+        `${attachments.length} attachment${attachments.length === 1 ? "" : "s"}: ${attachments.map((attachment) => attachment.name).join(", ")}`,
+        Math.max(120, availableWidthPx),
+      ) * DEFAULT_LINE_HEIGHT_PX,
+    ),
+  );
+}
+
+function estimateRenderedBlockRowHeight(
+  row: TranscriptBlockRow,
+  availableWidthPx: number,
+  expandedCommandSignatures: ReadonlySet<string>,
+  collapsedFileChangeSignatures: ReadonlySet<string>,
+  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>,
+) {
+  const plainLineWidthPx = Math.max(120, availableWidthPx);
+  const commandSurfaceWidthPx = Math.max(120, availableWidthPx - 28);
+  const commandBodyWidthPx = Math.max(120, availableWidthPx - 28);
+  const inlineDiffContentWidthPx = Math.max(72, commandBodyWidthPx - 80);
+  switch (row.kind) {
+    case "spacer":
+      return Math.ceil(DEFAULT_LINE_HEIGHT_PX * 0.6);
+    case "table":
+      if (!row.line.tableData) {
+        return DEFAULT_LINE_HEIGHT_PX;
+      }
+      return Math.max(
+        DEFAULT_LINE_HEIGHT_PX,
+        Math.ceil(
+          layoutMarkdownTable(row.line.tableData, resolveMarkdownTableDisplayWidth(availableWidthPx)).length
+          * DEFAULT_LINE_HEIGHT_PX
+          + 8,
+        ),
+      );
+    case "divider":
+    case "line":
+      return Math.max(DEFAULT_LINE_HEIGHT_PX, estimateWrappedTextRows(row.line.text, plainLineWidthPx) * DEFAULT_LINE_HEIGHT_PX);
+    case "commandWidget": {
+      const line = row.line;
+      const isExpanded = isExpandedCommandLine(line, expandedCommandSignatures, collapsedFileChangeSignatures);
+      const resolvedInlineDiffState = line.commandWidgetSignature
+        ? resolvedInlineDiffBySignature.get(line.commandWidgetSignature)
+        : undefined;
+      const effectiveInlineDiff =
+        line.inlineUnifiedDiff
+        ?? (resolvedInlineDiffState?.status === "ready" ? resolvedInlineDiffState.diff : undefined);
+      let estimatedLineCount =
+        !isExpanded && hasExpandableCommandSummary(line)
+          ? 1
+          : estimateWrappedTextRows(line.text, commandSurfaceWidthPx);
+      estimatedLineCount += 1;
+      if (!isExpanded) {
+        return Math.max(32, Math.ceil(estimatedLineCount * DEFAULT_LINE_HEIGHT_PX + 12));
+      }
+      if (line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0) {
+        estimatedLineCount += estimateWrappedLogicalLineRows(line.commandWidgetOutputLines, commandBodyWidthPx);
+      }
+      if (effectiveInlineDiff) {
+        const parsedInlineDiffFiles = parseInlineDiffFiles(effectiveInlineDiff, line.inlineDiffChangedFiles);
+        if (parsedInlineDiffFiles.length > 0) {
+          estimatedLineCount += estimateInlineDiffFileRows(parsedInlineDiffFiles, inlineDiffContentWidthPx);
+        } else {
+          estimatedLineCount += 1;
+          estimatedLineCount += Math.max(4, estimateWrappedTextRows(effectiveInlineDiff, commandBodyWidthPx));
+        }
+      }
+      if (!effectiveInlineDiff && line.inlineDiffLookup) {
+        estimatedLineCount += 1;
+      }
+      return Math.max(32, Math.ceil(estimatedLineCount * DEFAULT_LINE_HEIGHT_PX + 16));
+    }
+  }
+}
+
+function estimateVirtualizedTranscriptRowHeight(
+  row: VirtualizedTranscriptRow,
+  availableWidthPx: number,
+  expandedCommandSignatures: ReadonlySet<string>,
+  collapsedFileChangeSignatures: ReadonlySet<string>,
+  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>,
+) {
+  const baseHeight =
+    row.kind === "attachmentSummary"
+      ? estimateAttachmentSummaryHeight(row.attachments, availableWidthPx)
+      : estimateRenderedBlockRowHeight(
+          row.row,
+          availableWidthPx,
+          expandedCommandSignatures,
+          collapsedFileChangeSignatures,
+          resolvedInlineDiffBySignature,
+        );
+  return baseHeight + (row.hasLeadingGap ? DEFAULT_BLOCK_GAP_PX : 0);
+}
+
+function getVirtualizedTranscriptRowEstimateKey(
+  row: VirtualizedTranscriptRow,
+  availableWidthPx: number,
+  expandedCommandSignatures: ReadonlySet<string>,
+  collapsedFileChangeSignatures: ReadonlySet<string>,
+  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>,
+) {
+  if (row.kind === "attachmentSummary") {
+    return `attachment:${row.key}:${availableWidthPx}`;
+  }
+  if (row.row.kind === "commandWidget") {
+    return [
+      "commandWidget",
+      row.key,
+      availableWidthPx,
+      getCommandWidgetMeasurementIdentity(
+        row.row.line,
+        expandedCommandSignatures,
+        collapsedFileChangeSignatures,
+        resolvedInlineDiffBySignature,
+      ),
+    ].join(":");
+  }
+  if (row.row.kind === "table") {
+    return `table:${row.key}:${resolveMarkdownTableDisplayWidth(availableWidthPx)}`;
+  }
+  return `${row.row.kind}:${row.key}:${availableWidthPx}`;
+}
+
+function flattenVirtualizedTranscriptRows(
+  renderedBlocks: ReadonlyArray<RenderedTranscriptBlock>,
+  searchMatchesByLine: ReadonlyMap<string, ReadonlyArray<IndexedSearchMatch>>,
+  includeRowIndexByBlockLine: boolean,
+) {
+  const rows: VirtualizedTranscriptRow[] = [];
+  const rowIndexByBlockLine = includeRowIndexByBlockLine ? new Map<string, number>() : null;
+  renderedBlocks.forEach((renderedBlock, blockIndex) => {
+    const derivedRows = resolveRenderedBlockRows(renderedBlock, blockIndex, searchMatchesByLine);
+    derivedRows.forEach((row, rowIndexWithinBlock) => {
+      const flattenedRow = {
+        kind: "content",
+        key: `${renderedBlock.key}:row:${row.key}`,
+        blockIndex,
+        blockType: renderedBlock.block.type,
+        row,
+        showMessageTurnSeparator: renderedBlock.showMessageTurnSeparator && rowIndexWithinBlock === 0,
+        hasLeadingGap: blockIndex > 0 && rowIndexWithinBlock === 0,
+      } satisfies VirtualizedTranscriptRow;
+      const flattenedRowIndex = rows.length;
+      rows.push(flattenedRow);
+      if (rowIndexByBlockLine) {
+        for (let lineIndex = row.lineIndexStart; lineIndex <= row.lineIndexEnd; lineIndex += 1) {
+          rowIndexByBlockLine.set(`${blockIndex}:${lineIndex}`, flattenedRowIndex);
+        }
+      }
+    });
+    if (renderedBlock.block.type === "user-message" && renderedBlock.block.attachments && renderedBlock.block.attachments.length > 0) {
+      rows.push({
+        kind: "attachmentSummary",
+        key: `${renderedBlock.key}:attachments`,
+        blockIndex,
+        blockType: renderedBlock.block.type,
+        attachments: renderedBlock.block.attachments,
+        showMessageTurnSeparator: false,
+        hasLeadingGap: false,
+      });
+    }
+  });
+  return {
+    rows,
+    rowIndexByBlockLine: rowIndexByBlockLine ?? new Map<string, number>(),
+  };
+}
+
+function renderVirtualizedTranscriptRow(
+  row: VirtualizedTranscriptRow,
+  expandedCommandSignatures: ReadonlySet<string>,
+  collapsedFileChangeSignatures: ReadonlySet<string>,
+  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>,
+  onToggleCommandWidget: TranscriptHistoryBlocksProps["onToggleCommandWidget"],
+  availableWidthPx: number,
+) {
+  if (row.kind === "attachmentSummary") {
+    return <TranscriptAttachmentSummary attachments={row.attachments} />;
+  }
+  return (
+    <TranscriptBlockRowView
+      row={row.row}
+      expandedCommandSignatures={expandedCommandSignatures}
+      collapsedFileChangeSignatures={collapsedFileChangeSignatures}
+      resolvedInlineDiffBySignature={resolvedInlineDiffBySignature}
+      onToggleCommandWidget={onToggleCommandWidget}
+      availableWidthPx={availableWidthPx}
+    />
+  );
+}
+
+function TranscriptPlainLineRow({
+  line,
+  searchMatches,
+}: {
+  readonly line: AnnotatedLine;
+  readonly searchMatches: ReadonlyArray<IndexedSearchMatch>;
+}) {
+  return (
+    <div className="transcript-blockHistory__lineFrame">
+      <div
+        className={classNames([
+          "transcript-blockHistory__line",
+          `transcript-blockHistory__line--${line.kind}`,
+          ...(line.extraClasses ?? []),
+        ])}
+      >
+        {renderAnnotatedLineContent(line, searchMatches)}
+      </div>
+    </div>
+  );
+}
+
+function TranscriptBlockRowView({
+  row,
+  expandedCommandSignatures,
+  collapsedFileChangeSignatures,
+  resolvedInlineDiffBySignature,
+  onToggleCommandWidget,
+  availableWidthPx,
+}: {
+  readonly row: TranscriptBlockRow;
+  readonly expandedCommandSignatures: ReadonlySet<string>;
+  readonly collapsedFileChangeSignatures: ReadonlySet<string>;
+  readonly resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>;
+  readonly onToggleCommandWidget: TranscriptHistoryBlocksProps["onToggleCommandWidget"];
+  readonly availableWidthPx: number;
+}) {
+  switch (row.kind) {
+    case "table":
+      return <TranscriptMarkdownTableRow line={row.line} availableWidthPx={availableWidthPx} rowKey={row.key} />;
+    case "divider":
+      return <TranscriptDividerRow line={row.line} />;
+    case "spacer":
+      return <TranscriptSpacerRow line={row.line} />;
+    case "commandWidget":
+      return (
+        <div className="transcript-blockHistory__lineFrame">
+          <TranscriptCommandWidgetRow
+            line={row.line}
+            searchMatches={row.searchMatches}
+            expandedCommandSignatures={expandedCommandSignatures}
+            collapsedFileChangeSignatures={collapsedFileChangeSignatures}
+            resolvedInlineDiffBySignature={resolvedInlineDiffBySignature}
+            onToggleCommandWidget={onToggleCommandWidget}
+          />
+        </div>
+      );
+    case "line":
+      return <TranscriptPlainLineRow line={row.line} searchMatches={row.searchMatches} />;
+  }
 }
 
 function renderBlock(
@@ -939,78 +1202,34 @@ function renderBlock(
   onToggleCommandWidget: TranscriptHistoryBlocksProps["onToggleCommandWidget"],
   availableWidthPx: number,
 ) {
-  const lineOccurrences = new Map<string, number>();
-  const renderedLines: ReactNode[] = [];
-  for (let lineIndex = 0; lineIndex < renderedBlock.lines.length; lineIndex += 1) {
-    const line = renderedBlock.lines[lineIndex]!;
-    const lineIdentity = getLineIdentity(line);
-    const lineOccurrence = lineOccurrences.get(lineIdentity) ?? 0;
-    lineOccurrences.set(lineIdentity, lineOccurrence + 1);
-    const lineKey = `${lineIdentity}:${lineOccurrence}`;
-    const lineSearchMatches = searchMatchesByLine.get(`${blockIndex}:${lineIndex}`) ?? [];
-    if (line.kind === "table" && line.tableData) {
-      renderedLines.push(renderMarkdownTableWidget(line, availableWidthPx, lineKey));
-      while (lineIndex + 1 < renderedBlock.lines.length && renderedBlock.lines[lineIndex + 1]?.kind === "table") {
-        lineIndex += 1;
-      }
-      continue;
-    }
-    if (line.kind === "divider") {
-      renderedLines.push(renderDividerLine(line, lineKey));
-      continue;
-    }
-    if (isSpacerLine(line)) {
-      renderedLines.push(renderSpacerLine(line, lineKey));
-      continue;
-    }
-    if (isCommandWidgetLine(line)) {
-      renderedLines.push(
-        <div
-          key={lineKey}
-          className="transcript-blockHistory__lineFrame"
-        >
-          {renderCommandWidgetLine(
-            line,
-            lineSearchMatches,
-            expandedCommandSignatures,
-            collapsedFileChangeSignatures,
-            resolvedInlineDiffBySignature,
-            onToggleCommandWidget,
-          )}
-        </div>,
-      );
-      continue;
-    }
-    renderedLines.push(
-      <div
-        key={lineKey}
-        className="transcript-blockHistory__lineFrame"
-      >
-        <div
-          className={classNames([
-            "transcript-blockHistory__line",
-            `transcript-blockHistory__line--${line.kind}`,
-            ...(line.extraClasses ?? []),
-          ])}
-        >
-          {renderAnnotatedLineContent(line, lineSearchMatches)}
-        </div>
-      </div>,
-    );
-  }
+  const rows = resolveRenderedBlockRows(renderedBlock, blockIndex, searchMatchesByLine);
   return (
     <section
       className={`transcript-blockHistory__block transcript-blockHistory__block--${renderedBlock.block.type}`}
       data-block-type={renderedBlock.block.type}
     >
-      {renderedLines}
-      {renderedBlock.block.type === "user-message" ? renderAttachmentSummary(renderedBlock.block.attachments) : null}
+      {rows.map((row) => (
+        <TranscriptBlockRowView
+          key={row.key}
+          row={row}
+          expandedCommandSignatures={expandedCommandSignatures}
+          collapsedFileChangeSignatures={collapsedFileChangeSignatures}
+          resolvedInlineDiffBySignature={resolvedInlineDiffBySignature}
+          onToggleCommandWidget={onToggleCommandWidget}
+          availableWidthPx={availableWidthPx}
+        />
+      ))}
+      {renderedBlock.block.type === "user-message"
+        ? <TranscriptAttachmentSummary attachments={renderedBlock.block.attachments} />
+        : null}
     </section>
   );
 }
 
 export function TranscriptHistoryBlocks({
   blocks,
+  precomputedBlockLines,
+  precomputedBlockRows,
   cacheKey = null,
   searchMatches = [],
   activeSearchMatchIndex = -1,
@@ -1018,118 +1237,58 @@ export function TranscriptHistoryBlocks({
   collapsedFileChangeSignatures = new Set<string>(),
   resolvedInlineDiffBySignature = new Map<string, InlineDiffResolutionStateLike>(),
   onToggleCommandWidget,
-  onMeasuredHeightApplied,
   scrollTop = 0,
   viewportHeight = 0,
   scrollContainerRef,
   isScrolling = false,
 }: TranscriptHistoryBlocksProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const renderedBlockCacheRef = useRef<Map<string, {
-    readonly blocks: ReadonlyArray<TranscriptBlock>;
-    readonly renderedBlocks: ReadonlyArray<CachedRenderedTranscriptBlockBase>;
-  }>>(new Map());
-  const renderedBlocksStateCacheRef = useRef<Map<string, CachedRenderedTranscriptBlocksState>>(new Map());
-  const geometryCacheRef = useRef<Map<string, CachedBlockGeometryState>>(new Map());
+  const staticBlockRefs = useRef(new Map<string, HTMLDivElement>());
   const baseRenderedBlocks = useMemo(() => {
-    return measureTranscriptSwitchDiagnostic({
-      label: "block-history-base-render",
-      historyCacheKey: cacheKey,
-      blockCount: blocks.length,
-      cacheHit: cacheKey !== null && (renderedBlockCacheRef.current.get(cacheKey)?.blocks === blocks),
-    }, () => {
-      const cached =
-        cacheKey !== null
-          ? (renderedBlockCacheRef.current.get(cacheKey) ?? null)
-          : null;
-      if (cached && cached.blocks === blocks) {
-        return cached.renderedBlocks;
-      }
-      const blockOccurrences = new Map<string, number>();
-      const nextRenderedBlocks = blocks.map((block, blockIndex) => {
-        const previousBlock = blockIndex > 0 ? blocks[blockIndex - 1] ?? null : null;
-        const lines = blockToLines(block);
-        const blockIdentity = getBlockIdentity(block, lines);
-        const blockOccurrence = blockOccurrences.get(blockIdentity) ?? 0;
-        blockOccurrences.set(blockIdentity, blockOccurrence + 1);
-        return {
-          block,
-          lines,
-          key: `${blockIdentity}:${blockOccurrence}`,
-          showMessageTurnSeparator: shouldShowMessageTurnSeparator(previousBlock, block),
-        } satisfies CachedRenderedTranscriptBlockBase;
+    const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const cached =
+      cacheKey !== null
+        ? (renderedBlockCache.get(cacheKey) ?? null)
+        : null;
+    if (cached && cached.blocks === blocks) {
+      recordSlowTranscriptSwitchDiagnostic({
+        label: "base-rendered-blocks",
+        historyCacheKey: cacheKey,
+        blockCount: cached.renderedBlocks.length,
+        cacheHit: true,
+      }, startedAt, 12);
+      return cached.renderedBlocks;
+    }
+    const blockOccurrences = new Map<string, number>();
+    const nextRenderedBlocks = blocks.map((block, blockIndex) => {
+      const previousBlock = blockIndex > 0 ? blocks[blockIndex - 1] ?? null : null;
+      const lines = precomputedBlockLines?.[blockIndex] ?? blockToLines(block);
+      const rows = precomputedBlockRows?.[blockIndex] ?? deriveTranscriptBlockRowDefinitions(lines);
+      const blockIdentity = getBlockIdentity(block, lines);
+      const blockOccurrence = blockOccurrences.get(blockIdentity) ?? 0;
+      blockOccurrences.set(blockIdentity, blockOccurrence + 1);
+      return {
+        block,
+        lines,
+        rows,
+        key: `${blockIdentity}:${blockOccurrence}`,
+        showMessageTurnSeparator: shouldShowMessageTurnSeparator(previousBlock, block),
+      } satisfies RenderedTranscriptBlock;
+    });
+    if (cacheKey !== null) {
+      renderedBlockCache.set(cacheKey, {
+        blocks,
+        renderedBlocks: nextRenderedBlocks,
       });
-      if (cacheKey !== null) {
-        renderedBlockCacheRef.current.set(cacheKey, {
-          blocks,
-          renderedBlocks: nextRenderedBlocks,
-        });
-      }
-      return nextRenderedBlocks;
-    });
-  }, [blocks, cacheKey]);
-  const renderedBlocks = useMemo(() => {
-    return measureTranscriptSwitchDiagnostic({
-      label: "block-history-rendered-blocks",
+    }
+    recordSlowTranscriptSwitchDiagnostic({
+      label: "base-rendered-blocks",
       historyCacheKey: cacheKey,
-      blockCount: baseRenderedBlocks.length,
-      cacheHit:
-        cacheKey !== null
-        && (() => {
-          const cachedState = renderedBlocksStateCacheRef.current.get(cacheKey);
-          return Boolean(
-            cachedState
-            && cachedState.baseRenderedBlocks === baseRenderedBlocks
-            && cachedState.expandedCommandSignatures === expandedCommandSignatures
-            && cachedState.collapsedFileChangeSignatures === collapsedFileChangeSignatures
-            && cachedState.resolvedInlineDiffBySignature === resolvedInlineDiffBySignature,
-          );
-        })(),
-    }, () => {
-      const cachedState =
-        cacheKey !== null
-          ? (renderedBlocksStateCacheRef.current.get(cacheKey) ?? null)
-          : null;
-      if (
-        cachedState
-        && cachedState.baseRenderedBlocks === baseRenderedBlocks
-        && cachedState.expandedCommandSignatures === expandedCommandSignatures
-        && cachedState.collapsedFileChangeSignatures === collapsedFileChangeSignatures
-        && cachedState.resolvedInlineDiffBySignature === resolvedInlineDiffBySignature
-      ) {
-        return cachedState.renderedBlocks;
-      }
-
-      const nextRenderedBlocks = baseRenderedBlocks.map((renderedBlock) => ({
-        ...renderedBlock,
-        measurementKey: `${getBlockMeasurementIdentity(
-          renderedBlock.block,
-          renderedBlock.lines,
-          expandedCommandSignatures,
-          collapsedFileChangeSignatures,
-          resolvedInlineDiffBySignature,
-        )}:${renderedBlock.key}`,
-      } satisfies RenderedTranscriptBlock));
-
-      if (cacheKey !== null) {
-        renderedBlocksStateCacheRef.current.set(cacheKey, {
-          baseRenderedBlocks,
-          expandedCommandSignatures,
-          collapsedFileChangeSignatures,
-          resolvedInlineDiffBySignature,
-          renderedBlocks: nextRenderedBlocks,
-        });
-      }
-
-      return nextRenderedBlocks;
-    });
-  }, [
-    baseRenderedBlocks,
-    cacheKey,
-    collapsedFileChangeSignatures,
-    expandedCommandSignatures,
-    resolvedInlineDiffBySignature,
-  ]);
+      blockCount: nextRenderedBlocks.length,
+      cacheHit: false,
+    }, startedAt, 12);
+    return nextRenderedBlocks;
+  }, [blocks, cacheKey, precomputedBlockLines, precomputedBlockRows]);
 
   const searchMatchesByLine = useMemo(() => {
     const byLine = new Map<string, IndexedSearchMatch[]>();
@@ -1146,466 +1305,276 @@ export function TranscriptHistoryBlocks({
     return byLine;
   }, [activeSearchMatchIndex, searchMatches]);
 
-  const [measuredHeights, setMeasuredHeights] = useState<ReadonlyMap<string, number>>(() => new Map());
   const [availableWidthPx, setAvailableWidthPx] = useState(0);
-  const stickyWindowRef = useRef<VirtualWindow | null>(null);
-  const pendingScrollAnchorDeltaRef = useRef(0);
-  const blockRefs = useRef(new Map<string, HTMLDivElement>());
-  const premeasureRefs = useRef(new Map<string, HTMLDivElement>());
-  const setBlockRef = useCallback((key: string, node: HTMLDivElement | null) => {
+  const setStaticBlockRef = useCallback((key: string, node: HTMLDivElement | null) => {
     if (node) {
-      blockRefs.current.set(key, node);
+      staticBlockRefs.current.set(key, node);
     } else {
-      blockRefs.current.delete(key);
+      staticBlockRefs.current.delete(key);
     }
   }, []);
-  const setPremeasureRef = useCallback((key: string, node: HTMLDivElement | null) => {
-    if (node) {
-      premeasureRefs.current.set(key, node);
-    } else {
-      premeasureRefs.current.delete(key);
-    }
-  }, []);
-  const widthBucket = Math.max(0, Math.floor(availableWidthPx / DEFAULT_WIDTH_BUCKET_PX));
 
   useLayoutEffect(() => {
-    const element = rootRef.current;
-    if (!element) {
+    const element = scrollContainerRef?.current ?? rootRef.current;
+    if (!element || typeof window === "undefined") {
       return undefined;
     }
 
-    const syncWidth = () => {
-      const nextWidth = Math.max(0, Math.floor(element.clientWidth));
+    let frameId: number | null = null;
+    const syncWidth = (measuredWidth?: number) => {
+      const widthPx = measuredWidth ?? element.clientWidth;
+      const nextWidth = Math.max(0, Math.floor(widthPx / DEFAULT_WIDTH_BUCKET_PX) * DEFAULT_WIDTH_BUCKET_PX);
       setAvailableWidthPx((current) => current === nextWidth ? current : nextWidth);
+    };
+    const scheduleWidthSync = (measuredWidth?: number) => {
+      if (frameId !== null) {
+        window.cancelAnimationFrame(frameId);
+      }
+      frameId = window.requestAnimationFrame(() => {
+        frameId = null;
+        syncWidth(measuredWidth);
+      });
     };
 
     syncWidth();
 
     if (typeof ResizeObserver === "undefined") {
-      return undefined;
+      return () => {
+        if (frameId !== null) {
+          window.cancelAnimationFrame(frameId);
+        }
+      };
     }
 
-    const observer = new ResizeObserver(() => {
-      syncWidth();
+    const observer = new ResizeObserver((entries) => {
+      scheduleWidthSync(entries[0]?.contentRect.width);
     });
     observer.observe(element);
     return () => {
+      if (frameId !== null) {
+        window.cancelAnimationFrame(frameId);
+      }
       observer.disconnect();
     };
-  }, []);
+  }, [scrollContainerRef]);
 
-  useLayoutEffect(() => {
-    stickyWindowRef.current = null;
-    setMeasuredHeights((current) => current.size === 0 ? current : new Map());
-  }, [widthBucket]);
+  const scrollContainer = scrollContainerRef?.current ?? null;
+  const shouldVirtualize = Boolean(scrollContainer && viewportHeight > 0);
+  const firstUnvirtualizedBlockIndex = useMemo(
+    () =>
+      shouldVirtualize
+        ? findFirstUnvirtualizedTranscriptBlockIndex(baseRenderedBlocks.map(({ block }) => block))
+        : baseRenderedBlocks.length,
+    [baseRenderedBlocks, shouldVirtualize],
+  );
+  const virtualizedBlocks = useMemo(
+    () => shouldVirtualize ? baseRenderedBlocks.slice(0, firstUnvirtualizedBlockIndex) : [],
+    [baseRenderedBlocks, firstUnvirtualizedBlockIndex, shouldVirtualize],
+  );
+  const nonVirtualizedBlocks = useMemo(
+    () => shouldVirtualize ? baseRenderedBlocks.slice(firstUnvirtualizedBlockIndex) : baseRenderedBlocks,
+    [baseRenderedBlocks, firstUnvirtualizedBlockIndex, shouldVirtualize],
+  );
+  const shouldBuildSearchRowIndex = activeSearchMatchIndex >= 0;
+  const { rows: virtualizedRows, rowIndexByBlockLine } = useMemo(() => {
+    const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (!shouldBuildSearchRowIndex && cacheKey !== null) {
+      const cached = flattenedRowCache.get(cacheKey) ?? null;
+      if (cached && cached.renderedBlocks === virtualizedBlocks) {
+        recordSlowTranscriptSwitchDiagnostic({
+          label: "flatten-virtualized-rows",
+          historyCacheKey: cacheKey,
+          rowCount: cached.rows.length,
+          cacheHit: true,
+        }, startedAt, 12);
+        return {
+          rows: cached.rows,
+          rowIndexByBlockLine: new Map<string, number>(),
+        };
+      }
+    }
 
-  const geometry = useMemo(() => {
-    return measureTranscriptSwitchDiagnostic({
-      label: "block-history-geometry",
+    const nextFlattenedRows = flattenVirtualizedTranscriptRows(
+      virtualizedBlocks,
+      searchMatchesByLine,
+      shouldBuildSearchRowIndex,
+    );
+    if (!shouldBuildSearchRowIndex && cacheKey !== null) {
+      flattenedRowCache.set(cacheKey, {
+        renderedBlocks: virtualizedBlocks,
+        rows: nextFlattenedRows.rows,
+      });
+    }
+    recordSlowTranscriptSwitchDiagnostic({
+      label: "flatten-virtualized-rows",
       historyCacheKey: cacheKey,
-      blockCount: renderedBlocks.length,
-      cacheHit:
-        cacheKey !== null
-        && (() => {
-          const cachedGeometry = geometryCacheRef.current.get(cacheKey);
-          return Boolean(
-            cachedGeometry
-            && cachedGeometry.renderedBlocks === renderedBlocks
-            && cachedGeometry.measuredHeights === measuredHeights
-            && cachedGeometry.availableWidthPx === availableWidthPx
-            && cachedGeometry.expandedCommandSignatures === expandedCommandSignatures
-            && cachedGeometry.collapsedFileChangeSignatures === collapsedFileChangeSignatures
-            && cachedGeometry.resolvedInlineDiffBySignature === resolvedInlineDiffBySignature,
-          );
-        })(),
-    }, () => {
-      const cachedGeometry =
-        cacheKey !== null
-          ? (geometryCacheRef.current.get(cacheKey) ?? null)
-          : null;
-      if (
-        cachedGeometry
-        && cachedGeometry.renderedBlocks === renderedBlocks
-        && cachedGeometry.measuredHeights === measuredHeights
-        && cachedGeometry.availableWidthPx === availableWidthPx
-        && cachedGeometry.expandedCommandSignatures === expandedCommandSignatures
-        && cachedGeometry.collapsedFileChangeSignatures === collapsedFileChangeSignatures
-        && cachedGeometry.resolvedInlineDiffBySignature === resolvedInlineDiffBySignature
-      ) {
-        return cachedGeometry;
-      }
+      rowCount: nextFlattenedRows.rows.length,
+      cacheHit: false,
+    }, startedAt, 12);
+    return nextFlattenedRows;
+  }, [cacheKey, searchMatchesByLine, shouldBuildSearchRowIndex, virtualizedBlocks]);
 
-      const blockHeights = renderedBlocks.map((renderedBlock, index) =>
-        measuredHeights.get(renderedBlock.measurementKey)
-        ?? (
-          estimateRenderedBlockHeight(
-            renderedBlock,
-            availableWidthPx,
-            expandedCommandSignatures,
-            collapsedFileChangeSignatures,
-            resolvedInlineDiffBySignature,
-          )
-          + (index > 0 ? DEFAULT_BLOCK_GAP_PX : 0)
-        ));
-      const blockOffsets: number[] = [];
-      let offset = 0;
-      for (const height of blockHeights) {
-        blockOffsets.push(offset);
-        offset += height ?? 0;
+  const rowVirtualizer = useVirtualizer({
+    count: shouldVirtualize ? virtualizedRows.length : 0,
+    getScrollElement: () => scrollContainer,
+    initialOffset: scrollTop,
+    initialRect: {
+      width: availableWidthPx,
+      height: viewportHeight,
+    },
+    getItemKey: (index) => virtualizedRows[index]?.key ?? index,
+    estimateSize: (index) => {
+      const row = virtualizedRows[index];
+      if (!row) {
+        return DEFAULT_LINE_HEIGHT_PX;
       }
-      const totalHeight = blockHeights.reduce((sum, height) => sum + height, 0);
-      const blockIndexByKey = new Map(renderedBlocks.map((renderedBlock, index) => [renderedBlock.measurementKey, index]));
-      const nextGeometry = {
-        renderedBlocks,
-        measuredHeights,
+      const estimateKey = getVirtualizedTranscriptRowEstimateKey(
+        row,
         availableWidthPx,
         expandedCommandSignatures,
         collapsedFileChangeSignatures,
         resolvedInlineDiffBySignature,
-        blockHeights,
-        blockOffsets,
-        totalHeight,
-        blockIndexByKey,
-      } satisfies CachedBlockGeometryState;
-
-      if (cacheKey !== null) {
-        geometryCacheRef.current.set(cacheKey, nextGeometry);
+      );
+      const cachedEstimate = rowEstimateCache.get(estimateKey);
+      if (cachedEstimate !== undefined) {
+        return cachedEstimate;
       }
+      const nextEstimate = estimateVirtualizedTranscriptRowHeight(
+        row,
+        availableWidthPx,
+        expandedCommandSignatures,
+        collapsedFileChangeSignatures,
+        resolvedInlineDiffBySignature,
+      );
+      rowEstimateCache.set(estimateKey, nextEstimate);
+      return nextEstimate;
+    },
+    measureElement: (element, entry, instance) => {
+      const measuredSize = measureVirtualElement(element, entry, instance);
+      const rowIndex = Number(element.getAttribute("data-index"));
+      if (Number.isFinite(rowIndex)) {
+        const row = virtualizedRows[rowIndex];
+        if (row) {
+          rowEstimateCache.set(
+            getVirtualizedTranscriptRowEstimateKey(
+              row,
+              availableWidthPx,
+              expandedCommandSignatures,
+              collapsedFileChangeSignatures,
+              resolvedInlineDiffBySignature,
+            ),
+            measuredSize,
+          );
+        }
+      }
+      return measuredSize;
+    },
+    useAnimationFrameWithResizeObserver: true,
+    overscan: DEFAULT_ROW_OVERSCAN,
+  });
 
-      return nextGeometry;
-    });
+  useEffect(() => {
+    rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+      if (isScrolling) {
+        return false;
+      }
+      const scrollOffset = instance.scrollOffset ?? scrollTop;
+      return item.start + item.size <= scrollOffset + 0.5;
+    };
+    return () => {
+      rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
+    };
+  }, [isScrolling, rowVirtualizer, scrollTop]);
+
+  useEffect(() => {
+    rowVirtualizer.measure();
   }, [
     availableWidthPx,
-    cacheKey,
     collapsedFileChangeSignatures,
     expandedCommandSignatures,
-    measuredHeights,
-    renderedBlocks,
     resolvedInlineDiffBySignature,
+    rowVirtualizer,
+    virtualizedRows,
   ]);
-  const { blockHeights, blockIndexByKey, blockOffsets, totalHeight } = geometry;
 
-  const activeSearchBlockIndex =
-    activeSearchMatchIndex >= 0
-      ? searchMatches[activeSearchMatchIndex]?.blockIndex ?? -1
-      : -1;
-
-  const applyMeasuredHeightUpdates = useCallback((updates: ReadonlyMap<string, number>) => {
-    const measurementUpdates: TranscriptHistoryMeasurementUpdate[] = [];
-    const nextMeasuredHeights = new Map<string, number>();
-    let scrollAnchorDelta = 0;
-    for (const [key, nextHeight] of updates) {
-      const globalIndex = blockIndexByKey.get(key);
-      if (globalIndex === undefined) {
-        continue;
-      }
-      const previousHeight = blockHeights[globalIndex] ?? 0;
-      if (nextHeight <= 0 || previousHeight === nextHeight) {
-        continue;
-      }
-      const blockTop = blockOffsets[globalIndex] ?? 0;
-      const blockBottom = blockTop + previousHeight;
-      if (blockBottom <= scrollTop + 0.5) {
-        if (isScrolling) {
-          continue;
-        }
-        scrollAnchorDelta += nextHeight - previousHeight;
-      }
-      const renderedBlock = renderedBlocks[globalIndex];
-      if (renderedBlock) {
-        measurementUpdates.push({
-          blockIndex: globalIndex,
-          blockType: renderedBlock.block.type,
-          blockKey: renderedBlock.key,
-          measurementKey: renderedBlock.measurementKey,
-          commandWidgetSignatures: renderedBlock.lines
-            .filter(isCommandWidgetLine)
-            .flatMap((line) => line.commandWidgetSignature ? [line.commandWidgetSignature] : []),
-          previousHeight,
-          nextHeight,
-          deltaHeight: nextHeight - previousHeight,
-        });
-      }
-      nextMeasuredHeights.set(key, nextHeight);
-    }
-    if (nextMeasuredHeights.size === 0) {
-      return;
-    }
-    if (Math.abs(scrollAnchorDelta) > 0.5) {
-      pendingScrollAnchorDeltaRef.current += scrollAnchorDelta;
-    }
-    setMeasuredHeights((current) => {
-      let changed = false;
-      const next = new Map(current);
-      for (const [key, nextHeight] of nextMeasuredHeights) {
-        if (next.get(key) === nextHeight) {
-          continue;
-        }
-        next.set(key, nextHeight);
-        changed = true;
-      }
-      return changed ? next : current;
-    });
-    if (measurementUpdates.length > 0) {
-      onMeasuredHeightApplied?.(measurementUpdates);
-    }
-  }, [blockHeights, blockIndexByKey, blockOffsets, isScrolling, onMeasuredHeightApplied, renderedBlocks, scrollTop]);
-
-  useLayoutEffect(() => {
-    const scrollAnchorDelta = pendingScrollAnchorDeltaRef.current;
-    if (Math.abs(scrollAnchorDelta) <= 0.5) {
-      return;
-    }
-    pendingScrollAnchorDeltaRef.current = 0;
-    const scrollContainer = scrollContainerRef?.current;
-    if (!scrollContainer) {
-      return;
-    }
-    scrollContainer.scrollTop += scrollAnchorDelta;
-  }, [measuredHeights, scrollContainerRef]);
-
-  const virtualWindow = useMemo(
-    () => {
-      const currentWindow = stickyWindowRef.current;
-      if (!currentWindow || viewportHeight <= 0) {
-        const nextWindow = resolveVirtualWindow(
-          renderedBlocks,
-          blockHeights,
-          scrollTop,
-          viewportHeight,
-          activeSearchBlockIndex,
-        );
-        stickyWindowRef.current = nextWindow;
-        return nextWindow;
-      }
-
-      const currentTop = blockHeights.slice(0, currentWindow.startIndex).reduce((sum, height) => sum + height, 0);
-      const currentRenderedHeight = blockHeights
-        .slice(currentWindow.startIndex, currentWindow.endIndex)
-        .reduce((sum, height) => sum + height, 0);
-      const currentBottom = currentTop + currentRenderedHeight;
-      const activeSearchOutsideWindow =
-        activeSearchBlockIndex >= 0
-        && (activeSearchBlockIndex < currentWindow.startIndex || activeSearchBlockIndex >= currentWindow.endIndex);
-      const nearWindowEdge =
-        scrollTop < currentTop + Math.floor(DEFAULT_BLOCK_OVERSCAN_PX * 0.35)
-        || scrollTop + viewportHeight > currentBottom - Math.floor(DEFAULT_BLOCK_OVERSCAN_PX * 0.35);
-
-      if (activeSearchOutsideWindow || nearWindowEdge) {
-        const nextWindow = resolveVirtualWindow(
-          renderedBlocks,
-          blockHeights,
-          scrollTop,
-          viewportHeight,
-          activeSearchBlockIndex,
-        );
-        stickyWindowRef.current = nextWindow;
-        return nextWindow;
-      }
-
-      const stableWindow = {
-        startIndex: currentWindow.startIndex,
-        endIndex: currentWindow.endIndex,
-        topSpacerHeight: currentTop,
-        bottomSpacerHeight: Math.max(0, totalHeight - currentTop - currentRenderedHeight),
-      } satisfies VirtualWindow;
-      stickyWindowRef.current = stableWindow;
-      return stableWindow;
-    },
-    [activeSearchBlockIndex, blockHeights, renderedBlocks, scrollTop, totalHeight, viewportHeight],
-  );
-
-  const visibleBlocks = useMemo(
-    () => renderedBlocks.slice(virtualWindow.startIndex, virtualWindow.endIndex),
-    [renderedBlocks, virtualWindow.endIndex, virtualWindow.startIndex],
-  );
-  const premeasureBlocks = useMemo(() => {
-    if (viewportHeight <= 0) {
+  const visibleVirtualRows = useMemo(() => {
+    if (!shouldVirtualize) {
       return [];
     }
-    const viewportTop = scrollTop;
-    const viewportBottom = scrollTop + viewportHeight;
-    const candidates: Array<{
-      readonly renderedBlock: RenderedTranscriptBlock;
-      readonly blockIndex: number;
-      readonly distanceFromViewport: number;
-    }> = [];
-    renderedBlocks.forEach((renderedBlock, blockIndex) => {
-      if (blockIndex >= virtualWindow.startIndex && blockIndex < virtualWindow.endIndex) {
-        return;
-      }
-      if (measuredHeights.has(renderedBlock.measurementKey)) {
-        return;
-      }
-      const blockTop = blockOffsets[blockIndex] ?? 0;
-      const blockBottom = blockTop + (blockHeights[blockIndex] ?? 0);
-      const distanceFromViewport =
-        blockBottom <= viewportTop
-          ? viewportTop - blockBottom
-          : blockTop >= viewportBottom
-            ? blockTop - viewportBottom
-            : 0;
-      candidates.push({ renderedBlock, blockIndex, distanceFromViewport });
+    return rowVirtualizer.getVirtualItems().flatMap((virtualItem) => {
+      const row = virtualizedRows[virtualItem.index];
+      return row
+        ? [{
+            row,
+            rowIndex: virtualItem.index,
+            start: virtualItem.start,
+          }]
+        : [];
     });
-    return candidates
-      .toSorted((left, right) =>
-        left.distanceFromViewport === right.distanceFromViewport
-          ? left.blockIndex - right.blockIndex
-          : left.distanceFromViewport - right.distanceFromViewport)
-      .slice(0, DEFAULT_PREMEASURE_BLOCK_LIMIT)
-      .map(({ renderedBlock, blockIndex }) => ({ renderedBlock, blockIndex }));
-  }, [
-    blockHeights,
-    blockOffsets,
-    measuredHeights,
-    renderedBlocks,
-    scrollTop,
-    viewportHeight,
-    virtualWindow.endIndex,
-    virtualWindow.startIndex,
-  ]);
+  }, [rowVirtualizer, shouldVirtualize, virtualizedRows]);
+  const visibleVirtualRowIndexSet = useMemo(
+    () => new Set(visibleVirtualRows.map(({ rowIndex }) => rowIndex)),
+    [visibleVirtualRows],
+  );
 
-  useLayoutEffect(() => {
-    if (viewportHeight <= 0) {
-      return undefined;
-    }
+  const activeSearchMatch = activeSearchMatchIndex >= 0 ? searchMatches[activeSearchMatchIndex] ?? null : null;
+  const activeSearchBlockIndex = activeSearchMatch?.blockIndex ?? -1;
+  const activeSearchVirtualRowIndex =
+    activeSearchMatch
+      ? (rowIndexByBlockLine.get(`${activeSearchMatch.blockIndex}:${activeSearchMatch.lineIndex}`) ?? -1)
+      : -1;
 
-    const applyMeasurements = () => {
-      const updates = new Map<string, number>();
-      for (const [visibleIndex, renderedBlock] of visibleBlocks.entries()) {
-        const element = blockRefs.current.get(renderedBlock.measurementKey);
-        if (!element) {
-          continue;
-        }
-        const globalIndex = virtualWindow.startIndex + visibleIndex;
-        const previousHeight = blockHeights[globalIndex] ?? 0;
-        const nextHeight = readRenderedVirtualBlockHeight(element, globalIndex);
-        if (nextHeight <= 0 || previousHeight === nextHeight) {
-          continue;
-        }
-        const blockTop = blockOffsets[globalIndex] ?? 0;
-        const blockBottom = blockTop + previousHeight;
-        if (blockBottom <= scrollTop + 0.5) {
-          continue;
-        }
-        updates.set(renderedBlock.measurementKey, nextHeight);
-      }
-      if (updates.size === 0) {
-        return;
-      }
-      applyMeasuredHeightUpdates(updates);
-    };
-
-    applyMeasurements();
-
-    if (typeof ResizeObserver === "undefined") {
-      return undefined;
-    }
-
-    const observer = new ResizeObserver(() => {
-      applyMeasurements();
-    });
-    for (const renderedBlock of visibleBlocks) {
-      const wrapperElement = blockRefs.current.get(renderedBlock.measurementKey);
-      const observedElement = wrapperElement?.firstElementChild;
-      if (observedElement instanceof HTMLElement) {
-        observer.observe(observedElement);
-        continue;
-      }
-      if (wrapperElement) {
-        observer.observe(wrapperElement);
-      }
-    }
-    return () => {
-      observer.disconnect();
-    };
-  }, [
-    applyMeasuredHeightUpdates,
-    blockHeights,
-    blockOffsets,
-    scrollTop,
-    viewportHeight,
-    virtualWindow.startIndex,
-    visibleBlocks,
-  ]);
-
-  useLayoutEffect(() => {
-    if (premeasureBlocks.length === 0) {
+  useEffect(() => {
+    if (!shouldVirtualize || activeSearchBlockIndex < 0) {
       return;
     }
-
-    const updates = new Map<string, number>();
-    for (const { renderedBlock, blockIndex } of premeasureBlocks) {
-      const element = premeasureRefs.current.get(renderedBlock.measurementKey);
-      if (!element) {
-        continue;
+    if (activeSearchBlockIndex >= firstUnvirtualizedBlockIndex) {
+      const activeTailBlock = baseRenderedBlocks[activeSearchBlockIndex];
+      if (!activeTailBlock) {
+        return;
       }
-      const previousHeight = blockHeights[blockIndex] ?? 0;
-      const nextHeight = readRenderedVirtualBlockHeight(element, blockIndex);
-      if (nextHeight <= 0 || previousHeight === nextHeight) {
-        continue;
-      }
-      updates.set(renderedBlock.measurementKey, nextHeight);
+      staticBlockRefs.current.get(activeTailBlock.key)?.scrollIntoView({ block: "center" });
+      return;
     }
-    if (updates.size > 0) {
-      applyMeasuredHeightUpdates(updates);
+    if (activeSearchVirtualRowIndex < 0 || visibleVirtualRowIndexSet.has(activeSearchVirtualRowIndex)) {
+      return;
     }
-  }, [applyMeasuredHeightUpdates, blockHeights, premeasureBlocks]);
+    rowVirtualizer.scrollToIndex(activeSearchVirtualRowIndex, { align: "center" });
+  }, [
+    activeSearchBlockIndex,
+    activeSearchVirtualRowIndex,
+    baseRenderedBlocks,
+    firstUnvirtualizedBlockIndex,
+    rowVirtualizer,
+    shouldVirtualize,
+    visibleVirtualRowIndexSet,
+  ]);
 
   return (
     <div className="transcript-blockHistory" ref={rootRef}>
-      <div
-        className="transcript-blockHistory__virtualCanvas"
-        style={{ height: `${totalHeight}px` }}
-      >
-        {visibleBlocks.map((renderedBlock, visibleIndex) => {
-          const blockIndex = virtualWindow.startIndex + visibleIndex;
-          const blockHeight = blockHeights[blockIndex] ?? 0;
-          return (
+      {shouldVirtualize ? (
+        <div
+          className="transcript-blockHistory__virtualCanvas"
+          style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+        >
+          {visibleVirtualRows.map(({ row, rowIndex, start }) => (
             <div
-              key={renderedBlock.key}
-              ref={(node) => setBlockRef(renderedBlock.measurementKey, node)}
+              key={row.key}
+              ref={rowVirtualizer.measureElement}
               className={classNames([
                 "transcript-blockHistory__virtualBlock",
-                renderedBlock.showMessageTurnSeparator ? "transcript-blockHistory__virtualBlock--messageTurnSeparator" : "",
+                row.showMessageTurnSeparator ? "transcript-blockHistory__virtualBlock--messageTurnSeparator" : "",
               ])}
-              data-has-leading-gap={blockIndex > 0 ? "true" : undefined}
+              data-index={rowIndex}
+              data-block-index={row.blockIndex}
+              data-block-type={row.blockType}
+              data-has-leading-gap={row.hasLeadingGap ? "true" : undefined}
               style={{
-                top: `${blockOffsets[blockIndex] ?? 0}px`,
-                height: `${blockHeight}px`,
-                overflow: "hidden",
+                transform: `translateY(${start}px)`,
               }}
             >
-              {renderBlock(
-                renderedBlock,
-                blockIndex,
-                searchMatchesByLine,
-                expandedCommandSignatures,
-                collapsedFileChangeSignatures,
-                resolvedInlineDiffBySignature,
-                onToggleCommandWidget,
-                availableWidthPx,
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {premeasureBlocks.length > 0 ? (
-        <div className="transcript-blockHistory__measurementLane" aria-hidden="true">
-          {premeasureBlocks.map(({ renderedBlock, blockIndex }) => (
-            <div
-              key={`measure:${renderedBlock.measurementKey}`}
-              ref={(node) => setPremeasureRef(renderedBlock.measurementKey, node)}
-              className={classNames([
-                "transcript-blockHistory__measurementProbe",
-                renderedBlock.showMessageTurnSeparator ? "transcript-blockHistory__measurementProbe--messageTurnSeparator" : "",
-              ])}
-              data-has-leading-gap={blockIndex > 0 ? "true" : undefined}
-            >
-              {renderBlock(
-                renderedBlock,
-                blockIndex,
-                searchMatchesByLine,
+              {renderVirtualizedTranscriptRow(
+                row,
                 expandedCommandSignatures,
                 collapsedFileChangeSignatures,
                 resolvedInlineDiffBySignature,
@@ -1616,6 +1585,32 @@ export function TranscriptHistoryBlocks({
           ))}
         </div>
       ) : null}
+      {nonVirtualizedBlocks.map((renderedBlock, index) => {
+        const blockIndex = shouldVirtualize ? firstUnvirtualizedBlockIndex + index : index;
+        return (
+          <div
+            key={shouldVirtualize ? `tail:${renderedBlock.key}` : renderedBlock.key}
+            ref={shouldVirtualize ? (node) => setStaticBlockRef(renderedBlock.key, node) : undefined}
+            className={classNames([
+              "transcript-blockHistory__staticBlock",
+              renderedBlock.showMessageTurnSeparator ? "transcript-blockHistory__staticBlock--messageTurnSeparator" : "",
+            ])}
+            data-block-index={blockIndex}
+            data-has-leading-gap={blockIndex > 0 ? "true" : undefined}
+          >
+            {renderBlock(
+              renderedBlock,
+              blockIndex,
+              searchMatchesByLine,
+              expandedCommandSignatures,
+              collapsedFileChangeSignatures,
+              resolvedInlineDiffBySignature,
+              onToggleCommandWidget,
+              availableWidthPx,
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
