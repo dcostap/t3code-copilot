@@ -441,6 +441,325 @@ body {
   min-height: 100%;
 }
 
+.transcript-history__blockRoot {
+  flex: 1 1 auto;
+  min-width: 0;
+  outline: none;
+}
+
+.transcript-history__blockRoot:focus-visible,
+.transcript-history__blockRoot--active {
+  box-shadow: inset 0 0 0 1px rgba(122, 182, 235, 0.18);
+}
+
+.transcript-blockHistory {
+  position: relative;
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  padding: 18px 22px 24px;
+  color: #c5ccd3;
+  font-family: "Cascadia Code", "Cascadia Mono", "Iosevka Term", "JetBrains Mono", Consolas, monospace;
+  font-size: 15px;
+  line-height: 1.3;
+  cursor: text;
+}
+
+.transcript-blockHistory__virtualCanvas {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.transcript-blockHistory__virtualBlock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  width: 100%;
+  min-width: 0;
+}
+
+.transcript-blockHistory__virtualBlock[data-has-leading-gap="true"] {
+  padding-top: 4px;
+  box-sizing: border-box;
+}
+
+.transcript-blockHistory__measurementLane {
+  position: absolute;
+  inset: 0;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.transcript-blockHistory__measurementProbe {
+  width: 100%;
+  min-width: 0;
+}
+
+.transcript-blockHistory__measurementProbe[data-has-leading-gap="true"] {
+  padding-top: 4px;
+  box-sizing: border-box;
+}
+
+.transcript-blockHistory__block {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  contain: layout paint style;
+}
+
+.transcript-blockHistory__lineFrame {
+  min-width: 0;
+  contain: paint;
+}
+
+.transcript-blockHistory__line {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transcript-blockHistory__line--body,
+.transcript-blockHistory__line--reasoning,
+.transcript-blockHistory__line--proposedPlanBody {
+  color: #c5ccd3;
+}
+
+.transcript-blockHistory__line--reasoningSummary {
+  color: #dbc394;
+}
+
+.transcript-blockHistory__line--status,
+.transcript-blockHistory__line--checkpointSummary,
+.transcript-blockHistory__line--planExplanation,
+.transcript-blockHistory__line--commandOutput {
+  color: #9aa4ad;
+}
+
+.transcript-blockHistory__line--workingLine,
+.transcript-blockHistory__line--checkpointHeader,
+.transcript-blockHistory__line--planHeader {
+  color: #d6dde5;
+}
+
+.transcript-blockHistory__line--approvalPrompt {
+  color: #cfd6dd;
+}
+
+.transcript-blockHistory__line--planStepCompleted {
+  color: #84e8a2;
+}
+
+.transcript-blockHistory__line--planStepInProgress {
+  color: #8cc5f0;
+}
+
+.transcript-blockHistory__line--planStepPending {
+  color: #9aa4ad;
+}
+
+.transcript-blockHistory__line--diffHeader,
+.transcript-blockHistory__line--checkpointFile {
+  color: #b7c0c9;
+}
+
+.transcript-blockHistory__line--diffAdded {
+  color: #9cf0b4;
+  background: rgba(20, 60, 38, 0.35);
+}
+
+.transcript-blockHistory__line--diffRemoved {
+  color: rgba(255, 177, 177, 0.75);
+  background: rgba(66, 26, 29, 0.35);
+}
+
+.transcript-blockHistory__line--diffContext {
+  color: #8d98a3;
+}
+
+.transcript-blockHistory__line.cm-line-userInputResolved {
+  color: #9aa4ad;
+}
+
+.transcript-blockHistory__line.cm-line-userInputAnsweredOption {
+  color: #dce9f6;
+}
+
+.transcript-blockHistory__spacer {
+  min-height: 10px;
+}
+
+.transcript-blockHistory__spacer--workGroupSeparator,
+.transcript-blockHistory__spacer--planSeparator,
+.transcript-blockHistory__spacer--checkpointSeparator,
+.transcript-blockHistory__spacer--userPromptSeparator {
+  min-height: 14px;
+}
+
+.transcript-blockHistory__divider {
+  color: #4e5964;
+  overflow: hidden;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.transcript-blockHistory__commandWidgetSurface {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin: 2px 0;
+  padding: 8px 12px;
+  border-left: 2px solid rgba(244, 247, 250, 0.24);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.transcript-blockHistory__commandWidgetSummary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  color: #8a939d;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transcript-blockHistory__commandWidgetButton {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.transcript-blockHistory__commandWidgetButton:focus-visible {
+  outline: 1px solid rgba(122, 182, 235, 0.4);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.transcript-blockHistory__commandWidgetToggleGlyph {
+  flex: 0 0 auto;
+  color: #8ea7bc;
+  line-height: 1.2;
+}
+
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemRunning {
+  border-left-color: rgba(130, 191, 242, 0.8);
+}
+
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemDone {
+  border-left-color: rgba(99, 242, 138, 0.75);
+}
+
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemError {
+  color: #f0cbcb;
+  border-left-color: rgba(255, 157, 157, 0.85);
+}
+
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemDeclined {
+  color: #e0d1ae;
+  border-left-color: rgba(240, 195, 106, 0.85);
+}
+
+.transcript-blockHistory__commandWidgetBody,
+.transcript-blockHistory__inlineDiffBody {
+  margin: 0;
+  padding: 0;
+  color: #7a828b;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+
+.transcript-blockHistory__inlineDiff {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.transcript-blockHistory__inlineDiffFiles {
+  color: #a3adb7;
+  font-size: 12px;
+}
+
+.transcript-blockHistory__animatedText {
+  color: #82bff2;
+}
+
+.transcript-blockHistory__token--link {
+  text-decoration: underline;
+}
+
+.transcript-blockHistory__searchMatch {
+  background: rgba(220, 189, 92, 0.22);
+  border-radius: 3px;
+}
+
+.transcript-blockHistory__searchMatch--active {
+  background: rgba(240, 195, 106, 0.38);
+  box-shadow: 0 0 0 1px rgba(240, 195, 106, 0.4);
+}
+
+.transcript-blockHistory__token.tok-commandWidgetGlyph {
+  font-weight: 700;
+}
+
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemRunning .transcript-blockHistory__token.tok-commandWidgetGlyph,
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemRunning .transcript-blockHistory__token.tok-commandWidgetPrefix,
+.transcript-blockHistory__animatedText {
+  color: #82bff2;
+}
+
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemDone .transcript-blockHistory__token.tok-commandWidgetGlyph {
+  color: #63f28a;
+}
+
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemDone .transcript-blockHistory__token.tok-commandWidgetPrefix {
+  color: #c8d0d8;
+}
+
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemError .transcript-blockHistory__token.tok-commandWidgetGlyph,
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemError .transcript-blockHistory__token.tok-commandWidgetPrefix {
+  color: #ff9d9d;
+}
+
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemDeclined .transcript-blockHistory__token.tok-commandWidgetGlyph,
+.transcript-blockHistory__commandWidgetSurface.cm-line-workItemDeclined .transcript-blockHistory__token.tok-commandWidgetPrefix {
+  color: #f0c36a;
+}
+
+.transcript-blockHistory__token.tok-commandWidgetMeta {
+  color: #7f8891;
+}
+
+.transcript-blockHistory__token.tok-commandWidgetExit {
+  color: #a3adb7;
+}
+
+.transcript-blockHistory__token.tok-added {
+  color: #63f28a;
+}
+
+.transcript-blockHistory__token.tok-removed {
+  color: #ff7575;
+}
+
+.transcript-blockHistory__attachmentSummary {
+  color: #90a0af;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .transcript-surface--drag-over::after {
   content: "Drop images to attach";
   position: absolute;

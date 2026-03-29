@@ -42,6 +42,11 @@ import {
   type TranscriptBlock,
   type TranscriptImageAttachment,
 } from "./TranscriptBlock";
+import {
+  findTranscriptHistoryBlockSearchMatches,
+  TranscriptHistoryBlocks,
+  type TranscriptHistoryMeasurementUpdate,
+} from "./TranscriptHistoryBlocks";
 
 interface PositionedLine {
   readonly from: number;
@@ -393,9 +398,131 @@ const DEBUG_ENABLE_CODE_BLOCK_WIDGETS = true;
 const DEBUG_ENABLE_MARKDOWN_TABLE_WIDGETS = true;
 const DEBUG_ENABLE_LINE_WIDGETS = true;
 const DEBUG_ENABLE_LOADING_REPLACEMENTS = true;
+const DEBUG_USE_BLOCK_HISTORY = true;
 const DEBUG_DISABLE_TRANSCRIPT_LINE_WRAPPING = false;
 const DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER = false;
 const DEBUG_FLATTEN_TRANSCRIPT_LINE_GEOMETRY = true;
+const DEBUG_BLOCK_HISTORY_SCROLL_DIAGNOSTICS = false;
+const BLOCK_HISTORY_SCROLL_WINDOW_STEP_PX = 480;
+const BLOCK_HISTORY_SCROLL_DIAGNOSTIC_LIMIT = 400;
+
+type BlockHistoryScrollDiagnosticKind = "scroll" | "write" | "geometry";
+
+interface BlockHistoryScrollDiagnosticEntry {
+  readonly index: number;
+  readonly timeMs: number;
+  readonly kind: BlockHistoryScrollDiagnosticKind;
+  readonly source: string;
+  readonly scrollTop: number;
+  readonly scrollHeight: number;
+  readonly clientHeight: number;
+  readonly offsetFromBottom: number;
+  readonly scrolling: boolean;
+  readonly deltaTop?: number;
+  readonly deltaHeight?: number;
+  readonly blockIndex?: number;
+  readonly blockType?: string;
+  readonly blockKey?: string;
+  readonly measurementKey?: string;
+  readonly commandWidgetSignatures?: string;
+  readonly previousHeight?: number;
+  readonly nextHeight?: number;
+}
+
+interface BlockHistoryScrollDiagnosticStore {
+  entries: BlockHistoryScrollDiagnosticEntry[];
+  clear(): void;
+  print(limit?: number): void;
+}
+
+interface BlockHistoryScrollMetrics {
+  readonly scrollTop: number;
+  readonly scrollHeight: number;
+  readonly clientHeight: number;
+  readonly offsetFromBottom: number;
+}
+
+function readBlockHistoryScrollMetrics(scrollContainer: HTMLElement): BlockHistoryScrollMetrics {
+  return {
+    scrollTop: scrollContainer.scrollTop,
+    scrollHeight: scrollContainer.scrollHeight,
+    clientHeight: scrollContainer.clientHeight,
+    offsetFromBottom: Math.max(0, scrollContainer.scrollHeight - (scrollContainer.scrollTop + scrollContainer.clientHeight)),
+  };
+}
+
+function getBlockHistoryScrollDiagnosticStore() {
+  if (!DEBUG_BLOCK_HISTORY_SCROLL_DIAGNOSTICS || typeof window === "undefined") {
+    return null;
+  }
+
+  const diagnosticsWindow = window as Window & {
+    __blockHistoryScrollDiagnostics?: BlockHistoryScrollDiagnosticStore;
+  };
+  if (!diagnosticsWindow.__blockHistoryScrollDiagnostics) {
+    diagnosticsWindow.__blockHistoryScrollDiagnostics = {
+      entries: [],
+      clear() {
+        this.entries = [];
+      },
+      print(limit = 80) {
+        console.table(this.entries.slice(-Math.max(1, limit)));
+      },
+    };
+  }
+  return diagnosticsWindow.__blockHistoryScrollDiagnostics;
+}
+
+function recordBlockHistoryScrollDiagnostic(
+  kind: BlockHistoryScrollDiagnosticKind,
+  source: string,
+  metrics: BlockHistoryScrollMetrics,
+  scrolling: boolean,
+  extras: {
+    readonly deltaTop?: number;
+    readonly deltaHeight?: number;
+    readonly blockIndex?: number;
+    readonly blockType?: string;
+    readonly blockKey?: string;
+    readonly measurementKey?: string;
+    readonly commandWidgetSignatures?: string;
+    readonly previousHeight?: number;
+    readonly nextHeight?: number;
+  } = {},
+) {
+  const store = getBlockHistoryScrollDiagnosticStore();
+  if (!store) {
+    return;
+  }
+
+  const entry: BlockHistoryScrollDiagnosticEntry = {
+    index: store.entries.length,
+    timeMs: Math.round(performance.now()),
+    kind,
+    source,
+    scrollTop: metrics.scrollTop,
+    scrollHeight: metrics.scrollHeight,
+    clientHeight: metrics.clientHeight,
+    offsetFromBottom: metrics.offsetFromBottom,
+    scrolling,
+    ...(extras.deltaTop !== undefined ? { deltaTop: extras.deltaTop } : {}),
+    ...(extras.deltaHeight !== undefined ? { deltaHeight: extras.deltaHeight } : {}),
+    ...(extras.blockIndex !== undefined ? { blockIndex: extras.blockIndex } : {}),
+    ...(extras.blockType !== undefined ? { blockType: extras.blockType } : {}),
+    ...(extras.blockKey !== undefined ? { blockKey: extras.blockKey } : {}),
+    ...(extras.measurementKey !== undefined ? { measurementKey: extras.measurementKey } : {}),
+    ...(extras.commandWidgetSignatures !== undefined ? { commandWidgetSignatures: extras.commandWidgetSignatures } : {}),
+    ...(extras.previousHeight !== undefined ? { previousHeight: extras.previousHeight } : {}),
+    ...(extras.nextHeight !== undefined ? { nextHeight: extras.nextHeight } : {}),
+  };
+  store.entries.push(entry);
+  if (store.entries.length > BLOCK_HISTORY_SCROLL_DIAGNOSTIC_LIMIT) {
+    store.entries.splice(0, store.entries.length - BLOCK_HISTORY_SCROLL_DIAGNOSTIC_LIMIT);
+  }
+  if (kind !== "scroll") {
+    console.debug("[block-history-scroll]", entry);
+  }
+}
 
 const syncAnnotation = Annotation.define<boolean>();
 const setPromptStartEffect = StateEffect.define<number>();
@@ -4891,6 +5018,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const [searchVisible, setSearchVisible] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(-1);
+    const [blockHistoryScrollTop, setBlockHistoryScrollTop] = useState(0);
+    const [blockHistoryViewportHeight, setBlockHistoryViewportHeight] = useState(0);
     const [attachmentViewerImage, setAttachmentViewerImage] = useState<AttachmentViewerImage | null>(null);
     const [attachmentViewerNaturalSize, setAttachmentViewerNaturalSize] = useState<AttachmentViewerNaturalSize>({
       width: 0,
@@ -4922,8 +5051,40 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const searchOverlayRef = useRef<HTMLDivElement | null>(null);
     const searchInputRef = useRef<HTMLInputElement | null>(null);
     const searchReturnRegionRef = useRef<TranscriptRegion>("prompt");
+    const blockHistoryRef = useRef<HTMLDivElement | null>(null);
+    const historyScrollContainerRef = useRef<HTMLDivElement | null>(null);
+    const blockHistoryLastMetricsRef = useRef<BlockHistoryScrollMetrics | null>(null);
+    const handleBlockHistoryMeasuredHeightApplied = useCallback((
+      updates: ReadonlyArray<TranscriptHistoryMeasurementUpdate>,
+    ) => {
+      const scrollContainer = historyScrollContainerRef.current;
+      if (!scrollContainer || !DEBUG_BLOCK_HISTORY_SCROLL_DIAGNOSTICS) {
+        return;
+      }
+      const metrics = readBlockHistoryScrollMetrics(scrollContainer);
+      for (const update of updates) {
+        recordBlockHistoryScrollDiagnostic(
+          "geometry",
+          "measurement-applied",
+          metrics,
+          false,
+          {
+            blockIndex: update.blockIndex,
+            blockType: update.blockType,
+            blockKey: update.blockKey,
+            measurementKey: update.measurementKey,
+            previousHeight: update.previousHeight,
+            nextHeight: update.nextHeight,
+            deltaHeight: update.deltaHeight,
+            ...(update.commandWidgetSignatures.length > 0
+              ? { commandWidgetSignatures: update.commandWidgetSignatures.join(", ") }
+              : {}),
+          },
+        );
+      }
+    }, []);
 
-    useEffect(() => {
+    useLayoutEffect(() => {
       onSubmitRef.current = onSubmit;
       onDraftChangeRef.current = onDraftChange;
       onScrollOffsetFromBottomChangeRef.current = onScrollOffsetFromBottomChange;
@@ -4954,6 +5115,90 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       attachmentViewerPanRef.current = attachmentViewerPan;
       attachmentViewerNaturalSizeRef.current = attachmentViewerNaturalSize;
     }, [attachmentViewerNaturalSize, attachmentViewerPan, attachmentViewerScale]);
+
+    useEffect(() => {
+      if (!DEBUG_USE_BLOCK_HISTORY) {
+        return undefined;
+      }
+
+      const scrollContainer = historyScrollContainerRef.current;
+      if (!scrollContainer) {
+        return undefined;
+      }
+
+      let frameId: number | null = null;
+      let pendingSyncSource: "scroll" | "geometry" = "geometry";
+      blockHistoryLastMetricsRef.current = readBlockHistoryScrollMetrics(scrollContainer);
+      recordBlockHistoryScrollDiagnostic(
+        "geometry",
+        "effect-start",
+        blockHistoryLastMetricsRef.current,
+        false,
+      );
+      const syncFromContainer = () => {
+        frameId = null;
+        const source = pendingSyncSource;
+        pendingSyncSource = "geometry";
+        setBlockHistoryScrollTop((current) =>
+          (() => {
+            const nextWindowTop =
+              Math.max(0, Math.floor(scrollContainer.scrollTop / BLOCK_HISTORY_SCROLL_WINDOW_STEP_PX))
+              * BLOCK_HISTORY_SCROLL_WINDOW_STEP_PX;
+            return current === nextWindowTop ? current : nextWindowTop;
+          })());
+        setBlockHistoryViewportHeight((current) =>
+          current === scrollContainer.clientHeight ? current : scrollContainer.clientHeight);
+        onScrollOffsetFromBottomChangeRef.current?.(
+          scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight,
+        );
+        const nextMetrics = readBlockHistoryScrollMetrics(scrollContainer);
+        const previousMetrics = blockHistoryLastMetricsRef.current;
+        blockHistoryLastMetricsRef.current = nextMetrics;
+        recordBlockHistoryScrollDiagnostic(
+          source,
+          source === "scroll" ? "container-scroll" : "geometry-sync",
+          nextMetrics,
+          false,
+          {
+            ...(previousMetrics ? { deltaTop: nextMetrics.scrollTop - previousMetrics.scrollTop } : {}),
+            ...(previousMetrics ? { deltaHeight: nextMetrics.scrollHeight - previousMetrics.scrollHeight } : {}),
+          },
+        );
+      };
+      const scheduleSync = () => {
+        if (frameId !== null) {
+          return;
+        }
+        frameId = requestAnimationFrame(syncFromContainer);
+      };
+      const handleScroll = () => {
+        pendingSyncSource = "scroll";
+        scheduleSync();
+      };
+
+      syncFromContainer();
+      scrollContainer.addEventListener("scroll", handleScroll, { passive: true });
+
+      let resizeObserver: ResizeObserver | null = null;
+      if (typeof ResizeObserver !== "undefined") {
+        resizeObserver = new ResizeObserver(() => {
+          pendingSyncSource = "geometry";
+          scheduleSync();
+        });
+        resizeObserver.observe(scrollContainer);
+        if (blockHistoryRef.current) {
+          resizeObserver.observe(blockHistoryRef.current);
+        }
+      }
+
+      return () => {
+        scrollContainer.removeEventListener("scroll", handleScroll);
+        resizeObserver?.disconnect();
+        if (frameId !== null) {
+          cancelAnimationFrame(frameId);
+        }
+      };
+    }, [blocks, collapsedFileChangeSignatures, expandedCommandSignatures, resolvedInlineDiffBySignature]);
 
     const closeAttachmentViewer = useCallback(() => {
       attachmentViewerDragStateRef.current = null;
@@ -5140,15 +5385,27 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           : [],
       [searchHaystack, searchQuery, searchVisible],
     );
+    const blockSearchMatches = useMemo(
+      () =>
+        searchVisible
+          ? findTranscriptHistoryBlockSearchMatches(blocks, searchQuery)
+          : [],
+      [blocks, searchQuery, searchVisible],
+    );
+    const searchMatchCount = DEBUG_USE_BLOCK_HISTORY ? blockSearchMatches.length : searchMatches.length;
     const resolvedActiveSearchMatchIndex =
-      searchMatches.length === 0
+      searchMatchCount === 0
         ? -1
-        : activeSearchMatchIndex >= 0 && activeSearchMatchIndex < searchMatches.length
+        : activeSearchMatchIndex >= 0 && activeSearchMatchIndex < searchMatchCount
           ? activeSearchMatchIndex
           : 0;
     const activeSearchMatch =
-      resolvedActiveSearchMatchIndex >= 0
+      !DEBUG_USE_BLOCK_HISTORY && resolvedActiveSearchMatchIndex >= 0
         ? searchMatches[resolvedActiveSearchMatchIndex] ?? null
+        : null;
+    const activeBlockSearchMatch =
+      DEBUG_USE_BLOCK_HISTORY && resolvedActiveSearchMatchIndex >= 0
+        ? blockSearchMatches[resolvedActiveSearchMatchIndex] ?? null
         : null;
     const initialDocModelRef = useRef(docModel);
     const initialDecorationStateRef = useRef(
@@ -5267,15 +5524,26 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       syncPromptCaretBox(textarea);
     }, [paneActive, setPromptSelectionValue, syncPromptCaretBox]);
 
+    const getHistoryContainer = useCallback(() => {
+      return DEBUG_USE_BLOCK_HISTORY ? blockHistoryRef.current : editorRef.current;
+    }, []);
+
     const clearHistorySelection = useCallback(() => {
       if (typeof window === "undefined") {
         return;
       }
       const selection = window.getSelection();
-      if (!hasNonCollapsedSelectionInsideElement(selection, editorRef.current)) {
+      if (!hasNonCollapsedSelectionInsideElement(selection, getHistoryContainer())) {
         return;
       }
       selection?.removeAllRanges();
+    }, [getHistoryContainer]);
+
+    const syncBlockHistoryActiveState = useCallback(() => {
+      blockHistoryRef.current?.classList.toggle(
+        "transcript-history__blockRoot--active",
+        activeRegionRef.current === "history",
+      );
     }, []);
 
     const focusPromptInput = useCallback((_options?: FocusPromptOptions) => {
@@ -5283,6 +5551,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         return;
       }
       activeRegionRef.current = "prompt";
+      syncBlockHistoryActiveState();
       const textarea = promptTextareaRef.current;
       if (!textarea) {
         return;
@@ -5295,7 +5564,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       textarea.setSelectionRange(anchorOffset, headOffset);
       setPromptSelectionValue(anchorOffset, headOffset);
       syncPromptCaretBox(textarea);
-    }, [setPromptSelectionValue, syncPromptCaretBox]);
+    }, [setPromptSelectionValue, syncBlockHistoryActiveState, syncPromptCaretBox]);
 
     const preparePromptInteraction = useCallback(() => {
       clearHistorySelection();
@@ -5490,7 +5759,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       if (typeof window === "undefined" || typeof document === "undefined") {
         return false;
       }
-      const container = editorRef.current;
+      const container = getHistoryContainer();
       const selection = window.getSelection();
       if (!container || !selection) {
         return false;
@@ -5501,7 +5770,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       selection.addRange(range);
       prepareHistoryInteraction();
       return true;
-    }, [prepareHistoryInteraction]);
+    }, [getHistoryContainer, prepareHistoryInteraction]);
 
     const handlePromptInputKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
       if (shouldSelectAllPromptFromPromptKeydown(event)) {
@@ -5610,23 +5879,71 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
     }, [docModel.defaultExpandedInlineDiffSignatures, requestInlineDiff]);
 
+    const handleBlockHistoryCommandWidgetToggle = useCallback((
+      input: {
+        readonly signature: string;
+        readonly isFileChange: boolean;
+        readonly inlineDiffLookup?: InlineDiffLookup;
+      },
+    ) => {
+      if (input.isFileChange) {
+        const shouldExpand = collapsedFileChangeSignaturesRef.current.has(input.signature);
+        if (shouldExpand && input.inlineDiffLookup) {
+          requestInlineDiff(input.signature, input.inlineDiffLookup);
+        }
+        setCollapsedFileChangeSignatures((current) => {
+          const next = new Set(current);
+          if (next.has(input.signature)) {
+            next.delete(input.signature);
+          } else {
+            next.add(input.signature);
+          }
+          return next;
+        });
+        return;
+      }
+
+      const shouldExpand = !expandedCommandSignaturesRef.current.has(input.signature);
+      if (shouldExpand && input.inlineDiffLookup) {
+        requestInlineDiff(input.signature, input.inlineDiffLookup);
+      }
+      setExpandedCommandSignatures((current) => {
+        const next = new Set(current);
+        if (next.has(input.signature)) {
+          next.delete(input.signature);
+        } else {
+          next.add(input.signature);
+        }
+        return next;
+      });
+    }, [requestInlineDiff]);
+
     const syncActiveRegionClass = useCallback((view: EditorView) => {
       view.dom.classList.toggle("cm-editor-historyActive", activeRegionRef.current === "history");
     }, []);
 
     const focusPromptRegion = useCallback((options?: FocusPromptOptions) => {
       activeRegionRef.current = "prompt";
+      syncBlockHistoryActiveState();
       preparePromptInteraction();
       requestAnimationFrame(() => {
         focusPromptInput(options);
       });
-    }, [focusPromptInput, preparePromptInteraction]);
+    }, [focusPromptInput, preparePromptInteraction, syncBlockHistoryActiveState]);
 
-    const focusHistoryRegion = useCallback((view: EditorView) => {
+    const focusHistoryRegion = useCallback((view?: EditorView | null) => {
       prepareHistoryInteraction();
       activeRegionRef.current = "history";
-      syncActiveRegionClass(view);
       syncPromptCaretBox();
+      syncBlockHistoryActiveState();
+      if (DEBUG_USE_BLOCK_HISTORY) {
+        blockHistoryRef.current?.focus({ preventScroll: true });
+        return;
+      }
+      if (!view) {
+        return;
+      }
+      syncActiveRegionClass(view);
       const historySelection = resolveHistorySelection(view.state, historySelectionRef.current);
       historySelectionRef.current = historySelection;
       view.dispatch({
@@ -5638,7 +5955,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       requestAnimationFrame(() => {
         keepCursorWithinViewportPadding(view);
       });
-    }, [prepareHistoryInteraction, syncActiveRegionClass, syncPromptCaretBox]);
+    }, [prepareHistoryInteraction, syncActiveRegionClass, syncBlockHistoryActiveState, syncPromptCaretBox]);
 
     const focusSearchInput = useCallback(() => {
       requestAnimationFrame(() => {
@@ -5659,7 +5976,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       requestAnimationFrame(() => {
         if (searchReturnRegionRef.current === "history") {
           const view = viewRef.current;
-          if (view) {
+          if (DEBUG_USE_BLOCK_HISTORY || view) {
             focusHistoryRegion(view);
             return;
           }
@@ -5680,11 +5997,11 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       setActiveSearchMatchIndex((currentIndex) =>
         getNextTranscriptSearchMatchIndex({
           currentIndex,
-          matchCount: searchMatches.length,
+          matchCount: searchMatchCount,
           direction,
         }),
       );
-    }, [searchMatches.length]);
+    }, [searchMatchCount]);
 
     useEffect(() => {
       if (!searchVisible) {
@@ -5697,19 +6014,36 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       if (!searchVisible) {
         return;
       }
-      if (searchMatches.length === 0) {
+      if (searchMatchCount === 0) {
         if (activeSearchMatchIndex !== -1) {
           setActiveSearchMatchIndex(-1);
         }
         return;
       }
-      if (activeSearchMatchIndex < 0 || activeSearchMatchIndex >= searchMatches.length) {
+      if (activeSearchMatchIndex < 0 || activeSearchMatchIndex >= searchMatchCount) {
         setActiveSearchMatchIndex(0);
       }
-    }, [activeSearchMatchIndex, searchMatches.length, searchVisible]);
+    }, [activeSearchMatchIndex, searchMatchCount, searchVisible]);
 
     useEffect(() => {
-      if (!searchVisible || !activeSearchMatch) {
+      if (!searchVisible) {
+        return;
+      }
+      if (DEBUG_USE_BLOCK_HISTORY) {
+        if (!activeBlockSearchMatch) {
+          return;
+        }
+        requestAnimationFrame(() => {
+          const activeMatchElement = blockHistoryRef.current?.querySelector<HTMLElement>(
+            ".transcript-blockHistory__searchMatch--active",
+          );
+          activeMatchElement?.scrollIntoView({
+            block: "center",
+          });
+        });
+        return;
+      }
+      if (!activeSearchMatch) {
         return;
       }
       const view = viewRef.current;
@@ -5731,7 +6065,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           searchOverlayRef.current?.offsetHeight ?? 0,
         );
       });
-    }, [activeSearchMatch, searchVisible]);
+    }, [activeBlockSearchMatch, activeSearchMatch, searchVisible]);
 
     const handleSearchInputChange = useCallback((event: ReactChangeEvent<HTMLInputElement>) => {
       setSearchQuery(event.target.value);
@@ -5753,6 +6087,40 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const handleSearchControlMouseDown = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
     }, []);
+
+    const handleBlockHistoryFocus = useCallback(() => {
+      prepareHistoryInteraction();
+      activeRegionRef.current = "history";
+      syncBlockHistoryActiveState();
+      syncPromptCaretBox();
+    }, [prepareHistoryInteraction, syncBlockHistoryActiveState, syncPromptCaretBox]);
+
+    const handleBlockHistoryMouseDown = useCallback(() => {
+      prepareHistoryInteraction();
+      activeRegionRef.current = "history";
+      syncBlockHistoryActiveState();
+      syncPromptCaretBox();
+    }, [prepareHistoryInteraction, syncBlockHistoryActiveState, syncPromptCaretBox]);
+
+    const handleBlockHistoryKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (shouldSelectAllHistoryFromHistoryKeydown(event, activeRegionRef.current)) {
+        event.preventDefault();
+        selectAllHistoryText();
+        return;
+      }
+      if (!shouldRedirectHistoryTypingToPrompt(event, {
+        promptFocusDisabled: promptFocusDisabledRef.current,
+        promptInputDisabled: promptInputDisabledRef.current,
+      })) {
+        return;
+      }
+
+      event.preventDefault();
+      activeRegionRef.current = "prompt";
+      syncBlockHistoryActiveState();
+      focusPromptInput();
+      insertTextIntoDraft(event.key);
+    }, [focusPromptInput, insertTextIntoDraft, selectAllHistoryText, syncBlockHistoryActiveState]);
 
     const redirectHistoryTypingToPrompt = useCallback(
       (view: EditorView, text: string) => {
@@ -5824,9 +6192,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       },
       focusHistory() {
         const view = viewRef.current;
-        if (!view) {
-          return;
-        }
         focusHistoryRegion(view);
       },
       hasFocusWithinPane() {
@@ -5846,7 +6211,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         if (typeof window === "undefined") {
           return false;
         }
-        return hasNonCollapsedSelectionInsideElement(window.getSelection(), editorRef.current);
+        return hasNonCollapsedSelectionInsideElement(window.getSelection(), getHistoryContainer());
       },
       selectAllHistory() {
         return selectAllHistoryText();
@@ -5870,7 +6235,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         scrollConversationToBottom(view);
       },
-    }), [deletePromptText, focusHistoryRegion, focusPromptRegion, insertTextIntoDraft, openSearch, selectAllHistoryText, submitDraft]);
+    }), [deletePromptText, focusHistoryRegion, focusPromptRegion, getHistoryContainer, insertTextIntoDraft, openSearch, selectAllHistoryText, submitDraft]);
 
     useLayoutEffect(() => {
       if (!editorRef.current) {
@@ -6488,9 +6853,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             <span className="transcript-search__status" aria-live="polite">
               {searchQuery.length === 0
                 ? "Find"
-                : searchMatches.length === 0
+                : searchMatchCount === 0
                   ? "0 results"
-                  : `${resolvedActiveSearchMatchIndex + 1}/${searchMatches.length}`}
+                  : `${resolvedActiveSearchMatchIndex + 1}/${searchMatchCount}`}
             </span>
             <div className="transcript-search__actions">
               <button
@@ -6499,7 +6864,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                 onMouseDown={handleSearchControlMouseDown}
                 onClick={() => moveSearchMatch(-1)}
                 aria-label="Previous match"
-                disabled={searchMatches.length === 0}
+                disabled={searchMatchCount === 0}
               >
                 ↑
               </button>
@@ -6509,7 +6874,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                 onMouseDown={handleSearchControlMouseDown}
                 onClick={() => moveSearchMatch(1)}
                 aria-label="Next match"
-                disabled={searchMatches.length === 0}
+                disabled={searchMatchCount === 0}
               >
                 ↓
               </button>
@@ -6525,8 +6890,33 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             </div>
           </div>
         ) : null}
-        <div className={`transcript-history${DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER ? " transcript-history--cmScroller" : ""}`}>
-          <div className="transcript-history__editor" ref={editorRef} />
+        <div
+          className={`transcript-history${DEBUG_USE_CODEMIRROR_SCROLL_CONTAINER ? " transcript-history--cmScroller" : ""}`}
+          ref={historyScrollContainerRef}
+        >
+          {DEBUG_USE_BLOCK_HISTORY ? (
+            <div
+              className="transcript-history__blockRoot"
+              ref={blockHistoryRef}
+              tabIndex={0}
+              onFocus={handleBlockHistoryFocus}
+              onMouseDown={handleBlockHistoryMouseDown}
+              onKeyDown={handleBlockHistoryKeyDown}
+            >
+              <TranscriptHistoryBlocks
+                blocks={blocks}
+                searchMatches={blockSearchMatches}
+                activeSearchMatchIndex={resolvedActiveSearchMatchIndex}
+                expandedCommandSignatures={expandedCommandSignatures}
+                collapsedFileChangeSignatures={collapsedFileChangeSignatures}
+                resolvedInlineDiffBySignature={resolvedInlineDiffBySignature}
+                onToggleCommandWidget={handleBlockHistoryCommandWidgetToggle}
+                onMeasuredHeightApplied={handleBlockHistoryMeasuredHeightApplied}
+                scrollTop={blockHistoryScrollTop}
+                viewportHeight={blockHistoryViewportHeight}
+              />
+            </div>
+          ) : <div className="transcript-history__editor" ref={editorRef} />}
         </div>
         <div
           className={compactPendingUserInputPrompt ? "transcript-prompt transcript-prompt--compact" : "transcript-prompt"}
