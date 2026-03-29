@@ -42,6 +42,7 @@ describe("TranscriptHistoryBlocks", () => {
     expect(html).toContain("Checking prior work");
     expect(html).toContain("1 attachment");
     expect(html).toContain("screenshot.png");
+    expect(html).toContain("transcript-blockHistory__virtualBlock--messageTurnSeparator");
   });
 
   it("renders work-group items with collapsed commands and expandable file diffs", () => {
@@ -96,8 +97,11 @@ describe("TranscriptHistoryBlocks", () => {
     expect(collapsedHtml).toContain("git status --short");
     expect(collapsedHtml).not.toContain("M src/App.tsx");
     expect(collapsedHtml).toContain("src/example.ts");
-    expect(collapsedHtml).toContain("diff --git a/src/example.ts b/src/example.ts");
     expect(expandedHtml).toContain("M src/App.tsx");
+    expect(expandedHtml).toContain("transcript-blockHistory__inlineDiffRow--deletion");
+    expect(expandedHtml).toContain("transcript-blockHistory__inlineDiffRow--addition");
+    expect(expandedHtml).toContain("old line");
+    expect(expandedHtml).toContain("new line");
   });
 
   it("renders animated state lines and answered approval options", () => {
@@ -221,6 +225,53 @@ describe("TranscriptHistoryBlocks", () => {
     expect(html).toContain("very-long-component-name.ts");
     expect(html).toContain("transcript-blockHistory__markdownTableLine--body");
     expect(html).toContain("done");
+  });
+
+  it("renders inline diff loading and error states on block history", () => {
+    const block: TranscriptBlock = {
+      type: "work-group",
+      title: "File change",
+      status: "done",
+      startedAt: "2026-03-13T12:00:00.000Z",
+      endedAt: "2026-03-13T12:00:04.400Z",
+      items: [
+        {
+          kind: "file-change",
+          label: "File change",
+          status: "done",
+          changedFiles: ["src/example.ts"],
+          additions: 2,
+          deletions: 1,
+          inlineDiffLookup: {
+            threadId: "thread-1",
+            fromTurnCount: 1,
+            toTurnCount: 2,
+          },
+        },
+      ],
+    };
+    const signature = blockToLines(block)[0]?.commandWidgetSignature;
+    const expanded = new Set<string>();
+
+    const loadingHtml = renderToStaticMarkup(
+      <TranscriptHistoryBlocks
+        blocks={[block]}
+        collapsedFileChangeSignatures={expanded}
+        resolvedInlineDiffBySignature={new Map(signature ? [[signature, { status: "loading" }]] : [])}
+      />,
+    );
+    const errorHtml = renderToStaticMarkup(
+      <TranscriptHistoryBlocks
+        blocks={[block]}
+        collapsedFileChangeSignatures={expanded}
+        resolvedInlineDiffBySignature={new Map(signature ? [[signature, { status: "error" }]] : [])}
+      />,
+    );
+
+    expect(loadingHtml).toContain("Loading diff...");
+    expect(loadingHtml).toContain("transcript-blockHistory__inlineDiffStateMessage");
+    expect(errorHtml).toContain("Diff unavailable.");
+    expect(errorHtml).toContain("transcript-blockHistory__inlineDiffStateMessage--error");
   });
 
   it("estimates taller blocks for narrower wrapped text widths", () => {

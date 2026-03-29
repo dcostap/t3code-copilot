@@ -16,6 +16,12 @@ import {
   type TranscriptImageAttachment,
 } from "./TranscriptBlock";
 import {
+  getInlineDiffRowCopyText,
+  getInlineDiffRowMarker,
+  parseInlineDiffFiles,
+  type InlineDiffFileData,
+} from "./inlineDiff";
+import {
   layoutMarkdownTable,
   resolveMarkdownTableDisplayWidth,
   type MarkdownTableDisplayLine,
@@ -75,6 +81,7 @@ interface RenderedTranscriptBlock {
   readonly lines: ReadonlyArray<AnnotatedLine>;
   readonly key: string;
   readonly measurementKey: string;
+  readonly showMessageTurnSeparator: boolean;
 }
 
 interface VirtualWindow {
@@ -95,6 +102,7 @@ interface EstimateTranscriptHistoryBlockHeightInput {
   readonly availableWidthPx?: number;
   readonly expandedCommandSignatures?: ReadonlySet<string>;
   readonly collapsedFileChangeSignatures?: ReadonlySet<string>;
+  readonly resolvedInlineDiffBySignature?: ReadonlyMap<string, InlineDiffResolutionStateLike>;
 }
 
 function classNames(parts: ReadonlyArray<string | false | null | undefined>) {
@@ -249,6 +257,29 @@ function isExpandedCommandLine(
     : expandedCommandSignatures.has(line.commandWidgetSignature);
 }
 
+function shouldShowMessageTurnSeparator(
+  previousBlock: TranscriptBlock | null,
+  nextBlock: TranscriptBlock,
+) {
+  if (!previousBlock) {
+    return false;
+  }
+
+  if (previousBlock.type === "user-message") {
+    return true;
+  }
+
+  if (previousBlock.type === "finished-state") {
+    return true;
+  }
+
+  if (previousBlock.type === "assistant-text" && nextBlock.type !== "finished-state") {
+    return true;
+  }
+
+  return false;
+}
+
 function estimateWrappedTextRows(text: string, availableWidthPx: number) {
   return estimateWrappedLogicalLineRows(text.split(/\r?\n/), availableWidthPx);
 }
@@ -267,15 +298,35 @@ function estimateWrappedLogicalLineRows(logicalLines: ReadonlyArray<string>, ava
   }, 0);
 }
 
+function estimateInlineDiffFileRows(
+  files: ReadonlyArray<InlineDiffFileData>,
+  contentWidthPx: number,
+) {
+  let estimatedRows = 0;
+  for (const file of files) {
+    for (const hunk of file.hunks) {
+      for (const row of hunk.rows) {
+        estimatedRows += estimateWrappedLogicalLineRows([row.text.length > 0 ? row.text : " "], contentWidthPx);
+      }
+    }
+  }
+  if (files.length > 1) {
+    estimatedRows += (files.length - 1) * 0.3;
+  }
+  return estimatedRows;
+}
+
 function estimateRenderedBlockHeight(
   renderedBlock: RenderedTranscriptBlock,
   availableWidthPx: number,
   expandedCommandSignatures: ReadonlySet<string>,
   collapsedFileChangeSignatures: ReadonlySet<string>,
+  resolvedInlineDiffBySignature: ReadonlyMap<string, InlineDiffResolutionStateLike>,
 ) {
   const plainLineWidthPx = Math.max(120, availableWidthPx);
   const commandSurfaceWidthPx = Math.max(120, availableWidthPx - 28);
   const commandBodyWidthPx = Math.max(120, availableWidthPx - 28);
+  const inlineDiffContentWidthPx = Math.max(72, commandBodyWidthPx - 80);
   const markdownTableWidth = resolveMarkdownTableDisplayWidth(availableWidthPx);
   let estimatedLineCount = 0;
   for (let lineIndex = 0; lineIndex < renderedBlock.lines.length; lineIndex += 1) {
@@ -293,6 +344,12 @@ function estimateRenderedBlockHeight(
     }
     if (isCommandWidgetLine(line)) {
       const isExpanded = isExpandedCommandLine(line, expandedCommandSignatures, collapsedFileChangeSignatures);
+      const resolvedInlineDiffState = line.commandWidgetSignature
+        ? resolvedInlineDiffBySignature.get(line.commandWidgetSignature)
+        : undefined;
+      const effectiveInlineDiff =
+        line.inlineUnifiedDiff
+        ?? (resolvedInlineDiffState?.status === "ready" ? resolvedInlineDiffState.diff : undefined);
       estimatedLineCount +=
         !isExpanded && hasExpandableCommandSummary(line)
           ? 1
@@ -304,15 +361,17 @@ function estimateRenderedBlockHeight(
       if (line.commandWidgetOutputLines && line.commandWidgetOutputLines.length > 0) {
         estimatedLineCount += estimateWrappedLogicalLineRows(line.commandWidgetOutputLines, commandBodyWidthPx);
       }
-      if (line.inlineUnifiedDiff) {
-        estimatedLineCount += 1;
-        estimatedLineCount += Math.max(4, estimateWrappedTextRows(line.inlineUnifiedDiff, commandBodyWidthPx));
+      if (effectiveInlineDiff) {
+        const parsedInlineDiffFiles = parseInlineDiffFiles(effectiveInlineDiff, line.inlineDiffChangedFiles);
+        if (parsedInlineDiffFiles.length > 0) {
+          estimatedLineCount += estimateInlineDiffFileRows(parsedInlineDiffFiles, inlineDiffContentWidthPx);
+        } else {
+          estimatedLineCount += 1;
+          estimatedLineCount += Math.max(4, estimateWrappedTextRows(effectiveInlineDiff, commandBodyWidthPx));
+        }
       }
-      if (!line.inlineUnifiedDiff && line.inlineDiffLookup) {
+      if (!effectiveInlineDiff && line.inlineDiffLookup) {
         estimatedLineCount += 1;
-      }
-      if (line.inlineDiffChangedFiles && line.inlineDiffChangedFiles.length > 0) {
-        estimatedLineCount += estimateWrappedTextRows(line.inlineDiffChangedFiles.join(", "), commandBodyWidthPx);
       }
       continue;
     }
@@ -333,6 +392,7 @@ export function estimateTranscriptHistoryBlockHeight(
     availableWidthPx = 0,
     expandedCommandSignatures = new Set<string>(),
     collapsedFileChangeSignatures = new Set<string>(),
+    resolvedInlineDiffBySignature = new Map<string, InlineDiffResolutionStateLike>(),
   }: EstimateTranscriptHistoryBlockHeightInput = {},
 ) {
   const lines = blockToLines(block);
@@ -342,10 +402,12 @@ export function estimateTranscriptHistoryBlockHeight(
       lines,
       key: getBlockIdentity(block, lines),
       measurementKey: getBlockIdentity(block, lines),
+      showMessageTurnSeparator: false,
     },
     availableWidthPx,
     expandedCommandSignatures,
     collapsedFileChangeSignatures,
+    resolvedInlineDiffBySignature,
   );
 }
 
@@ -627,6 +689,10 @@ function renderCommandWidgetLine(
   const effectiveInlineDiff =
     line.inlineUnifiedDiff
     ?? (resolvedInlineDiffState?.status === "ready" ? resolvedInlineDiffState.diff : undefined);
+  const parsedInlineDiffFiles =
+    isExpanded && effectiveInlineDiff
+      ? parseInlineDiffFiles(effectiveInlineDiff, line.inlineDiffChangedFiles)
+      : [];
   const hasExpandableSummary = hasExpandableCommandSummary(line);
   const hasHiddenExpansionContent =
     hasExpandableSummary
@@ -646,6 +712,7 @@ function renderCommandWidgetLine(
       {renderAnnotatedLineContent(line, lineSearchMatches)}
     </div>
   );
+  const inlineDiffFileOccurrences = new Map<string, number>();
 
   return (
     <div
@@ -682,18 +749,72 @@ function renderCommandWidgetLine(
             {line.commandWidgetOutputLines.join("\n")}
           </pre>
         ) : null}
-        {isExpanded && effectiveInlineDiff ? (
+        {isExpanded && parsedInlineDiffFiles.length > 0 ? (
           <div className="transcript-blockHistory__inlineDiff">
-            {line.inlineDiffChangedFiles && line.inlineDiffChangedFiles.length > 0 ? (
-              <div className="transcript-blockHistory__inlineDiffFiles">
-                {line.inlineDiffChangedFiles.join(", ")}
-              </div>
-            ) : null}
-            <pre className="transcript-blockHistory__inlineDiffBody">{effectiveInlineDiff}</pre>
+            {parsedInlineDiffFiles.map((file) => {
+              const fileIdentity = `${file.path}:${file.previousPath ?? ""}:${file.additions}:${file.deletions}`;
+              const fileOccurrence = inlineDiffFileOccurrences.get(fileIdentity) ?? 0;
+              inlineDiffFileOccurrences.set(fileIdentity, fileOccurrence + 1);
+              const rowOccurrences = new Map<string, number>();
+              return (
+                <section
+                  key={`${signature}:inline-diff:${fileIdentity}:${fileOccurrence}`}
+                  className="transcript-blockHistory__inlineDiffFile"
+                >
+                  {file.hunks.flatMap((hunk) =>
+                    hunk.rows.map((row) => {
+                      const copyText = getInlineDiffRowCopyText(row);
+                      const rowIdentity =
+                        `${hunk.header}:${row.kind}:${row.oldLineNumber ?? ""}:${row.newLineNumber ?? ""}:${row.text}`;
+                      const rowOccurrence = rowOccurrences.get(rowIdentity) ?? 0;
+                      rowOccurrences.set(rowIdentity, rowOccurrence + 1);
+                      return (
+                        <div
+                          key={`${signature}:inline-diff:${fileIdentity}:${rowIdentity}:${rowOccurrence}`}
+                          className={classNames([
+                            "transcript-blockHistory__inlineDiffRow",
+                            `transcript-blockHistory__inlineDiffRow--${row.kind}`,
+                            copyText ? "transcript-blockHistory__commandWidgetCopyRow" : "",
+                          ])}
+                          data-copy-text={copyText}
+                        >
+                          <span className="transcript-blockHistory__inlineDiffLineNumber">
+                            {row.newLineNumber?.toString() ?? row.oldLineNumber?.toString() ?? ""}
+                          </span>
+                          <span className="transcript-blockHistory__inlineDiffRowBody">
+                            <span className="transcript-blockHistory__inlineDiffMarker">
+                              {getInlineDiffRowMarker(row)}
+                            </span>
+                            <span className="transcript-blockHistory__inlineDiffContent">
+                              <span className="transcript-blockHistory__inlineDiffContentText">
+                                {row.text.length > 0 ? row.text : " "}
+                              </span>
+                            </span>
+                          </span>
+                        </div>
+                      );
+                    }))}
+                </section>
+              );
+            })}
+          </div>
+        ) : isExpanded && effectiveInlineDiff ? (
+          <div className="transcript-blockHistory__inlineDiff">
+            <pre
+              className="transcript-blockHistory__inlineDiffFallback transcript-blockHistory__commandWidgetCopyRow"
+              data-copy-text={effectiveInlineDiff}
+            >
+              {effectiveInlineDiff}
+            </pre>
           </div>
         ) : null}
         {inlineDiffStateMessage ? (
-          <div className="transcript-blockHistory__inlineDiffFiles">
+          <div
+            className={classNames([
+              "transcript-blockHistory__inlineDiffStateMessage",
+              resolvedInlineDiffState?.status === "error" ? "transcript-blockHistory__inlineDiffStateMessage--error" : "",
+            ])}
+          >
             {inlineDiffStateMessage}
           </div>
         ) : null}
@@ -875,7 +996,8 @@ export function TranscriptHistoryBlocks({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const renderedBlocks = useMemo(() => {
     const blockOccurrences = new Map<string, number>();
-    return blocks.map((block) => {
+    return blocks.map((block, blockIndex) => {
+      const previousBlock = blockIndex > 0 ? blocks[blockIndex - 1] ?? null : null;
       const lines = blockToLines(block);
       const blockIdentity = getBlockIdentity(block, lines);
       const blockOccurrence = blockOccurrences.get(blockIdentity) ?? 0;
@@ -891,6 +1013,7 @@ export function TranscriptHistoryBlocks({
           collapsedFileChangeSignatures,
           resolvedInlineDiffBySignature,
         )}:${blockOccurrence}`,
+        showMessageTurnSeparator: shouldShowMessageTurnSeparator(previousBlock, block),
       } satisfies RenderedTranscriptBlock;
     });
   }, [blocks, collapsedFileChangeSignatures, expandedCommandSignatures, resolvedInlineDiffBySignature]);
@@ -973,10 +1096,18 @@ export function TranscriptHistoryBlocks({
             availableWidthPx,
             expandedCommandSignatures,
             collapsedFileChangeSignatures,
+            resolvedInlineDiffBySignature,
           )
           + (index > 0 ? DEFAULT_BLOCK_GAP_PX : 0)
         )),
-    [availableWidthPx, collapsedFileChangeSignatures, expandedCommandSignatures, measuredHeights, renderedBlocks],
+    [
+      availableWidthPx,
+      collapsedFileChangeSignatures,
+      expandedCommandSignatures,
+      measuredHeights,
+      renderedBlocks,
+      resolvedInlineDiffBySignature,
+    ],
   );
   const blockOffsets = useMemo(() => {
     const offsets: number[] = [];
@@ -1273,7 +1404,10 @@ export function TranscriptHistoryBlocks({
             <div
               key={renderedBlock.key}
               ref={(node) => setBlockRef(renderedBlock.measurementKey, node)}
-              className="transcript-blockHistory__virtualBlock"
+              className={classNames([
+                "transcript-blockHistory__virtualBlock",
+                renderedBlock.showMessageTurnSeparator ? "transcript-blockHistory__virtualBlock--messageTurnSeparator" : "",
+              ])}
               data-has-leading-gap={blockIndex > 0 ? "true" : undefined}
               style={{
                 top: `${blockOffsets[blockIndex] ?? 0}px`,
@@ -1301,7 +1435,10 @@ export function TranscriptHistoryBlocks({
             <div
               key={`measure:${renderedBlock.measurementKey}`}
               ref={(node) => setPremeasureRef(renderedBlock.measurementKey, node)}
-              className="transcript-blockHistory__measurementProbe"
+              className={classNames([
+                "transcript-blockHistory__measurementProbe",
+                renderedBlock.showMessageTurnSeparator ? "transcript-blockHistory__measurementProbe--messageTurnSeparator" : "",
+              ])}
               data-has-leading-gap={blockIndex > 0 ? "true" : undefined}
             >
               {renderBlock(
