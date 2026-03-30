@@ -511,12 +511,7 @@ body {
   min-width: 0;
 }
 
-.transcript-blockHistory__virtualBlockInner {
-  width: 100%;
-  min-width: 0;
-}
-
-.transcript-blockHistory__virtualBlockInner[data-has-leading-gap="true"] {
+.transcript-blockHistory__virtualBlock[data-has-leading-gap="true"] {
   padding-top: 4px;
   box-sizing: border-box;
 }

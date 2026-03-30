@@ -13,11 +13,17 @@ import {
 } from "react";
 
 import {
+  deriveTranscriptHistoryLayoutRow,
+  deriveTranscriptHistoryRowEstimatedHeight,
+  type TranscriptHistoryLayoutRow,
+  type TranscriptHistoryLayoutSegment,
+} from "./transcriptHistoryLayout";
+import {
   deriveTranscriptHistoryRows,
-  estimateTranscriptHistoryRowHeight,
   getActivityDetail,
   getFirstUnvirtualizedRowIndex,
   getToolDisplaySubject,
+  TRANSCRIPT_HISTORY_ROW_GAP_PX,
   type TranscriptHistoryRow,
 } from "./transcriptHistoryRows";
 import {
@@ -27,6 +33,18 @@ import {
 } from "./transcriptMessageFormatting";
 
 const AUTO_FOLLOW_BOTTOM_THRESHOLD_PX = 120;
+
+// Height of the role-change separator div in message rows.
+// `.transcript-historyRow__messageSeparator { height: 1px; margin: 2px 0 4px; }` → 7px total.
+// Deterministic rows skip measureElement, so this must be included in the estimate.
+const MESSAGE_SEPARATOR_HEIGHT_PX = 7;
+
+// CSS chrome (padding/borders beyond text content) per row kind for deterministic rows.
+// message rows: no padding-top → 0px.
+// non-message, non-widget rows (reasoning, activity-group, plan, working):
+//   `.transcript-historyRow--<kind> { padding-top: 2px }` → 2px.
+const DETERMINISTIC_MESSAGE_CHROME_PX = 0;
+const DETERMINISTIC_BASIC_CHROME_PX = 2;
 
 interface TranscriptHistoryProps {
   readonly getTurnDiff: ((input: {
@@ -69,6 +87,21 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   const pendingMeasureFrameRef = useRef<number | null>(null);
   const premeasureRefs = useRef(new Map<string, HTMLDivElement>());
   const [premeasuredRowHeightById, setPremeasuredRowHeightById] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const deterministicLayoutRowsById = useMemo(() => {
+    const next = new Map<string, TranscriptHistoryLayoutRow>();
+    for (const row of rows) {
+      if (!canUseDeterministicVirtualRow(row)) {
+        continue;
+      }
+      next.set(row.id, deriveTranscriptHistoryLayoutRow(row, {
+        widthPx: historyWidthPx,
+        expandedToolRowIds,
+        collapsedCheckpointRowIds,
+        checkpointDiffByRowId,
+      }));
+    }
+    return next;
+  }, [checkpointDiffByRowId, collapsedCheckpointRowIds, expandedToolRowIds, historyWidthPx, rows]);
 
   const rowVirtualizer = useVirtualizer({
     count: firstUnvirtualizedRowIndex,
@@ -76,15 +109,32 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     getItemKey: (index) => rows[index]?.id ?? index,
     estimateSize: (index) => {
       const row = rows[index];
-      return row
-        ? (premeasuredRowHeightById.get(row.id)
-          ?? estimateTranscriptHistoryRowHeight(row, {
-            widthPx: historyWidthPx,
-            expandedToolRowIds,
-            collapsedCheckpointRowIds,
-            checkpointDiffByRowId,
-          }, index))
-        : 80;
+      if (!row) {
+        return 80;
+      }
+      const deterministicLayoutRow = deterministicLayoutRowsById.get(row.id);
+      if (deterministicLayoutRow) {
+        // Deterministic rows skip measureElement and the premeasure lane, so the estimate
+        // must include all CSS chrome. Non-message rows have padding-top: 2px; message rows
+        // with adjacent role-changes also render a 7px separator that must be counted.
+        const chrome = row.kind === "message"
+          ? DETERMINISTIC_MESSAGE_CHROME_PX
+          : DETERMINISTIC_BASIC_CHROME_PX;
+        const separatorPx = row.kind === "message" && shouldRenderRoleSeparator(rows[index - 1] ?? null, row)
+          ? MESSAGE_SEPARATOR_HEIGHT_PX
+          : 0;
+        return deterministicLayoutRow.heightPx + chrome + separatorPx + (index > 0 ? TRANSCRIPT_HISTORY_ROW_GAP_PX : 0);
+      }
+      // For non-deterministic rows (tool, checkpoint, table-containing messages): prefer
+      // actual DOM height from the premeasure lane, then fall back to the layout-model-based
+      // estimate which is far more accurate than the old heuristic.
+      return premeasuredRowHeightById.get(row.id)
+        ?? deriveTranscriptHistoryRowEstimatedHeight(row, {
+          widthPx: historyWidthPx,
+          expandedToolRowIds,
+          collapsedCheckpointRowIds,
+          checkpointDiffByRowId,
+        }, index);
     },
     measureElement,
     useAnimationFrameWithResizeObserver: true,
@@ -147,7 +197,6 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     if (historyWidthPx === null) {
       return;
     }
-    setPremeasuredRowHeightById(new Map());
     scheduleMeasure();
   }, [historyWidthPx, scheduleMeasure]);
 
@@ -161,12 +210,11 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   }, []);
 
   useEffect(() => {
-    rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+    rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (_item, _delta, instance) => {
       const viewportHeight = instance.scrollRect?.height ?? 0;
       const scrollOffset = instance.scrollOffset ?? 0;
       const remainingDistance = instance.getTotalSize() - (scrollOffset + viewportHeight);
-      const changedAboveViewport = item.start < scrollOffset;
-      return changedAboveViewport || remainingDistance > AUTO_FOLLOW_BOTTOM_THRESHOLD_PX;
+      return remainingDistance > AUTO_FOLLOW_BOTTOM_THRESHOLD_PX;
     };
     return () => {
       rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
@@ -290,6 +338,60 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     }
   }, [checkpointDiffByRowId, getTurnDiff, thread?.id]);
 
+  const measurementRows = useMemo(
+    () =>
+      rows
+        .slice(0, firstUnvirtualizedRowIndex)
+        .map((row, index) => ({ row, index }))
+        .filter(({ row }) => !deterministicLayoutRowsById.has(row.id)),
+    [deterministicLayoutRowsById, firstUnvirtualizedRowIndex, rows],
+  );
+
+  useLayoutEffect(() => {
+    if (measurementRows.length === 0) {
+      return;
+    }
+
+    const updates = new Map<string, number>();
+    for (const { row } of measurementRows) {
+      const element = premeasureRefs.current.get(row.id);
+      if (!element) {
+        continue;
+      }
+      const nextHeight = Math.ceil(element.getBoundingClientRect().height);
+      if (nextHeight > 0) {
+        updates.set(row.id, nextHeight);
+      }
+    }
+
+    setPremeasuredRowHeightById((existing) => {
+      let changed = false;
+      const next = new Map(existing);
+      for (const [rowId, height] of updates) {
+        if (next.get(rowId) === height) {
+          continue;
+        }
+        next.set(rowId, height);
+        changed = true;
+      }
+      return changed ? next : existing;
+    });
+  }, [
+    checkpointDiffByRowId,
+    collapsedCheckpointRowIds,
+    expandedToolRowIds,
+    historyWidthPx,
+    measurementRows,
+  ]);
+
+  const setPremeasureRef = useCallback((rowId: string, node: HTMLDivElement | null) => {
+    if (node) {
+      premeasureRefs.current.set(rowId, node);
+    } else {
+      premeasureRefs.current.delete(rowId);
+    }
+  }, []);
+
   if (!thread) {
     return (
       <div className="transcript-history__state transcript-history__state--ready">
@@ -308,92 +410,6 @@ export const TranscriptHistory = memo(function TranscriptHistory({
 
   const virtualItems = rowVirtualizer.getVirtualItems();
   const staticRows = rows.slice(firstUnvirtualizedRowIndex);
-  const premeasureRows = useMemo(() => {
-    if (firstUnvirtualizedRowIndex <= 0 || virtualItems.length === 0) {
-      return [];
-    }
-
-    const visibleIndexes = new Set(virtualItems.map((virtualItem) => virtualItem.index));
-    const firstVisibleIndex = virtualItems[0]?.index ?? 0;
-    const lastVisibleIndex = virtualItems[virtualItems.length - 1]?.index ?? -1;
-    const candidates: Array<number> = [];
-
-    for (let delta = 1; candidates.length < 12; delta += 1) {
-      const nextAfter = lastVisibleIndex + delta;
-      if (nextAfter < firstUnvirtualizedRowIndex && !visibleIndexes.has(nextAfter)) {
-        candidates.push(nextAfter);
-      }
-
-      if (candidates.length >= 12) {
-        break;
-      }
-
-      const nextBefore = firstVisibleIndex - delta;
-      if (nextBefore >= 0 && !visibleIndexes.has(nextBefore)) {
-        candidates.push(nextBefore);
-      }
-
-      if (nextAfter >= firstUnvirtualizedRowIndex && nextBefore < 0) {
-        break;
-      }
-    }
-
-    return candidates
-      .toSorted((left, right) => left - right)
-      .map((index) => {
-        const row = rows[index];
-        return row
-          ? {
-              index,
-              row,
-            }
-          : null;
-      })
-      .filter((entry): entry is { readonly index: number; readonly row: TranscriptHistoryRow } => entry !== null);
-  }, [firstUnvirtualizedRowIndex, rows, virtualItems]);
-
-  useLayoutEffect(() => {
-    if (premeasureRows.length === 0) {
-      return;
-    }
-
-    const updates = new Map<string, number>();
-    for (const { row } of premeasureRows) {
-      const element = premeasureRefs.current.get(row.id);
-      if (!element) {
-        continue;
-      }
-      const nextHeight = Math.ceil(element.getBoundingClientRect().height);
-      if (nextHeight > 0) {
-        updates.set(row.id, nextHeight);
-      }
-    }
-
-    if (updates.size === 0) {
-      return;
-    }
-
-    setPremeasuredRowHeightById((existing) => {
-      let changed = false;
-      const next = new Map(existing);
-      for (const [rowId, height] of updates) {
-        if (next.get(rowId) === height) {
-          continue;
-        }
-        next.set(rowId, height);
-        changed = true;
-      }
-      return changed ? next : existing;
-    });
-  }, [premeasureRows]);
-
-  const setPremeasureRef = useCallback((rowId: string, node: HTMLDivElement | null) => {
-    if (node) {
-      premeasureRefs.current.set(rowId, node);
-    } else {
-      premeasureRefs.current.delete(rowId);
-    }
-  }, []);
 
   return (
     <div ref={historyRootRef} className="transcript-historyList transcript-history__viewport">
@@ -406,43 +422,47 @@ export const TranscriptHistory = memo(function TranscriptHistory({
           if (!row) {
             return null;
           }
+          const deterministicLayoutRow = deterministicLayoutRowsById.get(row.id);
 
           return (
             <div
               key={virtualItem.key}
+              data-index={deterministicLayoutRow ? undefined : virtualItem.index}
+              ref={deterministicLayoutRow ? undefined : rowVirtualizer.measureElement}
               className="transcript-blockHistory__virtualBlock"
+              data-has-leading-gap={virtualItem.index > 0 ? "true" : undefined}
               style={{
                 transform: `translateY(${virtualItem.start}px)`,
-                height: `${virtualItem.size}px`,
-                overflow: "hidden",
               }}
             >
-              <div
-                data-index={virtualItem.index}
-                className="transcript-blockHistory__virtualBlockInner"
-                data-has-leading-gap={virtualItem.index > 0 ? "true" : undefined}
-                ref={rowVirtualizer.measureElement}
-              >
-                <TranscriptHistoryRowView
+              {deterministicLayoutRow ? (
+                <TranscriptDeterministicRowView
+                  layoutRow={deterministicLayoutRow}
                   previousRow={virtualItem.index > 0 ? rows[virtualItem.index - 1] ?? null : null}
                   row={row}
-                  checkpointDiffState={checkpointDiffByRowId.get(row.id)}
-                  isCheckpointCollapsed={collapsedCheckpointRowIds.has(row.id)}
-                  isToolExpanded={expandedToolRowIds.has(row.id)}
-                  onEnsureCheckpointDiff={ensureCheckpointDiff}
-                  onToggleCheckpoint={toggleCheckpointRow}
-                  onToggleTool={toggleToolRow}
                   projectRoot={projectRoot}
                 />
-              </div>
+              ) : (
+                  <TranscriptHistoryRowView
+                    previousRow={virtualItem.index > 0 ? rows[virtualItem.index - 1] ?? null : null}
+                    row={row}
+                    checkpointDiffState={checkpointDiffByRowId.get(row.id)}
+                    isCheckpointCollapsed={collapsedCheckpointRowIds.has(row.id)}
+                    isToolExpanded={expandedToolRowIds.has(row.id)}
+                    onEnsureCheckpointDiff={ensureCheckpointDiff}
+                    onToggleCheckpoint={toggleCheckpointRow}
+                    onToggleTool={toggleToolRow}
+                    projectRoot={projectRoot}
+                  />
+                )}
             </div>
           );
         })}
       </div>
 
-      {premeasureRows.length > 0 ? (
+      {measurementRows.length > 0 ? (
         <div className="transcript-blockHistory__measurementLane" aria-hidden="true">
-          {premeasureRows.map(({ index, row }) => (
+          {measurementRows.map(({ row, index }) => (
             <div
               key={`measure:${row.id}`}
               ref={(node) => setPremeasureRef(row.id, node)}
@@ -459,6 +479,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
                 onToggleCheckpoint={toggleCheckpointRow}
                 onToggleTool={toggleToolRow}
                 projectRoot={projectRoot}
+                measurementOnly
               />
             </div>
           ))}
@@ -502,6 +523,7 @@ interface TranscriptHistoryRowViewProps {
   readonly onToggleCheckpoint: (rowId: string) => void;
   readonly onToggleTool: (rowId: string) => void;
   readonly projectRoot: string | null | undefined;
+  readonly measurementOnly?: boolean;
 }
 
 function TranscriptHistoryRowView({
@@ -514,6 +536,7 @@ function TranscriptHistoryRowView({
   onToggleCheckpoint,
   onToggleTool,
   projectRoot,
+  measurementOnly = false,
 }: TranscriptHistoryRowViewProps) {
   switch (row.kind) {
     case "message":
@@ -545,6 +568,7 @@ function TranscriptHistoryRowView({
           isCollapsed={isCheckpointCollapsed}
           onEnsureDiff={onEnsureCheckpointDiff}
           onToggle={() => onToggleCheckpoint(row.id)}
+          measurementOnly={measurementOnly}
         />
       );
 
@@ -555,6 +579,104 @@ function TranscriptHistoryRowView({
         </div>
       );
   }
+}
+
+function canUseDeterministicVirtualRow(row: TranscriptHistoryRow) {
+  if (row.kind === "tool" || row.kind === "checkpoint") {
+    return false;
+  }
+  if (row.kind !== "message") {
+    return true;
+  }
+  return !parseTranscriptMessageBlocks(row.message.text).some((block) => block.kind === "table");
+}
+
+function TranscriptDeterministicRowView({
+  layoutRow,
+  previousRow,
+  row,
+  projectRoot,
+}: {
+  readonly layoutRow: TranscriptHistoryLayoutRow;
+  readonly previousRow: TranscriptHistoryRow | null;
+  readonly row: TranscriptHistoryRow;
+  readonly projectRoot: string | null | undefined;
+}) {
+  const textClassName = (() => {
+    if (row.kind === "reasoning") {
+      return "transcript-historyRow__reasoningText";
+    }
+    return row.kind === "working"
+      ? "transcript-historyRow__text--muted"
+      : undefined;
+  })();
+
+  return (
+    <div className={`transcript-historyRow transcript-historyRow--${row.kind}`}>
+      {row.kind === "message" && shouldRenderRoleSeparator(previousRow, row)
+        ? <div className="transcript-historyRow__messageSeparator" aria-hidden="true" />
+        : null}
+      {layoutRow.segments.map((segment) => (
+        segment.kind === "table"
+          ? (
+              <TranscriptMarkdownTable
+                key={`layout-table:${layoutRow.id}:${segment.table.headers.join("|")}:${segment.table.rows.length}`}
+                table={segment.table}
+                projectRoot={projectRoot}
+              />
+            )
+          : (
+              <TranscriptDeterministicLinesSegment
+                key={`layout-lines:${layoutRow.id}:${segment.lines.join("\u241F")}`}
+                segment={segment}
+                projectRoot={projectRoot}
+                rowKind={row.kind}
+                {...(textClassName ? { lineClassName: textClassName } : {})}
+              />
+            )
+      ))}
+    </div>
+  );
+}
+
+function TranscriptDeterministicLinesSegment({
+  segment,
+  lineClassName,
+  projectRoot,
+  rowKind,
+}: {
+  readonly segment: Extract<TranscriptHistoryLayoutSegment, { readonly kind: "lines" }>;
+  readonly lineClassName?: string;
+  readonly projectRoot: string | null | undefined;
+  readonly rowKind: TranscriptHistoryRow["kind"];
+}) {
+  let offset = 0;
+  return (
+    <div
+      className="transcript-historyRow__textBlock"
+      style={{ gap: `${segment.gapPx}px` }}
+    >
+      {segment.lines.map((line) => {
+        const key = `${offset}:${line}`;
+        offset += line.length + 1;
+        return (
+          <div
+            key={key}
+            className={classNames([
+              "transcript-historyRow__text",
+              lineClassName,
+              rowKind === "message" && line.startsWith("attachment: ")
+                ? "transcript-historyRow__text--muted"
+                : null,
+            ])}
+            style={{ lineHeight: `${segment.lineHeightPx}px`, whiteSpace: "pre" }}
+          >
+            {line.length > 0 ? renderLinkTokens(line, projectRoot) : "\u00A0"}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 export function formatTranscriptHistoryRow(row: TranscriptHistoryRow): string {
@@ -804,6 +926,7 @@ function TranscriptCheckpointRow({
   isCollapsed,
   onEnsureDiff,
   onToggle,
+  measurementOnly = false,
 }: {
   readonly row: Extract<TranscriptHistoryRow, { readonly kind: "checkpoint" }>;
   readonly diffState: {
@@ -814,15 +937,16 @@ function TranscriptCheckpointRow({
   readonly isCollapsed: boolean;
   readonly onEnsureDiff: (row: Extract<TranscriptHistoryRow, { readonly kind: "checkpoint" }>) => Promise<void>;
   readonly onToggle: () => void;
+  readonly measurementOnly?: boolean;
 }) {
   const isExpanded = !isCollapsed;
 
   useEffect(() => {
-    if (!isExpanded || diffState) {
+    if (measurementOnly || !isExpanded || diffState) {
       return;
     }
     void onEnsureDiff(row);
-  }, [diffState, isExpanded, onEnsureDiff, row]);
+  }, [diffState, isExpanded, measurementOnly, onEnsureDiff, row]);
 
   return (
     <div className="transcript-historyRow transcript-historyRow--checkpoint">

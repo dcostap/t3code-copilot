@@ -8,9 +8,16 @@ import type {
 } from "@t3tools/contracts";
 
 import { deriveRunningThreadIntentLabel, isReportIntentToolPayload } from "../agentIntent";
+import { parseTranscriptMessageBlocks, type TranscriptMarkdownTable } from "./transcriptMessageFormatting";
 
 export const ALWAYS_UNVIRTUALIZED_TAIL_ROWS = 8;
 export const TRANSCRIPT_HISTORY_ROW_GAP_PX = 4;
+
+const TRANSCRIPT_TABLE_CELL_HORIZONTAL_PADDING_PX = 20;
+const TRANSCRIPT_TABLE_CELL_MIN_WIDTH_PX = 96;
+const TRANSCRIPT_TABLE_MAX_WIDTH_PX = 448;
+const TRANSCRIPT_TABLE_AVG_CHAR_WIDTH_PX = 6.9;
+const TRANSCRIPT_TABLE_ROW_HEIGHT_PX = 26;
 
 export type TranscriptToolStatus = "running" | "done" | "error" | "declined";
 
@@ -1175,7 +1182,7 @@ export function estimateTranscriptHistoryRowHeight(
   const baseHeight = (() => {
     switch (row.kind) {
       case "message":
-        return 28 + estimateTextHeight(row.message.text, options?.widthPx) + ((row.message.attachments?.length ?? 0) * 22);
+        return estimateTranscriptMessageHeight(row.message, options?.widthPx);
 
       case "reasoning":
         return row.reasoning.variant === "summary"
@@ -1238,6 +1245,56 @@ export function estimateTranscriptHistoryRowHeight(
   })();
 
   return baseHeight + (rowIndex > 0 ? TRANSCRIPT_HISTORY_ROW_GAP_PX : 0);
+}
+
+function estimateTranscriptMessageHeight(
+  message: Extract<TranscriptHistoryRow, { readonly kind: "message" }>["message"],
+  widthPx?: number | null,
+) {
+  const blocks = parseTranscriptMessageBlocks(message.text);
+  const blockHeight = blocks.reduce((total, block) => {
+    if (block.kind === "table") {
+      return total + estimateMarkdownTableHeight(block.table, widthPx);
+    }
+    return total + estimateTextHeight(block.text, widthPx);
+  }, 0);
+  const blockGapHeight = Math.max(blocks.length - 1, 0) * 6;
+  return 28 + blockHeight + blockGapHeight + ((message.attachments?.length ?? 0) * 22);
+}
+
+function estimateMarkdownTableHeight(table: TranscriptMarkdownTable, widthPx?: number | null) {
+  const columnCount = Math.max(table.headers.length, 1);
+  const availableWidthPx = Math.max(
+    Math.min(widthPx ?? TRANSCRIPT_TABLE_MAX_WIDTH_PX, TRANSCRIPT_TABLE_MAX_WIDTH_PX),
+    160,
+  );
+  const estimatedColumnWidthPx = Math.max(
+    Math.floor(availableWidthPx / columnCount) - TRANSCRIPT_TABLE_CELL_HORIZONTAL_PADDING_PX,
+    TRANSCRIPT_TABLE_CELL_MIN_WIDTH_PX,
+  );
+  const charsPerLine = Math.max(
+    12,
+    Math.floor(estimatedColumnWidthPx / TRANSCRIPT_TABLE_AVG_CHAR_WIDTH_PX),
+  );
+  const headerHeight = estimateMarkdownTableRowHeight(table.headers, charsPerLine);
+  const bodyHeight = table.rows.reduce(
+    (total, row) => total + estimateMarkdownTableRowHeight(row, charsPerLine),
+    0,
+  );
+  return headerHeight + bodyHeight;
+}
+
+function estimateMarkdownTableRowHeight(
+  cells: ReadonlyArray<string>,
+  charsPerLine: number,
+) {
+  const tallestCellLineCount = cells.reduce((maxLines, cell) => {
+    const cellLineCount = cell.split(/\r?\n/).reduce((lineTotal, line) => {
+      return lineTotal + Math.max(1, Math.ceil(Math.max(line.length, 1) / charsPerLine));
+    }, 0);
+    return Math.max(maxLines, cellLineCount);
+  }, 1);
+  return tallestCellLineCount * TRANSCRIPT_TABLE_ROW_HEIGHT_PX;
 }
 
 function estimateTextHeight(text: string, widthPx?: number | null) {

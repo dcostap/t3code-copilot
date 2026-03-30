@@ -148,6 +148,51 @@ describe("estimateTranscriptHistoryRowHeight", () => {
       estimateTranscriptHistoryRowHeight(row, { widthPx: 900 }),
     );
   });
+
+  it("accounts for markdown table structure in message estimates", () => {
+    const thread = buildTestSnapshot().threads[0]!;
+    const row = deriveTranscriptHistoryRows(thread).find((candidate) => candidate.kind === "message");
+
+    expect(row?.kind).toBe("message");
+    if (!row || row.kind !== "message") {
+      return;
+    }
+
+    const compactTableRow = {
+      ...row,
+      message: {
+        ...row.message,
+        text: [
+          "| name | value |",
+          "| --- | --- |",
+          "| alpha | short |",
+        ].join("\n"),
+      },
+    };
+    const wrappedTableRow = {
+      ...row,
+      message: {
+        ...row.message,
+        text: [
+          "| name | value |",
+          "| --- | --- |",
+          "| alpha | this is a long value that should wrap in narrower table columns |",
+          "| beta | short |",
+        ].join("\n"),
+      },
+    };
+
+    expect(
+      estimateTranscriptHistoryRowHeight(wrappedTableRow, { widthPx: 280 }),
+    ).toBeGreaterThan(
+      estimateTranscriptHistoryRowHeight(wrappedTableRow, { widthPx: 900 }),
+    );
+    expect(
+      estimateTranscriptHistoryRowHeight(wrappedTableRow, { widthPx: 280 }),
+    ).toBeGreaterThan(
+      estimateTranscriptHistoryRowHeight(compactTableRow, { widthPx: 280 }),
+    );
+  });
 });
 
 function buildRunningThreadFixture(): OrchestrationThread {
