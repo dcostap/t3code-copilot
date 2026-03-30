@@ -1,4 +1,4 @@
-import type { ChatAttachment, OrchestrationMessage, OrchestrationThread, OrchestrationThreadActivity } from "@t3tools/contracts";
+import type { ChatAttachment, OrchestrationMessage, OrchestrationThread } from "@t3tools/contracts";
 import { measureElement, useVirtualizer } from "@tanstack/react-virtual";
 import {
   memo,
@@ -248,183 +248,43 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   );
 });
 
-type TranscriptHistoryLineTone =
-  | "default"
-  | "muted"
-  | "assistant"
-  | "system"
-  | "tool"
-  | "approval"
-  | "error"
-  | "working";
-
-interface TranscriptHistoryDisplayLine {
-  readonly key: string;
-  readonly text: string;
-  readonly tone: TranscriptHistoryLineTone;
-  readonly indented?: boolean;
-}
-
-interface TranscriptHistoryDisplayRow {
-  readonly label: string;
-  readonly labelTone?: OrchestrationMessage["role"];
-  readonly lines: ReadonlyArray<TranscriptHistoryDisplayLine>;
-}
-
 function TranscriptHistoryRowView({ row }: { readonly row: TranscriptHistoryRow }) {
-  const display = formatTranscriptHistoryRow(row);
-
   return (
     <div className={`transcript-historyRow transcript-historyRow--${row.kind}`}>
-      {display.labelTone
-        ? <HistoryLabel tone={display.labelTone}>{display.label}</HistoryLabel>
-        : <HistoryLabel>{display.label}</HistoryLabel>}
-      {display.lines.map((line) => (
-        <HistoryLine
-          key={line.key}
-          className={`transcript-historyRow__line--${line.tone}${line.indented ? " transcript-historyRow__line--indented" : ""}`}
-          text={line.text}
-        />
-      ))}
+      <pre className="transcript-historyRow__text">{formatTranscriptHistoryRow(row)}</pre>
     </div>
   );
 }
 
-export function formatTranscriptHistoryRow(row: TranscriptHistoryRow): TranscriptHistoryDisplayRow {
+export function formatTranscriptHistoryRow(row: TranscriptHistoryRow): string {
   switch (row.kind) {
-    case "message":
-      return {
-        label: getMessageRoleLabel(row.message.role),
-        labelTone: row.message.role,
-        lines: [
-          ...(row.message.attachments?.map((attachment) => ({
-            key: attachment.id,
-            text: formatAttachmentLine(attachment),
-            tone: "muted" as const,
-          })) ?? []),
-          ...getKeyedLines(row.message.id, row.message.text).map((line) => ({
-            key: line.key,
-            text: line.text,
-            tone: getMessageLineTone(row.message.role),
-          })),
-        ],
-      };
+    case "message": {
+      const lines = [
+        `${getMessageRoleLabel(row.message.role)}:`,
+        ...(row.message.attachments?.map((attachment) => `attachment: ${formatAttachmentLine(attachment)}`) ?? []),
+        row.message.text,
+      ];
+      return lines.join("\n");
+    }
 
     case "activity-group":
-      return {
-        label: "activity",
-        lines: row.activities.flatMap((activity) => {
+      return [
+        "activity:",
+        ...row.activities.flatMap((activity) => {
           const detail = getActivityDetail(activity);
           return [
-            {
-              key: `summary:${activity.id}`,
-              text: `[${activity.tone}] ${activity.summary}`,
-              tone: getActivityLineTone(activity.tone),
-            },
-            ...(detail
-              ? [{
-                  key: `detail:${activity.id}`,
-                  text: detail,
-                  tone: "muted" as const,
-                  indented: true,
-                }]
-              : []),
+            `[${activity.tone}] ${activity.summary}`,
+            ...(detail ? [detail] : []),
           ];
         }),
-      };
+      ].join("\n");
 
     case "plan":
-      return {
-        label: "plan",
-        lines: getKeyedLines(row.plan.id, row.plan.planMarkdown).map((line) => ({
-          key: line.key,
-          text: line.text,
-          tone: "muted" as const,
-        })),
-      };
+      return `plan:\n${row.plan.planMarkdown}`;
 
     case "working":
-      return {
-        label: "working",
-        lines: [{
-          key: row.id,
-          text: row.label ? `${row.label}...` : "Waiting for the next transcript update...",
-          tone: "working",
-        }],
-      };
+      return `working:\n${row.label ? `${row.label}...` : "Waiting for the next transcript update..."}`;
   }
-}
-
-function HistoryLabel({
-  children,
-  tone,
-}: {
-  readonly children: string;
-  readonly tone?: OrchestrationMessage["role"];
-}) {
-  return (
-    <div
-      className={`transcript-historyRow__label${tone ? ` transcript-historyRow__label--${tone}` : ""}`}
-    >
-      {children}
-    </div>
-  );
-}
-
-function getMessageLineTone(role: OrchestrationMessage["role"]): TranscriptHistoryLineTone {
-  if (role === "assistant") {
-    return "assistant";
-  }
-  if (role === "system") {
-    return "system";
-  }
-  return "default";
-}
-
-function getActivityLineTone(
-  tone: OrchestrationThreadActivity["tone"],
-): TranscriptHistoryLineTone {
-  if (tone === "tool") {
-    return "tool";
-  }
-  if (tone === "approval") {
-    return "approval";
-  }
-  if (tone === "error") {
-    return "error";
-  }
-  return "default";
-}
-
-function HistoryLine({
-  className,
-  text,
-}: {
-  readonly className?: string;
-  readonly text: string;
-}) {
-  return (
-    <div className={`transcript-historyRow__line${className ? ` ${className}` : ""}`}>
-      {text.length > 0 ? text : " "}
-    </div>
-  );
-}
-
-function splitMessageLines(text: string) {
-  const lines = text.split(/\r?\n/);
-  return lines.length > 0 ? lines : [""];
-}
-
-function getKeyedLines(prefix: string, text: string) {
-  let offset = 0;
-  return splitMessageLines(text).map((line) => {
-    const keyedLine = {
-      key: `${prefix}:${offset}:${line}`,
-      text: line,
-    };
-    offset += line.length + 1;
-    return keyedLine;
-  });
 }
 
 function getMessageRoleLabel(role: OrchestrationMessage["role"]) {

@@ -551,61 +551,13 @@ body {
   padding-top: 2px;
 }
 
-.transcript-historyRow__label {
-  color: #85919d;
-  font-size: 12px;
-  letter-spacing: 0.08em;
-  text-transform: lowercase;
-}
-
-.transcript-historyRow__label--user {
-  color: #d6dde5;
-}
-
-.transcript-historyRow__label--assistant {
-  color: #a9d1ff;
-}
-
-.transcript-historyRow__label--system {
-  color: #dec48e;
-}
-
-.transcript-historyRow__line {
+.transcript-historyRow__text {
+  margin: 0;
   min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-
-.transcript-historyRow__line--assistant {
-  color: #d8e1ea;
-}
-
-.transcript-historyRow__line--system {
-  color: #d7c297;
-}
-
-.transcript-historyRow__line--muted {
-  color: #93a0ac;
-}
-
-.transcript-historyRow__line--tool {
-  color: #9bc9ff;
-}
-
-.transcript-historyRow__line--approval {
-  color: #dfc081;
-}
-
-.transcript-historyRow__line--error {
-  color: #e49a9a;
-}
-
-.transcript-historyRow__line--working {
-  color: #9bc9ff;
-}
-
-.transcript-historyRow__line--indented {
-  padding-left: 2ch;
+  color: #c5ccd3;
+  font: inherit;
 }
 
 .transcript-blockHistory__block {

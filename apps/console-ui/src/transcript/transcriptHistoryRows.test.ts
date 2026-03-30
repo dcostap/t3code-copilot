@@ -68,10 +68,8 @@ describe("formatTranscriptHistoryRow", () => {
 
     const display = formatTranscriptHistoryRow(row);
 
-    expect(display.label).toBe("activity");
-    expect(display.lines[0]).toMatchObject({
-      text: `[${row.activities[0]!.tone}] ${row.activities[0]!.summary}`,
-    });
+    expect(display).toContain("activity:");
+    expect(display).toContain(`[${row.activities[0]!.tone}] ${row.activities[0]!.summary}`);
   });
 
   it("formats the working row as a simple status line", () => {
@@ -85,14 +83,9 @@ describe("formatTranscriptHistoryRow", () => {
 
     const display = formatTranscriptHistoryRow(row);
 
-    expect(display).toMatchObject({
-      label: "working",
-      lines: [{
-        key: row.id,
-        text: row.label ? `${row.label}...` : "Waiting for the next transcript update...",
-        tone: "working",
-      }],
-    });
+    expect(display).toBe(
+      `working:\n${row.label ? `${row.label}...` : "Waiting for the next transcript update..."}`,
+    );
   });
 });
 
