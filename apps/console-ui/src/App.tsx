@@ -310,6 +310,7 @@ interface PaneView {
 interface ConversationPaneTranscriptProps {
   readonly paneView: PaneView;
   readonly draftValue: string;
+  readonly paneActive: boolean;
   readonly paletteOpen: boolean;
   readonly hasBlockingModal: boolean;
   readonly submitDisabled: boolean;
@@ -323,6 +324,7 @@ interface ConversationPaneTranscriptProps {
 const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
   paneView,
   draftValue,
+  paneActive,
   paletteOpen,
   hasBlockingModal,
   submitDisabled,
@@ -357,7 +359,7 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
       cwd={paneView.cwd}
       draftValue={draftValue}
       projectRoot={paneView.project.workspaceRoot}
-      paneActive={paneView.isActive}
+      paneActive={paneActive}
       interactionMode={paneView.interactionMode}
       promptFocusDisabled={paletteOpen || hasBlockingModal}
       promptInputDisabled={hasBlockingModal}
@@ -1378,6 +1380,7 @@ export function App() {
   const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<Record<string, Record<string, string>>>({});
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] = useState<Record<string, number>>({});
   const [pendingDraftPaneIds, setPendingDraftPaneIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [paneInteractionActive, setPaneInteractionActive] = useState(true);
   const [draggedThreadId, setDraggedThreadId] = useState<string | null>(null);
   const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null);
   const [dragOverSplitZone, setDragOverSplitZone] = useState(false);
@@ -1790,10 +1793,25 @@ export function App() {
     if (!paneId || paletteOpen) {
       return;
     }
+    setPaneInteractionActive(true);
     requestAnimationFrame(() => {
       paneRefs.current[paneId]?.focusPrompt({ reveal: true });
     });
   }, [paletteOpen]);
+
+  const blurFocusedPaneElement = useCallback(() => {
+    setPaneInteractionActive(false);
+    const activeElement = document.activeElement;
+    if (!(activeElement instanceof HTMLElement)) {
+      return;
+    }
+    for (const paneElement of Object.values(paneElementRefs.current)) {
+      if (paneElement && paneElement.contains(activeElement)) {
+        activeElement.blur();
+        return;
+      }
+    }
+  }, []);
 
   useEffect(() => {
     if (!pendingProjectActivationId) {
@@ -1809,14 +1827,14 @@ export function App() {
   }, [focusPanePrompt, pendingProjectActivationId, workspace]);
 
   useEffect(() => {
-    if (!workspace.activePaneId || paletteOpen) {
+    if (!workspace.activePaneId || paletteOpen || !paneInteractionActive) {
       return;
     }
     if (!hasInitiallyFocusedPromptRef.current) {
       hasInitiallyFocusedPromptRef.current = true;
     }
     focusPanePrompt(workspace.activePaneId);
-  }, [focusPanePrompt, paletteOpen, workspace.activePaneId]);
+  }, [focusPanePrompt, paneInteractionActive, paletteOpen, workspace.activePaneId]);
 
   const registerPaneHandle = useCallback((paneId: string, handle: TranscriptRendererHandle | null) => {
     if (!handle) {
@@ -2025,14 +2043,19 @@ export function App() {
     }, 1400);
   }, []);
 
-  const handleCreateDraftTabForProject = useCallback((projectId: OrchestrationProject["id"]) => {
+  const handleCreateDraftTabForProject = useCallback((
+    projectId: OrchestrationProject["id"],
+    options?: { readonly focusPrompt?: boolean },
+  ) => {
     workspace.activateProject(projectId);
     const created = workspace.createDraftTab({ projectId });
     if (!created) {
       return null;
     }
     setSubmitError(null);
-    focusPanePrompt(created.paneId);
+    if (options?.focusPrompt !== false) {
+      focusPanePrompt(created.paneId);
+    }
     return created;
   }, [focusPanePrompt, workspace]);
 
@@ -2144,6 +2167,7 @@ export function App() {
   }, [consoleData.threads, draggedThreadId, focusPanePrompt, highlightPane, workspace]);
 
   const handleOpenThread = useCallback((threadId: ThreadId) => {
+    setPaneInteractionActive(false);
     const thread = consoleData.threads.find((candidate) => candidate.id === threadId) ?? null;
     if (!thread) {
       return;
@@ -2167,7 +2191,6 @@ export function App() {
           threadId,
         });
         if (didMount) {
-          focusPanePrompt(reusableDraftPane.paneId);
           return;
         }
       }
@@ -2175,7 +2198,6 @@ export function App() {
       if (!result) {
         return;
       }
-      focusPanePrompt(result.paneId);
       if (result.highlightPane) {
         highlightPane(result.paneId);
       }
@@ -2183,7 +2205,6 @@ export function App() {
   }, [
     composerAttachmentsByPaneId,
     consoleData.threads,
-    focusPanePrompt,
     highlightPane,
     pendingDraftPaneIds,
     workspace,
@@ -2220,14 +2241,13 @@ export function App() {
   const handleSelectSidebarProject = useCallback((
     projectId: OrchestrationProject["id"],
     collapsed: boolean,
-    paneId: string | null,
   ) => {
+    setPaneInteractionActive(false);
     workspace.activateProject(projectId);
     if (collapsed) {
       workspace.toggleProjectCollapsed(projectId);
     }
-    focusPanePrompt(paneId);
-  }, [focusPanePrompt, workspace]);
+  }, [workspace]);
 
   const handleOpenProjectContextMenu = useCallback((
     event: ReactMouseEvent<HTMLElement>,
@@ -3188,6 +3208,10 @@ export function App() {
         return;
       }
 
+      if (!paneInteractionActive) {
+        return;
+      }
+
       if (event.isComposing || hasEditableFocus) {
         return;
       }
@@ -3286,10 +3310,11 @@ export function App() {
     activePaneView,
     activeLayout,
     activePaneId,
-    activeProjectForShortcuts,
+      activeProjectForShortcuts,
       closePalette,
       hasBlockingModal,
       openPalette,
+      paneInteractionActive,
       paletteOpen,
       paletteQuery,
       resolveCommandsForPane,
@@ -3513,6 +3538,7 @@ export function App() {
                   className={`project-tab${tab.id === activeLayout.activeTabId ? " project-tab--active" : ""}`}
                   ref={(element) => setTopbarTabButtonRef(tab.id, element)}
                   onClick={() => {
+                    setPaneInteractionActive(true);
                     workspace.activateTab(workspace.activeProject!.id, tab.id);
                     focusPanePrompt(tab.activePaneId);
                   }}
@@ -3563,7 +3589,15 @@ export function App() {
       <div className={shellClassName}>
         {topbar}
         <div className="project-workspace">
-          <aside className="project-sidebar">
+          <aside
+            className="project-sidebar"
+            onMouseDownCapture={() => {
+              blurFocusedPaneElement();
+            }}
+            onFocusCapture={() => {
+              blurFocusedPaneElement();
+            }}
+          >
             <div className="project-sidebar__topAction">
               <span className="project-sidebar__topActionLabel">Projects</span>
               <button
@@ -3648,7 +3682,6 @@ export function App() {
                           handleSelectSidebarProject(
                             projectView.project.id,
                             projectView.collapsed,
-                            projectView.layout.tabs.find((tab) => tab.id === projectView.layout.activeTabId)?.activePaneId ?? null,
                           );
                         }}
                       >
@@ -3679,7 +3712,8 @@ export function App() {
                           onClick={(event) => {
                             event.preventDefault();
                             event.stopPropagation();
-                            void handleCreateDraftTabForProject(projectView.project.id);
+                            setPaneInteractionActive(false);
+                            void handleCreateDraftTabForProject(projectView.project.id, { focusPrompt: false });
                           }}
                         >
                           <SidebarNewThreadIcon className="project-tree__actionIcon" />
@@ -3813,12 +3847,17 @@ export function App() {
                           if (event.button !== 0) {
                             return;
                           }
+                          setPaneInteractionActive(true);
                           handleActivatePaneView(paneView);
                         }}
                         onFocusCapture={() => {
+                          setPaneInteractionActive(true);
                           handleActivatePaneView(paneView);
                         }}
-                        onClick={() => handleActivatePaneView(paneView)}
+                        onClick={() => {
+                          setPaneInteractionActive(true);
+                          handleActivatePaneView(paneView);
+                        }}
                         onDragOver={(event: ReactDragEvent<HTMLElement>) => {
                           if (!dropAllowed) {
                             return;
@@ -3862,11 +3901,12 @@ export function App() {
                           <div className="conversation-pane__dropOverlay" aria-hidden="true" />
                         ) : null}
                         <div className="transcript-shell">
-                          <ConversationPaneTranscript
-                            paneView={paneView}
-                            draftValue={composerDraftByPaneIdRef.current[paneView.pane.id] ?? ""}
-                            paletteOpen={paletteOpen}
-                            hasBlockingModal={hasBlockingModal}
+                            <ConversationPaneTranscript
+                              paneView={paneView}
+                              draftValue={composerDraftByPaneIdRef.current[paneView.pane.id] ?? ""}
+                              paneActive={paneView.isActive && paneInteractionActive}
+                              paletteOpen={paletteOpen}
+                              hasBlockingModal={hasBlockingModal}
                             submitDisabled={
                               pendingDraftPaneIds.has(paneView.pane.id)
                               || paneView.pendingPromptSendStartedAt !== null

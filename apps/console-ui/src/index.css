@@ -1227,6 +1227,20 @@ body {
   min-width: 0;
 }
 
+.transcript-prompt__measure {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  visibility: hidden;
+  overflow: hidden;
+  color: transparent;
+  font: inherit;
+  line-height: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .transcript-prompt__customCaret {
   position: absolute;
   pointer-events: none;

@@ -113,9 +113,22 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
     ref,
   ) {
     const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+    const promptInputShellRef = useRef<HTMLDivElement | null>(null);
+    const promptMeasureRef = useRef<HTMLDivElement | null>(null);
+    const promptMeasureTextRef = useRef<HTMLSpanElement | null>(null);
+    const promptCaretProbeRef = useRef<HTMLSpanElement | null>(null);
     const draftRef = useRef(draftValue);
     const textareaHeightFrameRef = useRef<number | null>(null);
+    const caretFrameRef = useRef<number | null>(null);
     const submittingRef = useRef(false);
+    const [hasPromptFocus, setHasPromptFocus] = useState(false);
+    const [customCaretStyle, setCustomCaretStyle] = useState<{
+      readonly left: number;
+      readonly top: number;
+      readonly width: number;
+      readonly height: number;
+    } | null>(null);
+    const showCustomCaret = paneActive && !hasPromptFocus;
 
     useEffect(() => {
       if (!paneActive && document.activeElement === promptTextareaRef.current) {
@@ -143,6 +156,35 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
       });
     }, []);
 
+    const scheduleCustomCaretSync = useCallback(() => {
+      if (caretFrameRef.current !== null) {
+        cancelAnimationFrame(caretFrameRef.current);
+      }
+      caretFrameRef.current = requestAnimationFrame(() => {
+        caretFrameRef.current = null;
+        const textarea = promptTextareaRef.current;
+        const shell = promptInputShellRef.current;
+        const measure = promptMeasureRef.current;
+        const measureText = promptMeasureTextRef.current;
+        const probe = promptCaretProbeRef.current;
+        if (!textarea || !shell || !measure || !measureText || !probe) {
+          setCustomCaretStyle(null);
+          return;
+        }
+        const selectionStart = textarea.selectionStart ?? draftRef.current.length;
+        measure.style.width = `${shell.clientWidth}px`;
+        measureText.textContent = draftRef.current.slice(0, selectionStart) || "\u200b";
+        const shellRect = shell.getBoundingClientRect();
+        const probeRect = probe.getBoundingClientRect();
+        setCustomCaretStyle({
+          left: probeRect.left - shellRect.left,
+          top: probeRect.top - shellRect.top,
+          width: Math.max(probeRect.width, 8),
+          height: Math.max(probeRect.height, 16),
+        });
+      });
+    }, []);
+
     const setDraftValue = useCallback((nextDraft: string, options?: { readonly notifyParent?: boolean }) => {
       draftRef.current = nextDraft;
       const textarea = promptTextareaRef.current;
@@ -153,7 +195,8 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
         onDraftChange?.(nextDraft);
       }
       scheduleTextareaHeightSync(textarea);
-    }, [onDraftChange, scheduleTextareaHeightSync]);
+      scheduleCustomCaretSync();
+    }, [onDraftChange, scheduleCustomCaretSync, scheduleTextareaHeightSync]);
 
     useEffect(() => {
       if (draftRef.current !== draftValue) {
@@ -166,11 +209,15 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
 
     useLayoutEffect(() => {
       scheduleTextareaHeightSync();
-    }, [composerAttachments.length, draftValue, scheduleTextareaHeightSync]);
+      scheduleCustomCaretSync();
+    }, [composerAttachments.length, draftValue, scheduleCustomCaretSync, scheduleTextareaHeightSync]);
 
     useEffect(() => () => {
       if (textareaHeightFrameRef.current !== null) {
         cancelAnimationFrame(textareaHeightFrameRef.current);
+      }
+      if (caretFrameRef.current !== null) {
+        cancelAnimationFrame(caretFrameRef.current);
       }
     }, []);
 
@@ -189,8 +236,9 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
         textarea.selectionStart = nextCursor;
         textarea.selectionEnd = nextCursor;
         focusPrompt();
+        scheduleCustomCaretSync();
       });
-    }, [focusPrompt, setDraftValue]);
+    }, [focusPrompt, scheduleCustomCaretSync, setDraftValue]);
 
     const deletePromptText = useCallback((direction: "backward" | "forward") => {
       const textarea = promptTextareaRef.current;
@@ -225,8 +273,9 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
         textarea.selectionStart = deleteFrom;
         textarea.selectionEnd = deleteFrom;
         focusPrompt();
+        scheduleCustomCaretSync();
       });
-    }, [focusPrompt, setDraftValue]);
+    }, [focusPrompt, scheduleCustomCaretSync, setDraftValue]);
 
     const submitPrompt = useCallback(async () => {
       const value = draftRef.current.trim();
@@ -242,9 +291,10 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
         requestAnimationFrame(() => {
           scheduleTextareaHeightSync();
           focusPrompt();
+          scheduleCustomCaretSync();
         });
       }
-    }, [composerAttachments.length, focusPrompt, onSubmit, promptInputDisabled, scheduleTextareaHeightSync, setDraftValue, submitDisabled]);
+    }, [composerAttachments.length, focusPrompt, onSubmit, promptInputDisabled, scheduleCustomCaretSync, scheduleTextareaHeightSync, setDraftValue, submitDisabled]);
 
     useEffect(() => {
       const textarea = promptTextareaRef.current;
@@ -256,6 +306,7 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
         draftRef.current = textarea.value;
         onDraftChange?.(textarea.value);
         scheduleTextareaHeightSync(textarea);
+        scheduleCustomCaretSync();
       };
 
       const handleKeyDown = (event: KeyboardEvent) => {
@@ -278,15 +329,37 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
         focusPrompt();
       };
 
+      const handleFocus = () => {
+        setHasPromptFocus(true);
+        scheduleCustomCaretSync();
+      };
+
+      const handleBlur = () => {
+        setHasPromptFocus(false);
+        scheduleCustomCaretSync();
+      };
+
+      const handleSelect = () => {
+        scheduleCustomCaretSync();
+      };
+
       textarea.addEventListener("input", handleInput);
       textarea.addEventListener("keydown", handleKeyDown);
       textarea.addEventListener("paste", handlePaste);
+      textarea.addEventListener("focus", handleFocus);
+      textarea.addEventListener("blur", handleBlur);
+      textarea.addEventListener("select", handleSelect);
+      window.addEventListener("resize", scheduleCustomCaretSync);
       return () => {
         textarea.removeEventListener("input", handleInput);
         textarea.removeEventListener("keydown", handleKeyDown);
         textarea.removeEventListener("paste", handlePaste);
+        textarea.removeEventListener("focus", handleFocus);
+        textarea.removeEventListener("blur", handleBlur);
+        textarea.removeEventListener("select", handleSelect);
+        window.removeEventListener("resize", scheduleCustomCaretSync);
       };
-    }, [focusPrompt, onAddImageFiles, onDraftChange, scheduleTextareaHeightSync, submitPrompt]);
+    }, [focusPrompt, onAddImageFiles, onDraftChange, scheduleCustomCaretSync, scheduleTextareaHeightSync, submitPrompt]);
 
     useImperativeHandle(ref, () => ({
       focusPrompt,
@@ -321,13 +394,29 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
           ) : null}
           <div className="transcript-prompt__row">
             <div className="transcript-prompt__marker" aria-hidden="true">›</div>
-            <div className="transcript-prompt__inputShell">
+            <div ref={promptInputShellRef} className="transcript-prompt__inputShell">
               <textarea
                 ref={promptTextareaRef}
-                className="transcript-prompt__input transcript-prompt__input--nativeCaret"
+                className={`transcript-prompt__input${showCustomCaret ? " transcript-prompt__input--customCaret" : " transcript-prompt__input--nativeCaret"}`}
                 defaultValue={draftValue}
                 spellCheck={false}
                 disabled={promptInputDisabled}
+              />
+              <div ref={promptMeasureRef} className="transcript-prompt__measure" aria-hidden="true">
+                <span ref={promptMeasureTextRef} />
+                <span ref={promptCaretProbeRef}> </span>
+              </div>
+              <div
+                className="transcript-prompt__customCaret"
+                hidden={!showCustomCaret || !customCaretStyle}
+                style={customCaretStyle
+                  ? {
+                    left: `${customCaretStyle.left}px`,
+                    top: `${customCaretStyle.top}px`,
+                    width: `${customCaretStyle.width}px`,
+                    height: `${customCaretStyle.height}px`,
+                  }
+                  : undefined}
               />
             </div>
           </div>
