@@ -424,6 +424,7 @@ body {
 .transcript-history {
   position: relative;
   display: flex;
+  flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
@@ -467,6 +468,13 @@ body {
   text-transform: none;
 }
 
+.transcript-history__viewport {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 100%;
+  outline: none;
+}
+
 .transcript-history__blockRoot {
   flex: 1 1 auto;
   min-width: 0;
@@ -496,6 +504,7 @@ body {
 .transcript-blockHistory__virtualBlock {
   position: absolute;
   left: 0;
+  top: 0;
   right: 0;
   width: 100%;
   min-width: 0;
@@ -527,6 +536,87 @@ body {
 .transcript-blockHistory__staticBlock[data-has-leading-gap="true"] {
   padding-top: 4px;
   box-sizing: border-box;
+}
+
+.transcript-historyRow {
+  gap: 6px;
+}
+
+.transcript-historyRow--activityGroup,
+.transcript-historyRow--plan,
+.transcript-historyRow--working {
+  padding-top: 2px;
+}
+
+.transcript-historyRow__label {
+  color: #85919d;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+}
+
+.transcript-historyRow__label--user {
+  color: #d6dde5;
+}
+
+.transcript-historyRow__label--assistant {
+  color: #a9d1ff;
+}
+
+.transcript-historyRow__label--system {
+  color: #dec48e;
+}
+
+.transcript-historyRow__messageLine--assistant {
+  color: #d8e1ea;
+}
+
+.transcript-historyRow__messageLine--system {
+  color: #d7c297;
+}
+
+.transcript-historyRow__attachmentLine,
+.transcript-historyRow__activityDetail,
+.transcript-historyRow__planLine {
+  color: #93a0ac;
+}
+
+.transcript-historyRow__activityItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.transcript-historyRow__activitySummary--tool {
+  color: #9bc9ff;
+}
+
+.transcript-historyRow__activitySummary--approval {
+  color: #dfc081;
+}
+
+.transcript-historyRow__activitySummary--error {
+  color: #e49a9a;
+}
+
+.transcript-historyRow__activityDetail {
+  padding-left: 2ch;
+}
+
+.transcript-historyRow__workingLine {
+  color: #9bc9ff;
+  animation: transcript-history-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes transcript-history-pulse {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+
+  50% {
+    opacity: 1;
+  }
 }
 
 .transcript-blockHistory__block {

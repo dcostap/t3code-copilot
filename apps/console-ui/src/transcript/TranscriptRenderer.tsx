@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
   type ChangeEvent as ReactChangeEvent,
@@ -10,13 +11,16 @@ import {
   type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import type { OrchestrationThread } from "@t3tools/contracts";
 
 import type { ComposerImageAttachment } from "../composerAttachments";
+import { TranscriptHistory } from "./TranscriptHistory";
 
 interface TranscriptRendererProps {
   readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
   readonly cwd?: string | null;
   readonly draftValue?: string;
+  readonly thread?: OrchestrationThread | null;
   readonly projectRoot?: string | null;
   readonly paneActive?: boolean;
   readonly interactionMode?: "default" | "plan";
@@ -76,6 +80,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     {
       composerAttachments = [],
       draftValue = "",
+      thread = null,
+      initialScrollOffsetFromBottom,
       paneActive = false,
       interactionMode = "default",
       promptFocusDisabled = false,
@@ -90,14 +96,17 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     ref,
   ) {
     const surfaceRef = useRef<HTMLDivElement | null>(null);
+    const historyRef = useRef<HTMLDivElement | null>(null);
     const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-    const draftRef = useRef("");
+    const draftRef = useRef(draftValue);
+    const textareaHeightFrameRef = useRef<number | null>(null);
     const submittingRef = useRef(false);
     const onSubmitRef = useRef(onSubmit);
     const onDraftChangeRef = useRef(onDraftChange);
     const onScrollOffsetFromBottomChangeRef = useRef(onScrollOffsetFromBottomChange);
     const composerAttachmentsRef = useRef(composerAttachments);
     const [dragOver, setDragOver] = useState(false);
+    const [localDraftValue, setLocalDraftValue] = useState(draftValue);
 
     useEffect(() => {
       onSubmitRef.current = onSubmit;
@@ -120,21 +129,42 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       promptTextareaRef.current?.focus();
     }, [promptFocusDisabled]);
 
-    const setDraftValue = useCallback((nextDraft: string) => {
-      draftRef.current = nextDraft;
-      const textarea = promptTextareaRef.current;
-      if (textarea && textarea.value !== nextDraft) {
-        textarea.value = nextDraft;
-        syncTextareaHeight(textarea);
+    const scheduleTextareaHeightSync = useCallback((textarea: HTMLTextAreaElement | null = promptTextareaRef.current) => {
+      if (!textarea) {
+        return;
       }
-      onDraftChangeRef.current?.(nextDraft);
+      if (textareaHeightFrameRef.current !== null) {
+        cancelAnimationFrame(textareaHeightFrameRef.current);
+      }
+      textareaHeightFrameRef.current = requestAnimationFrame(() => {
+        textareaHeightFrameRef.current = null;
+        syncTextareaHeight(textarea);
+      });
+    }, []);
+
+    const setDraftValue = useCallback((nextDraft: string, options?: { readonly notifyParent?: boolean }) => {
+      draftRef.current = nextDraft;
+      setLocalDraftValue((existing) => existing === nextDraft ? existing : nextDraft);
+      if (options?.notifyParent !== false) {
+        onDraftChangeRef.current?.(nextDraft);
+      }
     }, []);
 
     useEffect(() => {
       if (draftRef.current !== draftValue) {
-        setDraftValue(draftValue);
+        setDraftValue(draftValue, { notifyParent: false });
       }
     }, [draftValue, setDraftValue]);
+
+    useLayoutEffect(() => {
+      scheduleTextareaHeightSync();
+    }, [composerAttachments.length, localDraftValue, scheduleTextareaHeightSync]);
+
+    useEffect(() => () => {
+      if (textareaHeightFrameRef.current !== null) {
+        cancelAnimationFrame(textareaHeightFrameRef.current);
+      }
+    }, []);
 
     const insertPromptText = useCallback((text: string) => {
       const textarea = promptTextareaRef.current;
@@ -202,18 +232,21 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       } finally {
         submittingRef.current = false;
         requestAnimationFrame(() => {
-          syncTextareaHeight(promptTextareaRef.current);
+          scheduleTextareaHeightSync();
           focusPrompt();
         });
       }
-    }, [focusPrompt, promptInputDisabled, setDraftValue, submitDisabled]);
+    }, [focusPrompt, promptInputDisabled, scheduleTextareaHeightSync, setDraftValue, submitDisabled]);
 
     const handlePromptChange = useCallback((event: ReactChangeEvent<HTMLTextAreaElement>) => {
       setDraftValue(event.currentTarget.value);
-      syncTextareaHeight(event.currentTarget);
     }, [setDraftValue]);
 
     const handlePromptKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+      event.stopPropagation();
+      if (event.nativeEvent.isComposing) {
+        return;
+      }
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         void submitPrompt();
@@ -268,19 +301,34 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       focusPrompt() {
         focusPrompt();
       },
-      focusHistory() {},
+      focusHistory() {
+        historyRef.current?.focus();
+      },
       hasFocusWithinPane() {
         return Boolean(surfaceRef.current && surfaceRef.current.contains(document.activeElement));
       },
       openSearch() {},
       isHistoryActive() {
-        return false;
+        return document.activeElement === historyRef.current;
       },
       hasHistorySelection() {
-        return false;
+        return hasNonCollapsedSelectionInsideElement(historyRef.current);
       },
       selectAllHistory() {
-        return false;
+        const historyElement = historyRef.current;
+        if (!historyElement || typeof window === "undefined") {
+          return false;
+        }
+        const selection = window.getSelection();
+        if (!selection) {
+          return false;
+        }
+        const range = document.createRange();
+        range.selectNodeContents(historyElement);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        historyElement.focus();
+        return true;
       },
       insertPromptText(text: string) {
         insertPromptText(text);
@@ -294,12 +342,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       submitPrompt() {
         void submitPrompt();
       },
-      scrollToBottom() {},
+      scrollToBottom() {
+        const historyElement = historyRef.current;
+        if (!historyElement) {
+          return;
+        }
+        historyElement.scrollTop = historyElement.scrollHeight;
+      },
     }), [deletePromptText, focusPrompt, insertPromptText, submitPrompt]);
-
-    useEffect(() => {
-      syncTextareaHeight(promptTextareaRef.current);
-    }, []);
 
     return (
       <div
@@ -310,10 +360,18 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         onDragLeave={handleSurfaceDragLeave}
         onDrop={handleSurfaceDrop}
       >
-        <div className="transcript-history" aria-hidden="true">
-          <div className="transcript-history__state transcript-history__state--ready">
-            <div className="transcript-history__stateText">Transcript history removed</div>
-          </div>
+        <div
+          ref={historyRef}
+          className="transcript-history"
+          tabIndex={-1}
+          aria-label="Conversation history"
+        >
+          <TranscriptHistory
+            thread={thread}
+            initialScrollOffsetFromBottom={initialScrollOffsetFromBottom}
+            onScrollOffsetFromBottomChange={onScrollOffsetFromBottomChange}
+            scrollContainerRef={historyRef}
+          />
         </div>
         <div className={`transcript-prompt${interactionMode === "plan" ? " transcript-prompt--compact" : ""}`}>
           <div className="transcript-prompt__body">
@@ -337,7 +395,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
                 <textarea
                   ref={promptTextareaRef}
                   className="transcript-prompt__input transcript-prompt__input--nativeCaret"
-                  defaultValue={draftValue}
+                  value={localDraftValue}
                   spellCheck={false}
                   disabled={promptInputDisabled}
                   onChange={handlePromptChange}

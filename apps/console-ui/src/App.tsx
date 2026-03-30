@@ -361,6 +361,7 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
       interactionMode={paneView.interactionMode}
       promptFocusDisabled={paletteOpen || hasBlockingModal}
       promptInputDisabled={hasBlockingModal}
+      thread={paneView.thread}
       onAddImageFiles={handleAddImages}
       onDraftChange={handleDraftChange}
       onRemoveImage={handleRemoveImage}
@@ -1423,7 +1424,6 @@ export function App() {
   const previousRunningByThreadIdRef = useRef<ReadonlyMap<OrchestrationThread["id"], boolean>>(new Map());
   const topbarRef = useRef<HTMLDivElement | null>(null);
   const topbarTabButtonRefs = useRef(new Map<string, HTMLButtonElement>());
-  composerDraftByPaneIdRef.current = composerDraftByPaneId;
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
   const topbarMaskId = `project-topbar-mask-${useId().replaceAll(":", "")}`;
   useEffect(() => {
@@ -3155,6 +3155,9 @@ export function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      const activeElement = typeof document !== "undefined" ? document.activeElement : null;
+      const hasEditableFocus = isEditableTarget(activeElement);
+
       if (isPaletteToggleShortcut(event)) {
         event.preventDefault();
         const nextPaletteState = resolvePaletteShortcutTransition({
@@ -3191,6 +3194,10 @@ export function App() {
 
       const activePaneHandle = activePaneId ? paneRefs.current[activePaneId] : null;
       if (hasBlockingModal) {
+        return;
+      }
+
+      if (event.isComposing || hasEditableFocus) {
         return;
       }
 
@@ -3251,17 +3258,6 @@ export function App() {
         event.preventDefault();
         activePaneHandle?.selectAllHistory();
         return;
-      }
-
-      if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
-        event.preventDefault();
-        activePaneHandle?.insertPromptText(event.key);
-        return;
-      }
-
-      if (event.key === "Backspace") {
-        event.preventDefault();
-        activePaneHandle?.deletePromptBackward();
       }
     };
 
@@ -3850,7 +3846,7 @@ export function App() {
                         <div className="transcript-shell">
                           <ConversationPaneTranscript
                             paneView={paneView}
-                            draftValue={composerDraftByPaneId[paneView.pane.id] ?? ""}
+                            draftValue={composerDraftByPaneIdRef.current[paneView.pane.id] ?? ""}
                             paletteOpen={paletteOpen}
                             hasBlockingModal={hasBlockingModal}
                             submitDisabled={
