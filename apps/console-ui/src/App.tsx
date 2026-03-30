@@ -1,7 +1,6 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   type CodexReasoningEffort,
-  type OrchestrationEvent,
   type OrchestrationProject,
   type OrchestrationThread,
   type ProviderKind,
@@ -16,7 +15,6 @@ import {
   useCallback,
   useEffect,
   useId,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -73,7 +71,6 @@ import {
 import {
   formatPendingUserInputAnswersAsPrompt,
   resolvePendingUserInputAnswer,
-  resolvePendingUserInputShortcut,
 } from "./pendingUserInput";
 import { readClientPlatform, resolveDesktopWindowControlsInsetPx } from "./windowControls";
 import {
@@ -81,13 +78,6 @@ import {
   TranscriptRenderer,
   type TranscriptRendererHandle,
 } from "./transcript";
-import type { AnnotatedLine, InlineDiffLookup, TranscriptBlock } from "./transcript/TranscriptBlock";
-import type { TranscriptBlockRowDefinition } from "./transcript/transcriptRows";
-import {
-  buildThreadTranscriptBlocksResult,
-  type ThreadTranscriptBlocksComputationRequest,
-  type ThreadTranscriptBlocksComputationResponse,
-} from "./transcript/threadTranscriptBlocksLoader";
 import { useConsoleData, type PendingConsoleThread } from "./consoleData/useConsoleData";
 import { formatProviderModelSelectionLabel } from "./providerModelLabels";
 import {
@@ -97,8 +87,7 @@ import {
   type ConsolePaneSetup,
   type ConsoleProjectPane,
 } from "./consoleSessions";
-import { resolveWsHttpOrigin } from "./wsTransport";
-import { recordSlowTranscriptSwitchDiagnostic, recordTranscriptSwitchDiagnostic } from "./transcriptSwitchDiagnostics";
+import { recordTranscriptSwitchDiagnostic } from "./transcriptSwitchDiagnostics";
 
 const DRAFT_STORAGE_KEY = "t3code:console-pane-drafts:v1";
 const ARCHIVED_PROJECT_IDS_STORAGE_KEY = "t3code:archived-project-ids:v1";
@@ -119,9 +108,6 @@ interface AppPaletteCommand extends CommandPaletteCommand {
 const PALETTE_PROVIDER_SWITCH_DEFAULT_MODEL = "gpt-5.4" as const;
 const HIGH_PRIORITY_COMMAND = 100;
 const CURATED_REASONING_EFFORTS = ["high", "medium"] as const satisfies ReadonlyArray<CodexReasoningEffort>;
-const EMPTY_TRANSCRIPT_BLOCKS: ReadonlyArray<TranscriptBlock> = [];
-const EMPTY_TRANSCRIPT_BLOCK_LINES: ReadonlyArray<ReadonlyArray<AnnotatedLine>> = [];
-const EMPTY_TRANSCRIPT_BLOCK_ROWS: ReadonlyArray<ReadonlyArray<TranscriptBlockRowDefinition>> = [];
 interface ManualModelCommandDefinition {
   readonly slug: string;
   readonly label: string;
@@ -308,11 +294,6 @@ interface PaneView {
   readonly thread: OrchestrationThread | null;
   readonly pendingThread: PendingConsoleThread | null;
   readonly setup: ConsolePaneSetup | null;
-  readonly blocks: ReadonlyArray<TranscriptBlock>;
-  readonly blockLines: ReadonlyArray<ReadonlyArray<AnnotatedLine>>;
-  readonly blockRows: ReadonlyArray<ReadonlyArray<TranscriptBlockRowDefinition>>;
-  readonly historyState: "ready" | "loading" | "error";
-  readonly historyStateMessage: string | null;
   readonly attachments: ReadonlyArray<ComposerImageAttachment>;
   readonly pendingPromptSendStartedAt: string | null;
   readonly pendingUserInput: ReturnType<ReturnType<typeof useConsoleData>["getPendingUserInputs"]>[number] | null;
@@ -328,52 +309,29 @@ interface PaneView {
 
 interface ConversationPaneTranscriptProps {
   readonly paneView: PaneView;
-  readonly pendingQuestionDraft: string | undefined;
+  readonly draftValue: string;
   readonly paletteOpen: boolean;
   readonly hasBlockingModal: boolean;
-  readonly initialScrollOffsetFromBottom: number | null;
   readonly submitDisabled: boolean;
   readonly registerPaneHandle: (paneId: string, handle: TranscriptRendererHandle | null) => void;
   readonly setComposerDraftForPane: (paneId: string, value: string) => void;
   readonly handleAddImageFilesForPane: (paneId: string, files: ReadonlyArray<File>) => void;
   readonly handleRemoveImageForPane: (paneId: string, attachmentId: string) => void;
-  readonly handlePaneScrollOffsetChange: (paneId: string, offsetFromBottom: number) => void;
-  readonly getTurnDiff: ReturnType<typeof useConsoleData>["getTurnDiff"];
   readonly handleSubmit: (paneView: PaneView, value: string) => Promise<void>;
 }
 
 const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
   paneView,
-  pendingQuestionDraft,
+  draftValue,
   paletteOpen,
   hasBlockingModal,
-  initialScrollOffsetFromBottom,
   submitDisabled,
   registerPaneHandle,
   setComposerDraftForPane,
   handleAddImageFilesForPane,
   handleRemoveImageForPane,
-  handlePaneScrollOffsetChange,
-  getTurnDiff,
   handleSubmit,
 }: ConversationPaneTranscriptProps) {
-  const pendingQuestionOptionIndex = useMemo(() => {
-    const pendingQuestion = paneView.pendingQuestion;
-    if (!pendingQuestion) {
-      return null;
-    }
-    const pendingQuestionDraftAnswer =
-      paneView.draftAnswers[pendingQuestion.id] ?? null;
-    const pendingQuestionOptionShortcut = pendingQuestionDraft
-      ? resolvePendingUserInputShortcut(pendingQuestionDraft, pendingQuestion.options)
-      : null;
-    const pendingQuestionAnsweredOptionIndex = pendingQuestionDraftAnswer
-      ? pendingQuestion.options.findIndex((option) => option.label === pendingQuestionDraftAnswer)
-      : -1;
-    return pendingQuestionOptionShortcut?.optionIndex
-      ?? (pendingQuestionAnsweredOptionIndex >= 0 ? pendingQuestionAnsweredOptionIndex : null);
-  }, [paneView.draftAnswers, paneView.pendingQuestion, pendingQuestionDraft]);
-
   const handleTranscriptRef = useCallback((handle: TranscriptRendererHandle | null) => {
     registerPaneHandle(paneView.pane.id, handle);
   }, [paneView.pane.id, registerPaneHandle]);
@@ -390,97 +348,27 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
     handleRemoveImageForPane(paneView.pane.id, attachmentId);
   }, [handleRemoveImageForPane, paneView.pane.id]);
 
-  const handleScrollOffsetChange = useCallback((offsetFromBottom: number) => {
-    handlePaneScrollOffsetChange(paneView.pane.id, offsetFromBottom);
-  }, [handlePaneScrollOffsetChange, paneView.pane.id]);
-
-  const handleResolveInlineDiff = useCallback((lookup: InlineDiffLookup) =>
-    getTurnDiff({
-      threadId: lookup.threadId as ThreadId,
-      fromTurnCount: lookup.fromTurnCount,
-      toTurnCount: lookup.toTurnCount,
-    }),
-  [getTurnDiff]);
-
   const handleTranscriptSubmit = useCallback((value: string) => handleSubmit(paneView, value), [handleSubmit, paneView]);
-
-  useLayoutEffect(() => {
-    recordTranscriptSwitchDiagnostic({
-      label: "pane-transcript-commit",
-      paneId: paneView.pane.id,
-      threadId: paneView.threadId,
-      historyCacheKey: paneView.threadId ?? paneView.pane.id,
-      blockCount: paneView.blocks.length,
-    });
-  }, [paneView.blocks.length, paneView.pane.id, paneView.threadId]);
 
   return (
     <TranscriptRenderer
       ref={handleTranscriptRef}
-      blocks={paneView.blocks}
-      precomputedBlockLines={paneView.blockLines}
-      precomputedBlockRows={paneView.blockRows}
-      historyCacheKey={paneView.threadId ?? paneView.pane.id}
-      historyState={paneView.historyState}
-      {...(paneView.historyStateMessage ? { historyStateMessage: paneView.historyStateMessage } : {})}
       composerAttachments={paneView.attachments}
       cwd={paneView.cwd}
+      draftValue={draftValue}
       projectRoot={paneView.project.workspaceRoot}
       paneActive={paneView.isActive}
       interactionMode={paneView.interactionMode}
       promptFocusDisabled={paletteOpen || hasBlockingModal}
       promptInputDisabled={hasBlockingModal}
-      {...(paneView.pendingUserInput && paneView.pendingQuestion
-        ? {
-            pendingUserInputHighlight: {
-              requestId: paneView.pendingUserInput.requestId,
-              questionIndex: paneView.pendingQuestionIndex,
-              ...(pendingQuestionOptionIndex !== null
-                ? { optionIndex: pendingQuestionOptionIndex }
-                : {}),
-            },
-          }
-        : {})}
       onAddImageFiles={handleAddImages}
       onDraftChange={handleDraftChange}
       onRemoveImage={handleRemoveImage}
-      initialScrollOffsetFromBottom={initialScrollOffsetFromBottom}
-      onScrollOffsetFromBottomChange={handleScrollOffsetChange}
-      resolveInlineDiff={handleResolveInlineDiff}
       onSubmit={handleTranscriptSubmit}
       submitDisabled={submitDisabled}
     />
   );
 });
-
-interface PaneScrollState {
-  readonly offsetFromBottom: number;
-}
-
-interface TranscriptBlocksCacheEntryInput {
-  readonly messages: OrchestrationThread["messages"];
-  readonly activities: OrchestrationThread["activities"];
-  readonly checkpoints: OrchestrationThread["checkpoints"];
-  readonly proposedPlans: OrchestrationThread["proposedPlans"];
-  readonly latestTurn: OrchestrationThread["latestTurn"];
-  readonly session: OrchestrationThread["session"];
-  readonly updatedAt: OrchestrationThread["updatedAt"];
-  readonly events: ReadonlyArray<OrchestrationEvent>;
-  readonly effectiveNow?: string;
-}
-
-interface TranscriptBlocksCacheEntry extends TranscriptBlocksCacheEntryInput {
-  readonly status: "loading" | "ready" | "error";
-  readonly requestId: number;
-  readonly blocks: ReadonlyArray<TranscriptBlock>;
-  readonly blockLines: ReadonlyArray<ReadonlyArray<AnnotatedLine>>;
-  readonly blockRows: ReadonlyArray<ReadonlyArray<TranscriptBlockRowDefinition>>;
-  readonly error?: string;
-}
-
-interface VisibleThreadTranscriptBlocksRequest extends TranscriptBlocksCacheEntryInput {
-  readonly thread: OrchestrationThread;
-}
 
 interface ThreadStatusDescriptor {
   readonly tone: "working" | "waiting" | "idle" | "error";
@@ -495,28 +383,6 @@ interface SidebarThreadEntry {
   readonly tooltip: string;
   readonly sidebarLabel: string | null;
   readonly ageMs: number;
-}
-
-export function isTranscriptBlocksCacheEntryCurrent(
-  entry: TranscriptBlocksCacheEntry | null | undefined,
-  input: TranscriptBlocksCacheEntryInput,
-) {
-  return Boolean(
-    entry
-    && entry.messages === input.messages
-    && entry.activities === input.activities
-    && entry.checkpoints === input.checkpoints
-    && entry.proposedPlans === input.proposedPlans
-    && entry.latestTurn === input.latestTurn
-    && entry.session === input.session
-    && entry.updatedAt === input.updatedAt
-    && entry.events === input.events
-  );
-}
-
-function postThreadTranscriptBlocksRequest(worker: Worker, payload: ThreadTranscriptBlocksComputationRequest) {
-  const postMessage = Reflect.get(worker, "postMessage") as (message: ThreadTranscriptBlocksComputationRequest) => void;
-  postMessage.call(worker, payload);
 }
 
 interface ProjectContextMenuState {
@@ -1490,8 +1356,6 @@ export function App() {
   });
 
   const getPendingUserInputs = consoleData.getPendingUserInputs;
-  const getThreadEvents = consoleData.getThreadEvents;
-  const getTurnDiff = consoleData.getTurnDiff;
   const isThreadTurnRunning = consoleData.isThreadTurnRunning;
   const canSubmitPromptForThread = consoleData.canSubmitPromptForThread;
   const createThread = consoleData.createThread;
@@ -1502,7 +1366,6 @@ export function App() {
   const deleteThread = consoleData.deleteThread;
 
   const [nowIso, setNowIso] = useState(() => new Date().toISOString());
-  const [animationNowIso, setAnimationNowIso] = useState(() => new Date().toISOString());
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
@@ -1511,7 +1374,6 @@ export function App() {
   const [pendingPromptSendStartedAtByThreadId, setPendingPromptSendStartedAtByThreadId] = useState<Record<string, string>>({});
   const [composerAttachmentsByPaneId, setComposerAttachmentsByPaneId] = useState<Record<string, ReadonlyArray<ComposerImageAttachment>>>({});
   const [composerDraftByPaneId, setComposerDraftByPaneId] = useState<Record<string, string>>(() => readPersistedPaneDrafts());
-  const [paneScrollStateByPaneId, setPaneScrollStateByPaneId] = useState<Record<string, PaneScrollState>>({});
   const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<Record<string, Record<string, string>>>({});
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] = useState<Record<string, number>>({});
   const [pendingDraftPaneIds, setPendingDraftPaneIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -1564,30 +1426,12 @@ export function App() {
   composerDraftByPaneIdRef.current = composerDraftByPaneId;
   composerAttachmentsRef.current = composerAttachmentsByPaneId;
   const topbarMaskId = `project-topbar-mask-${useId().replaceAll(":", "")}`;
-  const hasAnimatedTranscript = useMemo(
-    () =>
-      Object.keys(pendingPromptSendStartedAtByThreadId).length > 0
-      || consoleData.threads.some((thread) => isThreadTurnRunning(thread.id)),
-    [consoleData.threads, isThreadTurnRunning, pendingPromptSendStartedAtByThreadId],
-  );
-
   useEffect(() => {
     const handle = window.setInterval(() => {
       setNowIso(new Date().toISOString());
     }, 1000);
     return () => window.clearInterval(handle);
   }, []);
-
-  useEffect(() => {
-    if (!hasAnimatedTranscript) {
-      setAnimationNowIso(new Date().toISOString());
-      return;
-    }
-    const handle = window.setInterval(() => {
-      setAnimationNowIso(new Date().toISOString());
-    }, 120);
-    return () => window.clearInterval(handle);
-  }, [hasAnimatedTranscript]);
 
   useEffect(() => {
     persistPaneDrafts(composerDraftByPaneId);
@@ -1742,10 +1586,6 @@ export function App() {
       return Object.keys(next).length === Object.keys(existing).length ? existing : next;
     });
     setPendingThreadByPaneId((existing) => {
-      const next = Object.fromEntries(Object.entries(existing).filter(([paneId]) => livePaneIdSet.has(paneId)));
-      return Object.keys(next).length === Object.keys(existing).length ? existing : next;
-    });
-    setPaneScrollStateByPaneId((existing) => {
       const next = Object.fromEntries(Object.entries(existing).filter(([paneId]) => livePaneIdSet.has(paneId)));
       return Object.keys(next).length === Object.keys(existing).length ? existing : next;
     });
@@ -2085,201 +1925,10 @@ export function App() {
     });
   }, []);
 
-  const handlePaneScrollOffsetChange = useCallback((paneId: string, offsetFromBottom: number) => {
-    setPaneScrollStateByPaneId((existing) => {
-      const current = existing[paneId];
-      if (current?.offsetFromBottom === offsetFromBottom) {
-        return existing;
-      }
-      return {
-        ...existing,
-        [paneId]: { offsetFromBottom },
-      };
-    });
-  }, []);
-
   const activeLayout = workspace.activeLayout;
   const activeTab = workspace.activeTab;
-  const attachmentPreviewBaseUrl = useMemo(resolveWsHttpOrigin, []);
-  const transcriptBlocksCacheRef = useRef<Map<OrchestrationThread["id"], TranscriptBlocksCacheEntry>>(new Map());
-  const transcriptBlocksWorkerRef = useRef<Worker | null>(null);
-  const transcriptBlocksRequestIdRef = useRef(0);
-  const transcriptBlocksTimeoutsRef = useRef<Map<OrchestrationThread["id"], number>>(new Map());
-  const [transcriptBlocksRevision, setTranscriptBlocksRevision] = useState(0);
-  const visibleThreadTranscriptBlockRequests = useMemo<ReadonlyArray<VisibleThreadTranscriptBlocksRequest>>(() => {
-    if (!activeLayout || !activeTab) {
-      return [];
-    }
-
-    const requests = new Map<OrchestrationThread["id"], VisibleThreadTranscriptBlocksRequest>();
-    for (const paneId of activeTab.paneIds) {
-      const pane = activeLayout.panesById[paneId];
-      if (!pane || pane.kind !== "thread") {
-        continue;
-      }
-      const thread = consoleData.threads.find((candidate) => candidate.id === pane.threadId) ?? null;
-      if (!thread || requests.has(thread.id)) {
-        continue;
-      }
-      const events = getThreadEvents(thread.id);
-      const effectiveNow = (isThreadTurnRunning(thread.id) || pendingPromptSendStartedAtByThreadId[thread.id])
-        ? animationNowIso
-        : undefined;
-      requests.set(thread.id, {
-        thread,
-        messages: thread.messages,
-        activities: thread.activities,
-        checkpoints: thread.checkpoints,
-        proposedPlans: thread.proposedPlans,
-        latestTurn: thread.latestTurn,
-        session: thread.session,
-        updatedAt: thread.updatedAt,
-        events,
-        ...(effectiveNow ? { effectiveNow } : {}),
-      });
-    }
-
-    return [...requests.values()];
-  }, [
-    activeLayout,
-    activeTab,
-    animationNowIso,
-    consoleData.threads,
-    getThreadEvents,
-    isThreadTurnRunning,
-    pendingPromptSendStartedAtByThreadId,
-  ]);
-
-  useEffect(() => {
-    if (typeof Worker !== "function") {
-      return;
-    }
-
-    const worker = new Worker(new URL("./transcript/threadTranscriptBlocks.worker.ts", import.meta.url), {
-      type: "module",
-    });
-    transcriptBlocksWorkerRef.current = worker;
-
-    const handleMessage = (event: MessageEvent<ThreadTranscriptBlocksComputationResponse>) => {
-      const result = event.data;
-      const cached = transcriptBlocksCacheRef.current.get(result.threadId);
-      if (cached === undefined || cached.requestId !== result.requestId) {
-        return;
-      }
-      if (result.kind === "ready") {
-        const { error: _error, ...cachedWithoutError } = cached;
-        transcriptBlocksCacheRef.current.set(result.threadId, {
-          ...cachedWithoutError,
-          status: "ready",
-          blocks: result.blocks,
-          blockLines: result.blockLines,
-          blockRows: result.blockRows,
-        });
-      } else {
-        transcriptBlocksCacheRef.current.set(result.threadId, {
-          ...cached,
-          status: "error",
-          error: result.error,
-        });
-      }
-      setTranscriptBlocksRevision((current) => current + 1);
-    };
-    const handleError = () => {
-      transcriptBlocksWorkerRef.current = null;
-    };
-    worker.addEventListener("message", handleMessage);
-    worker.addEventListener("error", handleError);
-
-    return () => {
-      transcriptBlocksWorkerRef.current = null;
-      worker.removeEventListener("message", handleMessage);
-      worker.removeEventListener("error", handleError);
-      worker.terminate();
-    };
-  }, []);
-
-  useEffect(() => {
-    for (const request of visibleThreadTranscriptBlockRequests) {
-      if (request.effectiveNow !== undefined) {
-        continue;
-      }
-
-      const cached = transcriptBlocksCacheRef.current.get(request.thread.id);
-      if (
-        cached
-        && isTranscriptBlocksCacheEntryCurrent(cached, request)
-        && (cached.status === "loading" || cached.status === "ready")
-      ) {
-        continue;
-      }
-
-      const requestId = transcriptBlocksRequestIdRef.current + 1;
-      transcriptBlocksRequestIdRef.current = requestId;
-      transcriptBlocksCacheRef.current.set(request.thread.id, {
-        ...request,
-        status: "loading",
-        requestId,
-        blocks: cached?.blocks ?? EMPTY_TRANSCRIPT_BLOCKS,
-        blockLines: cached?.blockLines ?? EMPTY_TRANSCRIPT_BLOCK_LINES,
-        blockRows: cached?.blockRows ?? EMPTY_TRANSCRIPT_BLOCK_ROWS,
-      });
-
-      const payload: ThreadTranscriptBlocksComputationRequest = {
-        threadId: request.thread.id,
-        requestId,
-        thread: request.thread,
-        orchestrationEvents: request.events,
-        attachmentPreviewBaseUrl,
-      };
-
-      if (transcriptBlocksWorkerRef.current) {
-        postThreadTranscriptBlocksRequest(transcriptBlocksWorkerRef.current, payload);
-        continue;
-      }
-
-      const existingTimeout = transcriptBlocksTimeoutsRef.current.get(request.thread.id);
-      if (existingTimeout !== undefined) {
-        window.clearTimeout(existingTimeout);
-      }
-      const timeoutId = window.setTimeout(() => {
-        transcriptBlocksTimeoutsRef.current.delete(request.thread.id);
-        const latestEntry = transcriptBlocksCacheRef.current.get(request.thread.id);
-        if (!latestEntry || latestEntry.requestId !== requestId) {
-          return;
-        }
-        try {
-          const { blocks, blockLines, blockRows } = buildThreadTranscriptBlocksResult(payload);
-          const { error: _error, ...latestEntryWithoutError } = latestEntry;
-          transcriptBlocksCacheRef.current.set(request.thread.id, {
-            ...latestEntryWithoutError,
-            status: "ready",
-            blocks,
-            blockLines,
-            blockRows,
-          });
-        } catch (error) {
-          transcriptBlocksCacheRef.current.set(request.thread.id, {
-            ...latestEntry,
-            status: "error",
-            error: error instanceof Error ? error.message : "Failed to load thread history.",
-          });
-        }
-        setTranscriptBlocksRevision((current) => current + 1);
-      }, 0);
-      transcriptBlocksTimeoutsRef.current.set(request.thread.id, timeoutId);
-    }
-  }, [attachmentPreviewBaseUrl, visibleThreadTranscriptBlockRequests]);
-
-  useEffect(() => () => {
-    for (const timeoutId of transcriptBlocksTimeoutsRef.current.values()) {
-      window.clearTimeout(timeoutId);
-    }
-    transcriptBlocksTimeoutsRef.current.clear();
-  }, []);
 
   const paneViews = useMemo<ReadonlyArray<PaneView>>(() => {
-    const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-    void transcriptBlocksRevision;
     const activeProject = workspace.activeProject;
     if (!activeProject || !activeLayout || !activeTab) {
       return [];
@@ -2310,92 +1959,9 @@ export function App() {
         const modelOptions = thread?.modelOptions
           ?? pendingThread?.modelOptions
           ?? (pane.kind === "draft" ? pane.setup.selectedModelOptions : undefined);
-        const effectiveNow = thread && (isThreadTurnRunning(thread.id) || pendingPromptSendStartedAtByThreadId[thread.id])
-          ? animationNowIso
-          : undefined;
         const pendingPromptSendStartedAt = pane.kind === "thread"
           ? pendingPromptSendStartedAtByThreadId[pane.threadId] ?? null
           : null;
-        const transcriptBlocksInput = thread
-          ? {
-              messages: thread.messages,
-              activities: thread.activities,
-              checkpoints: thread.checkpoints,
-              proposedPlans: thread.proposedPlans,
-              latestTurn: thread.latestTurn,
-              session: thread.session,
-              updatedAt: thread.updatedAt,
-              events: getThreadEvents(thread.id),
-              ...(effectiveNow ? { effectiveNow } : {}),
-            } satisfies TranscriptBlocksCacheEntryInput
-          : null;
-        const cachedBlocks = thread ? (transcriptBlocksCacheRef.current.get(thread.id) ?? null) : null;
-        let blocks = EMPTY_TRANSCRIPT_BLOCKS;
-        let blockLines = EMPTY_TRANSCRIPT_BLOCK_LINES;
-        let blockRows = EMPTY_TRANSCRIPT_BLOCK_ROWS;
-        let historyState: PaneView["historyState"] = "ready";
-        let historyStateMessage: string | null = null;
-
-        if (thread && transcriptBlocksInput) {
-          const buildVisibleThreadBlocksSynchronously = () => {
-            const syncBuildStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-            const computed = buildThreadTranscriptBlocksResult({
-              thread,
-              orchestrationEvents: transcriptBlocksInput.events,
-              attachmentPreviewBaseUrl,
-              ...(effectiveNow ? { now: effectiveNow } : {}),
-            });
-            blocks = computed.blocks;
-            blockLines = computed.blockLines;
-            blockRows = computed.blockRows;
-            transcriptBlocksCacheRef.current.set(thread.id, {
-              ...transcriptBlocksInput,
-              status: "ready",
-              requestId: cachedBlocks?.requestId ?? 0,
-              blocks,
-              blockLines,
-              blockRows,
-            });
-            recordSlowTranscriptSwitchDiagnostic({
-              label: "sync-build-visible-thread-blocks",
-              threadId: thread.id,
-              paneId: pane.id,
-              historyCacheKey: thread.id,
-              blockCount: computed.blocks.length,
-            }, syncBuildStartedAt, 12);
-          };
-
-          if (
-            effectiveNow !== undefined
-            && cachedBlocks
-            && isTranscriptBlocksCacheEntryCurrent(cachedBlocks, transcriptBlocksInput)
-            && cachedBlocks.status === "ready"
-          ) {
-            blocks = cachedBlocks.blocks;
-            blockLines = cachedBlocks.blockLines;
-            blockRows = cachedBlocks.blockRows;
-          } else if (effectiveNow !== undefined) {
-            buildVisibleThreadBlocksSynchronously();
-          } else if (cachedBlocks && isTranscriptBlocksCacheEntryCurrent(cachedBlocks, transcriptBlocksInput)) {
-            blocks = cachedBlocks.blocks;
-            blockLines = cachedBlocks.blockLines;
-            blockRows = cachedBlocks.blockRows;
-            if (cachedBlocks.status === "error" && cachedBlocks.blocks.length === 0) {
-              historyState = "error";
-              historyStateMessage = cachedBlocks.error ?? "Failed to load thread history.";
-            } else if (cachedBlocks.status === "loading" && cachedBlocks.blocks.length === 0) {
-              historyState = "loading";
-              historyStateMessage = "loading thread history";
-            }
-          } else if (cachedBlocks?.blocks.length) {
-            blocks = cachedBlocks.blocks;
-            blockLines = cachedBlocks.blockLines;
-            blockRows = cachedBlocks.blockRows;
-          } else {
-            historyState = "loading";
-            historyStateMessage = "loading thread history";
-          }
-        }
 
         return [{
           project: activeProject,
@@ -2406,20 +1972,6 @@ export function App() {
           thread,
           pendingThread,
           setup: pane.kind === "draft" ? pane.setup : null,
-          blocks: thread && pendingPromptSendStartedAt && effectiveNow && !isThreadTurnRunning(thread.id)
-            ? [
-                ...blocks,
-                {
-                  type: "sending-state" as const,
-                  startedAt: pendingPromptSendStartedAt,
-                  now: effectiveNow,
-                },
-              ]
-            : blocks,
-          blockLines,
-          historyState,
-          historyStateMessage,
-          blockRows,
           attachments: composerAttachmentsByPaneId[pane.id] ?? [],
           pendingPromptSendStartedAt,
           pendingUserInput,
@@ -2435,10 +1987,6 @@ export function App() {
           modelOptions,
         } satisfies PaneView];
       });
-    recordSlowTranscriptSwitchDiagnostic({
-      label: "pane-views-built",
-      paneId: activeTab.activePaneId,
-    }, startedAt, 12);
     return nextPaneViews;
   }, [
     activeLayout,
@@ -2446,16 +1994,11 @@ export function App() {
     composerAttachmentsByPaneId,
     consoleData.threads,
     getPendingUserInputs,
-    isThreadTurnRunning,
-    animationNowIso,
     pendingPromptSendStartedAtByThreadId,
     pendingThreadByPaneId,
     pendingUserInputAnswersByRequestId,
     pendingUserInputQuestionIndexByRequestId,
     projects,
-    getThreadEvents,
-    transcriptBlocksRevision,
-    attachmentPreviewBaseUrl,
     workspace.activeProject,
   ]);
 
@@ -3692,7 +3235,7 @@ export function App() {
       const hasSelectionInDocument =
         typeof window !== "undefined"
         && typeof document !== "undefined"
-        && hasNonCollapsedSelectionInsideElement(window.getSelection(), document.body);
+        && hasNonCollapsedSelectionInsideElement(document.body);
       const hasSelectionInActiveHistory = paneRefs.current[activePaneId]?.hasHistorySelection() ?? false;
       if (shouldBlockGlobalPromptTypingForSelection({ hasSelectionInDocument, hasSelectionInActiveHistory })) {
         return;
@@ -4307,10 +3850,9 @@ export function App() {
                         <div className="transcript-shell">
                           <ConversationPaneTranscript
                             paneView={paneView}
-                            pendingQuestionDraft={paneView.pendingQuestion ? (composerDraftByPaneId[paneView.pane.id] ?? "") : undefined}
+                            draftValue={composerDraftByPaneId[paneView.pane.id] ?? ""}
                             paletteOpen={paletteOpen}
                             hasBlockingModal={hasBlockingModal}
-                            initialScrollOffsetFromBottom={paneScrollStateByPaneId[paneView.pane.id]?.offsetFromBottom ?? null}
                             submitDisabled={
                               pendingDraftPaneIds.has(paneView.pane.id)
                               || paneView.pendingPromptSendStartedAt !== null
@@ -4322,8 +3864,6 @@ export function App() {
                             setComposerDraftForPane={setComposerDraftForPane}
                             handleAddImageFilesForPane={handleAddImageFilesForPane}
                             handleRemoveImageForPane={handleRemoveImageForPane}
-                            handlePaneScrollOffsetChange={handlePaneScrollOffsetChange}
-                            getTurnDiff={getTurnDiff}
                             handleSubmit={handleSubmit}
                           />
                         </div>

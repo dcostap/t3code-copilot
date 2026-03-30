@@ -1193,6 +1193,42 @@ body {
   color: #000000;
 }
 
+.transcript-prompt__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 22px 14px 25px;
+}
+
+.transcript-prompt__attachmentChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  color: #d6dbe0;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.transcript-prompt__attachmentChip button {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.transcript-prompt__attachmentChip button {
+  padding: 0 6px;
+}
+
+.transcript-prompt__attachmentChip button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .attachment-panel {
   display: flex;
   gap: 12px;
