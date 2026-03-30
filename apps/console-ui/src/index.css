@@ -548,21 +548,23 @@ body {
 .transcript-historyRow--activityGroup,
 .transcript-historyRow--checkpoint,
 .transcript-historyRow--plan,
+.transcript-historyRow--reasoning,
 .transcript-historyRow--tool,
 .transcript-historyRow--working {
   padding-top: 2px;
-}
-
-.transcript-historyRow__plainLabel {
-  color: #8f99a3;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .transcript-historyRow__textBlock {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.transcript-historyRow__messageSeparator {
+  width: 100%;
+  height: 1px;
+  margin: 2px 0 4px;
+  background: rgba(153, 164, 174, 0.18);
 }
 
 .transcript-historyRow__text {
@@ -576,6 +578,25 @@ body {
 
 .transcript-historyRow__text--muted {
   color: #93a0ac;
+}
+
+.transcript-historyRow__reasoningSurface {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid rgba(219, 195, 148, 0.28);
+}
+
+.transcript-historyRow__reasoningSummary {
+  color: #dbc394;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transcript-historyRow__reasoningText {
+  color: #aeb7c0;
 }
 
 .transcript-historyRow__markdownTable {
@@ -737,7 +758,9 @@ body {
 }
 
 .transcript-blockHistory__commandWidgetSummary {
-  display: block;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
   min-width: 0;
   width: 100%;
   color: #8a939d;
@@ -746,11 +769,37 @@ body {
   text-overflow: ellipsis;
 }
 
-.transcript-blockHistory__commandWidgetSurfaceExpanded .transcript-blockHistory__commandWidgetSummary {
+.transcript-historyToolSummary__status,
+.transcript-historyToolSummary__meta {
+  flex: 0 0 auto;
+  color: #7f8a94;
+  text-transform: lowercase;
+}
+
+.transcript-historyToolSummary__subject {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.transcript-historyToolBody__section + .transcript-historyToolBody__section {
+  margin-top: 8px;
+}
+
+.transcript-historyToolBody__label {
+  margin-bottom: 2px;
+  color: #8f99a3;
+  text-transform: lowercase;
+}
+
+.transcript-historyToolBody__text {
+  margin: 0;
+  min-width: 0;
+  color: inherit;
   white-space: pre-wrap;
-  overflow: visible;
-  text-overflow: clip;
   overflow-wrap: anywhere;
+  font: inherit;
 }
 
 .transcript-blockHistory__commandWidgetSurfaceExpanded,

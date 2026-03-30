@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { EventId } from "@t3tools/contracts";
 import type { OrchestrationThread } from "@t3tools/contracts";
 
 import { buildTestSnapshot } from "../testSupport/testSnapshot";
@@ -19,7 +20,6 @@ describe("deriveTranscriptHistoryRows", () => {
       "message",
       "activity-group",
       "tool",
-      "tool",
       "checkpoint",
       "message",
       "message",
@@ -31,6 +31,30 @@ describe("deriveTranscriptHistoryRows", () => {
       "activity-group",
       "message",
     ]);
+  });
+
+  it("derives reasoning rows and hides report-intent utility tools", () => {
+    const thread = buildReasoningAndHiddenToolFixture();
+    const rows = deriveTranscriptHistoryRows(thread);
+
+    expect(rows.some((row) => row.kind === "reasoning")).toBe(true);
+    expect(rows.some((row) => row.kind === "tool" && row.tool.title === "Report intent")).toBe(false);
+  });
+
+  it("merges tool lifecycle events into one richer tool row", () => {
+    const rows = deriveTranscriptHistoryRows(buildMergedToolFixture());
+    const matchingRows = rows.filter((row) => row.kind === "tool" && row.tool.title === "Run checks");
+    const row = matchingRows[0];
+
+    expect(matchingRows).toHaveLength(1);
+    expect(row?.kind).toBe("tool");
+    if (!row || row.kind !== "tool") {
+      return;
+    }
+
+    expect(row.tool.status).toBe("done");
+    expect(row.tool.timingLabel).toBe("5s");
+    expect(row.tool.output).toContain("packages successful");
   });
 
   it("appends a working row for running threads", () => {
@@ -55,11 +79,27 @@ describe("getFirstUnvirtualizedRowIndex", () => {
     const thread = buildRunningThreadFixture();
     const rows = deriveTranscriptHistoryRows(thread);
 
-    expect(getFirstUnvirtualizedRowIndex(rows, thread)).toBe(6);
+    expect(getFirstUnvirtualizedRowIndex(rows, thread)).toBe(5);
   });
 });
 
 describe("formatTranscriptHistoryRow", () => {
+  it("formats messages without user or assistant prefixes", () => {
+    const thread = buildTestSnapshot().threads[0]!;
+    const row = deriveTranscriptHistoryRows(thread)[0];
+
+    expect(row?.kind).toBe("message");
+    if (!row || row.kind !== "message") {
+      return;
+    }
+
+    const display = formatTranscriptHistoryRow(row);
+
+    expect(display).toContain(row.message.text);
+    expect(display).not.toContain("user:");
+    expect(display).not.toContain("assistant:");
+  });
+
   it("formats activity groups as plain text lines", () => {
     const thread = buildTestSnapshot().threads[0]!;
     const row = deriveTranscriptHistoryRows(thread).find((candidate) => candidate.kind === "activity-group");
@@ -139,5 +179,113 @@ function buildRunningThreadFixture(): OrchestrationThread {
       activeTurnId,
       updatedAt: thread.updatedAt,
     },
+  };
+}
+
+function buildReasoningAndHiddenToolFixture(): OrchestrationThread {
+  const thread = buildTestSnapshot().threads[0]!;
+
+  return {
+    ...thread,
+    activities: [
+      ...thread.activities,
+      {
+        id: EventId.makeUnsafe("activity-console-reasoning"),
+        tone: "info",
+        kind: "reasoning.text",
+        summary: "Reasoning",
+        payload: {
+          streamKind: "reasoning_text",
+          text: "Think through the timeline before rendering widgets.",
+        },
+        turnId: thread.latestTurn?.turnId ?? null,
+        sequence: 10,
+        createdAt: "2026-03-10T09:01:50.000Z",
+      },
+      {
+        id: EventId.makeUnsafe("activity-console-report-intent"),
+        tone: "tool",
+        kind: "tool.completed",
+        summary: "Report intent complete",
+        payload: {
+          itemId: "report-intent-1",
+          title: "Report intent",
+          status: "completed",
+          data: {
+            item: {
+              id: "report-intent-1",
+              input: {
+                intent: "Tracing widgets",
+              },
+            },
+          },
+        },
+        turnId: thread.latestTurn?.turnId ?? null,
+        sequence: 11,
+        createdAt: "2026-03-10T09:01:51.000Z",
+      },
+    ],
+  };
+}
+
+function buildMergedToolFixture(): OrchestrationThread {
+  const thread = buildTestSnapshot().threads[0]!;
+  const runningTurnId = thread.messages[2]!.turnId!;
+
+  return {
+    ...thread,
+    activities: [
+      ...thread.activities.filter((activity) => activity.summary !== "Run checks complete"),
+      {
+        id: EventId.makeUnsafe("activity-console-tool-start"),
+        tone: "tool",
+        kind: "tool.started",
+        summary: "Run checks started",
+        payload: {
+          itemId: "run-checks-1",
+          itemType: "command_execution",
+          title: "Run checks",
+          status: "inProgress",
+          data: {
+            item: {
+              id: "run-checks-1",
+              input: {
+                command: ["bun", "typecheck"],
+              },
+            },
+          },
+        },
+        turnId: runningTurnId,
+        sequence: 12,
+        createdAt: "2026-03-10T09:01:02.000Z",
+      },
+      {
+        id: EventId.makeUnsafe("activity-console-tool-complete"),
+        tone: "tool",
+        kind: "tool.completed",
+        summary: "Run checks complete",
+        payload: {
+          itemId: "run-checks-1",
+          itemType: "command_execution",
+          title: "Run checks",
+          status: "completed",
+          data: {
+            item: {
+              id: "run-checks-1",
+              input: {
+                command: ["bun", "typecheck"],
+              },
+              result: {
+                exitCode: 0,
+                detailedContent: "8 packages successful in 6.5s",
+              },
+            },
+          },
+        },
+        turnId: runningTurnId,
+        sequence: 13,
+        createdAt: "2026-03-10T09:01:07.000Z",
+      },
+    ],
   };
 }

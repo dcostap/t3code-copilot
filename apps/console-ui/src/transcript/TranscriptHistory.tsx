@@ -17,8 +17,7 @@ import {
   estimateTranscriptHistoryRowHeight,
   getActivityDetail,
   getFirstUnvirtualizedRowIndex,
-  getToolActivityDisplay,
-  getToolActivityStatus,
+  getToolDisplaySubject,
   type TranscriptHistoryRow,
 } from "./transcriptHistoryRows";
 import {
@@ -310,6 +309,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
               }}
             >
               <TranscriptHistoryRowView
+                previousRow={virtualItem.index > 0 ? rows[virtualItem.index - 1] ?? null : null}
                 row={row}
                 checkpointDiffState={checkpointDiffByRowId.get(row.id)}
                 isCheckpointCollapsed={collapsedCheckpointRowIds.has(row.id)}
@@ -331,6 +331,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
           data-has-leading-gap={firstUnvirtualizedRowIndex + index > 0 ? "true" : undefined}
         >
           <TranscriptHistoryRowView
+            previousRow={firstUnvirtualizedRowIndex + index > 0 ? rows[firstUnvirtualizedRowIndex + index - 1] ?? null : null}
             row={row}
             checkpointDiffState={checkpointDiffByRowId.get(row.id)}
             isCheckpointCollapsed={collapsedCheckpointRowIds.has(row.id)}
@@ -347,6 +348,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
 });
 
 interface TranscriptHistoryRowViewProps {
+  readonly previousRow: TranscriptHistoryRow | null;
   readonly row: TranscriptHistoryRow;
   readonly isToolExpanded: boolean;
   readonly isCheckpointCollapsed: boolean;
@@ -362,6 +364,7 @@ interface TranscriptHistoryRowViewProps {
 }
 
 function TranscriptHistoryRowView({
+  previousRow,
   row,
   isToolExpanded,
   isCheckpointCollapsed,
@@ -373,12 +376,21 @@ function TranscriptHistoryRowView({
 }: TranscriptHistoryRowViewProps) {
   switch (row.kind) {
     case "message":
-      return <TranscriptMessageRow message={row.message} projectRoot={projectRoot} />;
+      return (
+        <TranscriptMessageRow
+          message={row.message}
+          projectRoot={projectRoot}
+          showRoleSeparator={shouldRenderRoleSeparator(previousRow, row)}
+        />
+      );
+
+    case "reasoning":
+      return <TranscriptReasoningRow reasoning={row.reasoning} projectRoot={projectRoot} />;
 
     case "tool":
       return (
         <TranscriptToolRow
-          activity={row.activity}
+          tool={row.tool}
           isExpanded={isToolExpanded}
           onToggle={() => onToggleTool(row.id)}
         />
@@ -408,12 +420,14 @@ export function formatTranscriptHistoryRow(row: TranscriptHistoryRow): string {
   switch (row.kind) {
     case "message": {
       const lines = [
-        `${getMessageRoleLabel(row.message.role)}:`,
         ...(row.message.attachments?.map((attachment) => `attachment: ${formatAttachmentLine(attachment)}`) ?? []),
         row.message.text,
       ];
       return lines.join("\n");
     }
+
+    case "reasoning":
+      return row.reasoning.text;
 
     case "activity-group":
       return [
@@ -431,12 +445,10 @@ export function formatTranscriptHistoryRow(row: TranscriptHistoryRow): string {
       return `plan:\n${row.plan.planMarkdown}`;
 
     case "tool": {
-      const tool = getToolActivityDisplay(row.activity);
       return [
-        `tool: ${tool.title}`,
-        ...(tool.detail ? [tool.detail] : []),
-        ...(tool.command ? [tool.command] : []),
-        ...(tool.output ? [tool.output] : []),
+        `tool: ${getToolSummaryLabel(row.tool)} ${getToolDisplaySubject(row.tool)}`.trim(),
+        ...getExpandedToolBodySections(row.tool).map((section) => section.text),
+        ...(row.tool.inlineUnifiedDiff ? [row.tool.inlineUnifiedDiff] : []),
       ].join("\n");
     }
 
@@ -454,15 +466,17 @@ export function formatTranscriptHistoryRow(row: TranscriptHistoryRow): string {
 function TranscriptMessageRow({
   message,
   projectRoot,
+  showRoleSeparator,
 }: {
   readonly message: Extract<TranscriptHistoryRow, { readonly kind: "message" }>["message"];
   readonly projectRoot: string | null | undefined;
+  readonly showRoleSeparator: boolean;
 }) {
   const blocks = useMemo(() => parseTranscriptMessageBlocks(message.text), [message.text]);
 
   return (
     <div className="transcript-historyRow transcript-historyRow--message">
-      <div className="transcript-historyRow__plainLabel">{getMessageRoleLabel(message.role)}:</div>
+      {showRoleSeparator ? <div className="transcript-historyRow__messageSeparator" aria-hidden="true" /> : null}
       {message.attachments?.map((attachment) => (
         <div key={attachment.id} className="transcript-historyRow__text transcript-historyRow__text--muted">
           attachment: {formatAttachmentLine(attachment)}
@@ -480,9 +494,11 @@ function TranscriptMessageRow({
 function TranscriptTextBlock({
   text,
   projectRoot,
+  lineClassName,
 }: {
   readonly text: string;
   readonly projectRoot: string | null | undefined;
+  readonly lineClassName?: string;
 }) {
   let offset = 0;
   return (
@@ -491,11 +507,35 @@ function TranscriptTextBlock({
         const key = `${offset}:${line}`;
         offset += line.length + 1;
         return (
-          <div key={key} className="transcript-historyRow__text">
+          <div key={key} className={classNames(["transcript-historyRow__text", lineClassName])}>
             {renderLinkTokens(line, projectRoot)}
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function TranscriptReasoningRow({
+  reasoning,
+  projectRoot,
+}: {
+  readonly reasoning: Extract<TranscriptHistoryRow, { readonly kind: "reasoning" }>["reasoning"];
+  readonly projectRoot: string | null | undefined;
+}) {
+  return (
+    <div className="transcript-historyRow transcript-historyRow--reasoning">
+      <div className="transcript-historyRow__reasoningSurface">
+        {reasoning.variant === "summary" ? (
+          <div className="transcript-historyRow__reasoningSummary">{reasoning.text}</div>
+        ) : (
+          <TranscriptTextBlock
+            text={reasoning.text}
+            projectRoot={projectRoot}
+            lineClassName="transcript-historyRow__reasoningText"
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -551,17 +591,17 @@ function TranscriptMarkdownTable({
 }
 
 function TranscriptToolRow({
-  activity,
+  tool,
   isExpanded,
   onToggle,
 }: {
-  readonly activity: Extract<TranscriptHistoryRow, { readonly kind: "tool" }>["activity"];
+  readonly tool: Extract<TranscriptHistoryRow, { readonly kind: "tool" }>["tool"];
   readonly isExpanded: boolean;
   readonly onToggle: () => void;
 }) {
-  const tool = getToolActivityDisplay(activity);
-  const expandable = Boolean(tool.detail || tool.command || tool.output);
-  const statusClassName = getWorkItemStatusClassName(getToolActivityStatus(activity));
+  const bodySections = getExpandedToolBodySections(tool);
+  const expandable = bodySections.length > 0 || Boolean(tool.inlineUnifiedDiff);
+  const statusClassName = getWorkItemStatusClassName(tool.status);
 
   return (
     <div className="transcript-historyRow transcript-historyRow--tool">
@@ -583,13 +623,30 @@ function TranscriptToolRow({
         )}
         <div className="transcript-blockHistory__commandWidgetContent">
           <div className="transcript-blockHistory__commandWidgetSummary">
-            {tool.title}
+            <span className="transcript-historyToolSummary__status">{getToolSummaryLabel(tool)}</span>
+            <span className="transcript-historyToolSummary__subject">{getToolDisplaySubject(tool)}</span>
+            {tool.timingLabel ? (
+              <span className="transcript-historyToolSummary__meta">{tool.timingLabel}</span>
+            ) : null}
           </div>
           {isExpanded && (
             <div className="transcript-blockHistory__commandWidgetBody">
-              {tool.detail ? <div>{tool.detail}</div> : null}
-              {tool.command ? <div>{tool.command}</div> : null}
-              {tool.output ? <div>{tool.output}</div> : null}
+              {bodySections.map((section) => (
+                <div key={section.key} className="transcript-historyToolBody__section">
+                  {section.label ? (
+                    <div className="transcript-historyToolBody__label">{section.label}</div>
+                  ) : null}
+                  <pre className="transcript-historyToolBody__text">{section.text}</pre>
+                </div>
+              ))}
+              {tool.inlineUnifiedDiff ? (
+                <TranscriptDiffBody
+                  diffState={{
+                    status: "ready",
+                    diff: tool.inlineUnifiedDiff,
+                  }}
+                />
+              ) : null}
             </div>
           )}
         </div>
@@ -696,16 +753,6 @@ function TranscriptDiffBody({
       })}
     </div>
   );
-}
-
-function getMessageRoleLabel(role: Extract<TranscriptHistoryRow, { readonly kind: "message" }>["message"]["role"]) {
-  if (role === "assistant") {
-    return "assistant";
-  }
-  if (role === "system") {
-    return "system";
-  }
-  return "user";
 }
 
 function formatAttachmentLine(attachment: ChatAttachment) {
@@ -820,4 +867,65 @@ async function openTranscriptLink(href: string) {
     return;
   }
   window.open(href, "_blank", "noopener,noreferrer");
+}
+
+function shouldRenderRoleSeparator(
+  previousRow: TranscriptHistoryRow | null,
+  row: Extract<TranscriptHistoryRow, { readonly kind: "message" }>,
+) {
+  if (!previousRow || previousRow.kind !== "message") {
+    return false;
+  }
+
+  const leftRole = previousRow.message.role;
+  const rightRole = row.message.role;
+  if ((leftRole !== "user" && leftRole !== "assistant") || (rightRole !== "user" && rightRole !== "assistant")) {
+    return false;
+  }
+
+  return leftRole !== rightRole;
+}
+
+function getToolSummaryLabel(
+  tool: Extract<TranscriptHistoryRow, { readonly kind: "tool" }>["tool"],
+) {
+  if (tool.status === "running") {
+    return tool.itemKind === "file-change" ? "editing" : "running";
+  }
+  if (tool.status === "error") {
+    return "failed";
+  }
+  if (tool.status === "declined") {
+    return "declined";
+  }
+  if (tool.itemKind === "file-change") {
+    return "edited";
+  }
+  return "done";
+}
+
+function getExpandedToolBodySections(
+  tool: Extract<TranscriptHistoryRow, { readonly kind: "tool" }>["tool"],
+) {
+  const sections: Array<{ key: string; label: string | null; text: string }> = [];
+  const seen = new Set<string>();
+  const pushSection = (key: string, label: string | null, text: string | null) => {
+    const normalized = text?.trim();
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    sections.push({ key, label, text: normalized });
+  };
+
+  pushSection("detail", null, tool.detail);
+  pushSection("command", "command", tool.command ? `$ ${tool.command}` : null);
+  pushSection(
+    "files",
+    "changed files",
+    tool.changedFiles.length > 0 ? tool.changedFiles.join("\n") : null,
+  );
+  pushSection("output", "details", tool.output);
+
+  return sections;
 }
