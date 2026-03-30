@@ -67,6 +67,8 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   const previousThreadIdRef = useRef<string | null>(null);
   const previousThreadUpdatedAtRef = useRef<string | null>(null);
   const pendingMeasureFrameRef = useRef<number | null>(null);
+  const premeasureRefs = useRef(new Map<string, HTMLDivElement>());
+  const [premeasuredRowHeightById, setPremeasuredRowHeightById] = useState<ReadonlyMap<string, number>>(() => new Map());
 
   const rowVirtualizer = useVirtualizer({
     count: firstUnvirtualizedRowIndex,
@@ -75,12 +77,13 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     estimateSize: (index) => {
       const row = rows[index];
       return row
-        ? estimateTranscriptHistoryRowHeight(row, {
+        ? (premeasuredRowHeightById.get(row.id)
+          ?? estimateTranscriptHistoryRowHeight(row, {
             widthPx: historyWidthPx,
             expandedToolRowIds,
             collapsedCheckpointRowIds,
             checkpointDiffByRowId,
-          })
+          }, index))
         : 80;
     },
     measureElement,
@@ -131,18 +134,20 @@ export const TranscriptHistory = memo(function TranscriptHistory({
 
   useEffect(() => {
     scheduleMeasure();
-  }, [checkpointDiffByRowId, collapsedCheckpointRowIds, expandedToolRowIds, firstUnvirtualizedRowIndex, rows, scheduleMeasure]);
+  }, [checkpointDiffByRowId, collapsedCheckpointRowIds, expandedToolRowIds, firstUnvirtualizedRowIndex, premeasuredRowHeightById, rows, scheduleMeasure]);
 
   useEffect(() => {
     setExpandedToolRowIds(new Set());
     setCollapsedCheckpointRowIds(new Set());
     setCheckpointDiffByRowId(new Map());
+    setPremeasuredRowHeightById(new Map());
   }, [thread?.id]);
 
   useEffect(() => {
     if (historyWidthPx === null) {
       return;
     }
+    setPremeasuredRowHeightById(new Map());
     scheduleMeasure();
   }, [historyWidthPx, scheduleMeasure]);
 
@@ -156,11 +161,12 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   }, []);
 
   useEffect(() => {
-    rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (_item, _delta, instance) => {
+    rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
       const viewportHeight = instance.scrollRect?.height ?? 0;
       const scrollOffset = instance.scrollOffset ?? 0;
       const remainingDistance = instance.getTotalSize() - (scrollOffset + viewportHeight);
-      return remainingDistance > AUTO_FOLLOW_BOTTOM_THRESHOLD_PX;
+      const changedAboveViewport = item.start < scrollOffset;
+      return changedAboveViewport || remainingDistance > AUTO_FOLLOW_BOTTOM_THRESHOLD_PX;
     };
     return () => {
       rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
@@ -302,6 +308,92 @@ export const TranscriptHistory = memo(function TranscriptHistory({
 
   const virtualItems = rowVirtualizer.getVirtualItems();
   const staticRows = rows.slice(firstUnvirtualizedRowIndex);
+  const premeasureRows = useMemo(() => {
+    if (firstUnvirtualizedRowIndex <= 0 || virtualItems.length === 0) {
+      return [];
+    }
+
+    const visibleIndexes = new Set(virtualItems.map((virtualItem) => virtualItem.index));
+    const firstVisibleIndex = virtualItems[0]?.index ?? 0;
+    const lastVisibleIndex = virtualItems[virtualItems.length - 1]?.index ?? -1;
+    const candidates: Array<number> = [];
+
+    for (let delta = 1; candidates.length < 12; delta += 1) {
+      const nextAfter = lastVisibleIndex + delta;
+      if (nextAfter < firstUnvirtualizedRowIndex && !visibleIndexes.has(nextAfter)) {
+        candidates.push(nextAfter);
+      }
+
+      if (candidates.length >= 12) {
+        break;
+      }
+
+      const nextBefore = firstVisibleIndex - delta;
+      if (nextBefore >= 0 && !visibleIndexes.has(nextBefore)) {
+        candidates.push(nextBefore);
+      }
+
+      if (nextAfter >= firstUnvirtualizedRowIndex && nextBefore < 0) {
+        break;
+      }
+    }
+
+    return candidates
+      .toSorted((left, right) => left - right)
+      .map((index) => {
+        const row = rows[index];
+        return row
+          ? {
+              index,
+              row,
+            }
+          : null;
+      })
+      .filter((entry): entry is { readonly index: number; readonly row: TranscriptHistoryRow } => entry !== null);
+  }, [firstUnvirtualizedRowIndex, rows, virtualItems]);
+
+  useLayoutEffect(() => {
+    if (premeasureRows.length === 0) {
+      return;
+    }
+
+    const updates = new Map<string, number>();
+    for (const { row } of premeasureRows) {
+      const element = premeasureRefs.current.get(row.id);
+      if (!element) {
+        continue;
+      }
+      const nextHeight = Math.ceil(element.getBoundingClientRect().height);
+      if (nextHeight > 0) {
+        updates.set(row.id, nextHeight);
+      }
+    }
+
+    if (updates.size === 0) {
+      return;
+    }
+
+    setPremeasuredRowHeightById((existing) => {
+      let changed = false;
+      const next = new Map(existing);
+      for (const [rowId, height] of updates) {
+        if (next.get(rowId) === height) {
+          continue;
+        }
+        next.set(rowId, height);
+        changed = true;
+      }
+      return changed ? next : existing;
+    });
+  }, [premeasureRows]);
+
+  const setPremeasureRef = useCallback((rowId: string, node: HTMLDivElement | null) => {
+    if (node) {
+      premeasureRefs.current.set(rowId, node);
+    } else {
+      premeasureRefs.current.delete(rowId);
+    }
+  }, []);
 
   return (
     <div ref={historyRootRef} className="transcript-historyList transcript-history__viewport">
@@ -318,16 +410,47 @@ export const TranscriptHistory = memo(function TranscriptHistory({
           return (
             <div
               key={virtualItem.key}
-              data-index={virtualItem.index}
               className="transcript-blockHistory__virtualBlock"
-              data-has-leading-gap={virtualItem.index > 0 ? "true" : undefined}
-              ref={rowVirtualizer.measureElement}
               style={{
                 transform: `translateY(${virtualItem.start}px)`,
+                height: `${virtualItem.size}px`,
+                overflow: "hidden",
               }}
             >
+              <div
+                data-index={virtualItem.index}
+                className="transcript-blockHistory__virtualBlockInner"
+                data-has-leading-gap={virtualItem.index > 0 ? "true" : undefined}
+                ref={rowVirtualizer.measureElement}
+              >
+                <TranscriptHistoryRowView
+                  previousRow={virtualItem.index > 0 ? rows[virtualItem.index - 1] ?? null : null}
+                  row={row}
+                  checkpointDiffState={checkpointDiffByRowId.get(row.id)}
+                  isCheckpointCollapsed={collapsedCheckpointRowIds.has(row.id)}
+                  isToolExpanded={expandedToolRowIds.has(row.id)}
+                  onEnsureCheckpointDiff={ensureCheckpointDiff}
+                  onToggleCheckpoint={toggleCheckpointRow}
+                  onToggleTool={toggleToolRow}
+                  projectRoot={projectRoot}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {premeasureRows.length > 0 ? (
+        <div className="transcript-blockHistory__measurementLane" aria-hidden="true">
+          {premeasureRows.map(({ index, row }) => (
+            <div
+              key={`measure:${row.id}`}
+              ref={(node) => setPremeasureRef(row.id, node)}
+              className="transcript-blockHistory__measurementProbe"
+              data-has-leading-gap={index > 0 ? "true" : undefined}
+            >
               <TranscriptHistoryRowView
-                previousRow={virtualItem.index > 0 ? rows[virtualItem.index - 1] ?? null : null}
+                previousRow={index > 0 ? rows[index - 1] ?? null : null}
                 row={row}
                 checkpointDiffState={checkpointDiffByRowId.get(row.id)}
                 isCheckpointCollapsed={collapsedCheckpointRowIds.has(row.id)}
@@ -338,9 +461,9 @@ export const TranscriptHistory = memo(function TranscriptHistory({
                 projectRoot={projectRoot}
               />
             </div>
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      ) : null}
 
       {staticRows.map((row, index) => (
         <div

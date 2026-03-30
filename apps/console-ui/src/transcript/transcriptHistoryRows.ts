@@ -10,6 +10,7 @@ import type {
 import { deriveRunningThreadIntentLabel, isReportIntentToolPayload } from "../agentIntent";
 
 export const ALWAYS_UNVIRTUALIZED_TAIL_ROWS = 8;
+export const TRANSCRIPT_HISTORY_ROW_GAP_PX = 4;
 
 export type TranscriptToolStatus = "running" | "done" | "error" | "declined";
 
@@ -1169,71 +1170,74 @@ export function estimateTranscriptHistoryRowHeight(
       readonly diff?: string;
     }>;
   },
+  rowIndex = 0,
 ) {
-  switch (row.kind) {
-    case "message": {
-      return 28 + estimateTextHeight(row.message.text, options?.widthPx) + ((row.message.attachments?.length ?? 0) * 22);
-    }
+  const baseHeight = (() => {
+    switch (row.kind) {
+      case "message":
+        return 28 + estimateTextHeight(row.message.text, options?.widthPx) + ((row.message.attachments?.length ?? 0) * 22);
 
-    case "reasoning":
-      return row.reasoning.variant === "summary"
-        ? 32 + estimateTextHeight(row.reasoning.text, options?.widthPx)
-        : 40 + estimateTextHeight(row.reasoning.text, options?.widthPx);
+      case "reasoning":
+        return row.reasoning.variant === "summary"
+          ? 32 + estimateTextHeight(row.reasoning.text, options?.widthPx)
+          : 40 + estimateTextHeight(row.reasoning.text, options?.widthPx);
 
-    case "tool": {
-      let height = 42;
-      if (!options?.expandedToolRowIds?.has(row.id)) {
+      case "tool": {
+        let height = 42;
+        if (!options?.expandedToolRowIds?.has(row.id)) {
+          return height;
+        }
+        height = 22 + estimateTextHeight(
+          [row.tool.title, getToolDisplaySubject(row.tool), row.tool.timingLabel ?? ""].filter(Boolean).join("  "),
+          options?.widthPx,
+        );
+        if (row.tool.detail) {
+          height += estimateTextHeight(row.tool.detail, options?.widthPx);
+        }
+        if (row.tool.command) {
+          height += estimateTextHeight(row.tool.command, options?.widthPx);
+        }
+        if (row.tool.changedFiles.length > 0) {
+          height += estimateTextHeight(row.tool.changedFiles.join("\n"), options?.widthPx);
+        }
+        if (row.tool.output) {
+          height += estimateTextHeight(row.tool.output, options?.widthPx);
+        }
+        if (row.tool.inlineUnifiedDiff) {
+          height += Math.max(80, estimateTextHeight(row.tool.inlineUnifiedDiff, options?.widthPx));
+        }
+        return height + 16;
+      }
+
+      case "activity-group":
+        return 34 + row.activities.reduce((total, activity) => {
+          const detail = getActivityDetail(activity);
+          return total + 20 + (detail ? estimateTextHeight(detail, options?.widthPx) : 0);
+        }, 0);
+
+      case "plan":
+        return 38 + estimateTextHeight(row.plan.planMarkdown, options?.widthPx);
+
+      case "checkpoint": {
+        let height = 48 + (row.checkpoint.files.length * 18);
+        if (options?.collapsedCheckpointRowIds?.has(row.id)) {
+          return height;
+        }
+        const diffState = options?.checkpointDiffByRowId?.get(row.id);
+        if (diffState?.status === "ready" && diffState.diff) {
+          height += Math.max(80, estimateTextHeight(diffState.diff, options?.widthPx));
+        } else {
+          height += 24;
+        }
         return height;
       }
-      height = 22 + estimateTextHeight(
-        [row.tool.title, getToolDisplaySubject(row.tool), row.tool.timingLabel ?? ""].filter(Boolean).join("  "),
-        options?.widthPx,
-      );
-      if (row.tool.detail) {
-        height += estimateTextHeight(row.tool.detail, options?.widthPx);
-      }
-      if (row.tool.command) {
-        height += estimateTextHeight(row.tool.command, options?.widthPx);
-      }
-      if (row.tool.changedFiles.length > 0) {
-        height += estimateTextHeight(row.tool.changedFiles.join("\n"), options?.widthPx);
-      }
-      if (row.tool.output) {
-        height += estimateTextHeight(row.tool.output, options?.widthPx);
-      }
-      if (row.tool.inlineUnifiedDiff) {
-        height += Math.max(80, estimateTextHeight(row.tool.inlineUnifiedDiff, options?.widthPx));
-      }
-      return height + 16;
+
+      case "working":
+        return 38;
     }
+  })();
 
-    case "activity-group": {
-      return 34 + row.activities.reduce((total, activity) => {
-        const detail = getActivityDetail(activity);
-        return total + 20 + (detail ? estimateTextHeight(detail, options?.widthPx) : 0);
-      }, 0);
-    }
-
-    case "plan":
-      return 38 + estimateTextHeight(row.plan.planMarkdown, options?.widthPx);
-
-    case "checkpoint": {
-      let height = 48 + (row.checkpoint.files.length * 18);
-      if (options?.collapsedCheckpointRowIds?.has(row.id)) {
-        return height;
-      }
-      const diffState = options?.checkpointDiffByRowId?.get(row.id);
-      if (diffState?.status === "ready" && diffState.diff) {
-        height += Math.max(80, estimateTextHeight(diffState.diff, options?.widthPx));
-      } else {
-        height += 24;
-      }
-      return height;
-    }
-
-    case "working":
-      return 38;
-  }
+  return baseHeight + (rowIndex > 0 ? TRANSCRIPT_HISTORY_ROW_GAP_PX : 0);
 }
 
 function estimateTextHeight(text: string, widthPx?: number | null) {
