@@ -1198,6 +1198,7 @@ body {
 
 .transcript-prompt__body {
   display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;

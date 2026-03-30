@@ -1,15 +1,13 @@
 import {
   forwardRef,
+  memo,
   useCallback,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
   useRef,
   useState,
-  type ChangeEvent as ReactChangeEvent,
-  type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import type { OrchestrationThread } from "@t3tools/contracts";
 
@@ -51,6 +49,28 @@ export interface TranscriptRendererHandle {
   scrollToBottom(): void;
 }
 
+interface TranscriptPromptHandle {
+  focusPrompt(): void;
+  insertPromptText(text: string): void;
+  deletePromptBackward(): void;
+  deletePromptForward(): void;
+  submitPrompt(): void;
+}
+
+interface TranscriptPromptProps {
+  readonly composerAttachments: ReadonlyArray<ComposerImageAttachment>;
+  readonly draftValue: string;
+  readonly interactionMode: "default" | "plan";
+  readonly paneActive: boolean;
+  readonly promptFocusDisabled: boolean;
+  readonly promptInputDisabled: boolean;
+  readonly submitDisabled: boolean;
+  onAddImageFiles?(files: ReadonlyArray<File>): void;
+  onDraftChange?(value: string): void;
+  onRemoveImage?(attachmentId: string): void;
+  onSubmit?(value: string): Promise<void> | void;
+}
+
 export function hasNonCollapsedSelectionInsideElement(element: HTMLElement | null) {
   if (!element || typeof window === "undefined") {
     return false;
@@ -75,46 +95,27 @@ function toImageFiles(fileList: FileList | null) {
   return [...(fileList ?? [])].filter((file) => file.type.startsWith("image/"));
 }
 
-export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, TranscriptRendererProps>(
-  function TranscriptRenderer(
+const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromptProps>(
+  function TranscriptPrompt(
     {
-      composerAttachments = [],
-      draftValue = "",
-      thread = null,
-      initialScrollOffsetFromBottom,
-      paneActive = false,
-      interactionMode = "default",
-      promptFocusDisabled = false,
-      promptInputDisabled = false,
-      submitDisabled = false,
+      composerAttachments,
+      draftValue,
+      interactionMode,
+      paneActive,
+      promptFocusDisabled,
+      promptInputDisabled,
+      submitDisabled,
       onAddImageFiles,
       onDraftChange,
       onRemoveImage,
-      onScrollOffsetFromBottomChange,
       onSubmit,
     },
     ref,
   ) {
-    const surfaceRef = useRef<HTMLDivElement | null>(null);
-    const historyRef = useRef<HTMLDivElement | null>(null);
     const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const draftRef = useRef(draftValue);
     const textareaHeightFrameRef = useRef<number | null>(null);
     const submittingRef = useRef(false);
-    const onSubmitRef = useRef(onSubmit);
-    const onDraftChangeRef = useRef(onDraftChange);
-    const onScrollOffsetFromBottomChangeRef = useRef(onScrollOffsetFromBottomChange);
-    const composerAttachmentsRef = useRef(composerAttachments);
-    const [dragOver, setDragOver] = useState(false);
-    const [localDraftValue, setLocalDraftValue] = useState(draftValue);
-
-    useEffect(() => {
-      onSubmitRef.current = onSubmit;
-      onDraftChangeRef.current = onDraftChange;
-      onScrollOffsetFromBottomChangeRef.current = onScrollOffsetFromBottomChange;
-      composerAttachmentsRef.current = composerAttachments;
-      onScrollOffsetFromBottomChangeRef.current?.(0);
-    }, [composerAttachments, onDraftChange, onScrollOffsetFromBottomChange, onSubmit]);
 
     useEffect(() => {
       if (!paneActive && document.activeElement === promptTextareaRef.current) {
@@ -144,21 +145,28 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
     const setDraftValue = useCallback((nextDraft: string, options?: { readonly notifyParent?: boolean }) => {
       draftRef.current = nextDraft;
-      setLocalDraftValue((existing) => existing === nextDraft ? existing : nextDraft);
-      if (options?.notifyParent !== false) {
-        onDraftChangeRef.current?.(nextDraft);
+      const textarea = promptTextareaRef.current;
+      if (textarea && textarea.value !== nextDraft) {
+        textarea.value = nextDraft;
       }
-    }, []);
+      if (options?.notifyParent !== false) {
+        onDraftChange?.(nextDraft);
+      }
+      scheduleTextareaHeightSync(textarea);
+    }, [onDraftChange, scheduleTextareaHeightSync]);
 
     useEffect(() => {
       if (draftRef.current !== draftValue) {
+        if (promptTextareaRef.current && document.activeElement === promptTextareaRef.current) {
+          return;
+        }
         setDraftValue(draftValue, { notifyParent: false });
       }
     }, [draftValue, setDraftValue]);
 
     useLayoutEffect(() => {
       scheduleTextareaHeightSync();
-    }, [composerAttachments.length, localDraftValue, scheduleTextareaHeightSync]);
+    }, [composerAttachments.length, draftValue, scheduleTextareaHeightSync]);
 
     useEffect(() => () => {
       if (textareaHeightFrameRef.current !== null) {
@@ -222,12 +230,12 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
 
     const submitPrompt = useCallback(async () => {
       const value = draftRef.current.trim();
-      if ((value.length === 0 && composerAttachmentsRef.current.length === 0) || submitDisabled || promptInputDisabled || submittingRef.current) {
+      if ((value.length === 0 && composerAttachments.length === 0) || submitDisabled || promptInputDisabled || submittingRef.current) {
         return;
       }
       submittingRef.current = true;
       try {
-        await onSubmitRef.current?.(draftRef.current);
+        await onSubmit?.(draftRef.current);
         setDraftValue("");
       } finally {
         submittingRef.current = false;
@@ -236,32 +244,151 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           focusPrompt();
         });
       }
-    }, [focusPrompt, promptInputDisabled, scheduleTextareaHeightSync, setDraftValue, submitDisabled]);
+    }, [composerAttachments.length, focusPrompt, onSubmit, promptInputDisabled, scheduleTextareaHeightSync, setDraftValue, submitDisabled]);
 
-    const handlePromptChange = useCallback((event: ReactChangeEvent<HTMLTextAreaElement>) => {
-      setDraftValue(event.currentTarget.value);
-    }, [setDraftValue]);
-
-    const handlePromptKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-      event.stopPropagation();
-      if (event.nativeEvent.isComposing) {
+    useEffect(() => {
+      const textarea = promptTextareaRef.current;
+      if (!textarea) {
         return;
       }
-      if (event.key === "Enter" && !event.shiftKey) {
+
+      const handleInput = () => {
+        draftRef.current = textarea.value;
+        onDraftChange?.(textarea.value);
+        scheduleTextareaHeightSync(textarea);
+      };
+
+      const handleKeyDown = (event: KeyboardEvent) => {
+        if (event.isComposing) {
+          return;
+        }
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          void submitPrompt();
+        }
+      };
+
+      const handlePaste = (event: ClipboardEvent) => {
+        const imageFiles = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith("image/"));
+        if (imageFiles.length === 0) {
+          return;
+        }
         event.preventDefault();
-        void submitPrompt();
-      }
-    }, [submitPrompt]);
+        onAddImageFiles?.(imageFiles);
+        focusPrompt();
+      };
 
-    const handlePromptPaste = useCallback((event: ReactClipboardEvent<HTMLTextAreaElement>) => {
-      const imageFiles = [...event.clipboardData.files].filter((file) => file.type.startsWith("image/"));
-      if (imageFiles.length === 0) {
-        return;
-      }
-      event.preventDefault();
-      onAddImageFiles?.(imageFiles);
-      focusPrompt();
-    }, [focusPrompt, onAddImageFiles]);
+      textarea.addEventListener("input", handleInput);
+      textarea.addEventListener("keydown", handleKeyDown);
+      textarea.addEventListener("paste", handlePaste);
+      return () => {
+        textarea.removeEventListener("input", handleInput);
+        textarea.removeEventListener("keydown", handleKeyDown);
+        textarea.removeEventListener("paste", handlePaste);
+      };
+    }, [focusPrompt, onAddImageFiles, onDraftChange, scheduleTextareaHeightSync, submitPrompt]);
+
+    useImperativeHandle(ref, () => ({
+      focusPrompt,
+      insertPromptText,
+      deletePromptBackward() {
+        deletePromptText("backward");
+      },
+      deletePromptForward() {
+        deletePromptText("forward");
+      },
+      submitPrompt() {
+        void submitPrompt();
+      },
+    }), [deletePromptText, focusPrompt, insertPromptText, submitPrompt]);
+
+    return (
+      <div className={`transcript-prompt${interactionMode === "plan" ? " transcript-prompt--compact" : ""}`}>
+        <div className="transcript-prompt__body">
+          {composerAttachments.length > 0 ? (
+            <div className="transcript-prompt__attachments">
+              {composerAttachments.map((attachment) => (
+                <div key={attachment.id} className="transcript-prompt__attachmentChip">
+                  <span>{attachment.name}</span>
+                  {onRemoveImage ? (
+                    <button type="button" onClick={() => onRemoveImage(attachment.id)} aria-label={`Remove ${attachment.name}`}>
+                      ×
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <div className="transcript-prompt__row">
+            <div className="transcript-prompt__marker" aria-hidden="true">›</div>
+            <div className="transcript-prompt__inputShell">
+              <textarea
+                ref={promptTextareaRef}
+                className="transcript-prompt__input transcript-prompt__input--nativeCaret"
+                defaultValue={draftValue}
+                spellCheck={false}
+                disabled={promptInputDisabled}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  },
+));
+
+TranscriptPrompt.displayName = "TranscriptPrompt";
+
+export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, TranscriptRendererProps>(
+  function TranscriptRenderer(
+    {
+      composerAttachments = [],
+      draftValue = "",
+      thread = null,
+      initialScrollOffsetFromBottom,
+      paneActive = false,
+      interactionMode = "default",
+      promptFocusDisabled = false,
+      promptInputDisabled = false,
+      submitDisabled = false,
+      onAddImageFiles,
+      onDraftChange,
+      onRemoveImage,
+      onScrollOffsetFromBottomChange,
+      onSubmit,
+    },
+    ref,
+  ) {
+    const surfaceRef = useRef<HTMLDivElement | null>(null);
+    const historyRef = useRef<HTMLDivElement | null>(null);
+    const promptHandleRef = useRef<TranscriptPromptHandle | null>(null);
+    const onAddImageFilesRef = useRef(onAddImageFiles);
+    const onDraftChangeRef = useRef(onDraftChange);
+    const onRemoveImageRef = useRef(onRemoveImage);
+    const onSubmitRef = useRef(onSubmit);
+    const [dragOver, setDragOver] = useState(false);
+
+    useEffect(() => {
+      onAddImageFilesRef.current = onAddImageFiles;
+      onDraftChangeRef.current = onDraftChange;
+      onRemoveImageRef.current = onRemoveImage;
+      onSubmitRef.current = onSubmit;
+      onScrollOffsetFromBottomChange?.(0);
+    }, [onAddImageFiles, onDraftChange, onRemoveImage, onScrollOffsetFromBottomChange, onSubmit]);
+
+    const handlePromptAddImageFiles = useCallback((files: ReadonlyArray<File>) => {
+      onAddImageFilesRef.current?.(files);
+    }, []);
+
+    const handlePromptDraftChange = useCallback((value: string) => {
+      onDraftChangeRef.current?.(value);
+    }, []);
+
+    const handlePromptRemoveImage = useCallback((attachmentId: string) => {
+      onRemoveImageRef.current?.(attachmentId);
+    }, []);
+
+    const handlePromptSubmit = useCallback((value: string) => onSubmitRef.current?.(value), []);
 
     const handleSurfaceDragEnter = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
       if ([...event.dataTransfer.items].some((item) => item.kind === "file")) {
@@ -290,16 +417,16 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       }
       event.preventDefault();
       setDragOver(false);
-      onAddImageFiles?.(imageFiles);
-      focusPrompt();
-    }, [focusPrompt, onAddImageFiles]);
+      onAddImageFilesRef.current?.(imageFiles);
+      promptHandleRef.current?.focusPrompt();
+    }, []);
 
     useImperativeHandle(ref, () => ({
       focus() {
-        focusPrompt();
+        promptHandleRef.current?.focusPrompt();
       },
       focusPrompt() {
-        focusPrompt();
+        promptHandleRef.current?.focusPrompt();
       },
       focusHistory() {
         historyRef.current?.focus();
@@ -331,16 +458,16 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         return true;
       },
       insertPromptText(text: string) {
-        insertPromptText(text);
+        promptHandleRef.current?.insertPromptText(text);
       },
       deletePromptBackward() {
-        deletePromptText("backward");
+        promptHandleRef.current?.deletePromptBackward();
       },
       deletePromptForward() {
-        deletePromptText("forward");
+        promptHandleRef.current?.deletePromptForward();
       },
       submitPrompt() {
-        void submitPrompt();
+        promptHandleRef.current?.submitPrompt();
       },
       scrollToBottom() {
         const historyElement = historyRef.current;
@@ -349,7 +476,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         }
         historyElement.scrollTop = historyElement.scrollHeight;
       },
-    }), [deletePromptText, focusPrompt, insertPromptText, submitPrompt]);
+    }), []);
 
     return (
       <div
@@ -373,39 +500,20 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             scrollContainerRef={historyRef}
           />
         </div>
-        <div className={`transcript-prompt${interactionMode === "plan" ? " transcript-prompt--compact" : ""}`}>
-          <div className="transcript-prompt__body">
-            {composerAttachments.length > 0 ? (
-              <div className="transcript-prompt__attachments">
-                {composerAttachments.map((attachment) => (
-                  <div key={attachment.id} className="transcript-prompt__attachmentChip">
-                    <span>{attachment.name}</span>
-                    {onRemoveImage ? (
-                      <button type="button" onClick={() => onRemoveImage(attachment.id)} aria-label={`Remove ${attachment.name}`}>
-                        ×
-                      </button>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            <div className="transcript-prompt__row">
-              <div className="transcript-prompt__marker" aria-hidden="true">›</div>
-              <div className="transcript-prompt__inputShell">
-                <textarea
-                  ref={promptTextareaRef}
-                  className="transcript-prompt__input transcript-prompt__input--nativeCaret"
-                  value={localDraftValue}
-                  spellCheck={false}
-                  disabled={promptInputDisabled}
-                  onChange={handlePromptChange}
-                  onKeyDown={handlePromptKeyDown}
-                  onPaste={handlePromptPaste}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
+        <TranscriptPrompt
+          ref={promptHandleRef}
+          composerAttachments={composerAttachments}
+          draftValue={draftValue}
+          interactionMode={interactionMode}
+          paneActive={paneActive}
+          promptFocusDisabled={promptFocusDisabled}
+          promptInputDisabled={promptInputDisabled}
+          submitDisabled={submitDisabled}
+          onAddImageFiles={handlePromptAddImageFiles}
+          onDraftChange={handlePromptDraftChange}
+          onRemoveImage={handlePromptRemoveImage}
+          onSubmit={handlePromptSubmit}
+        />
       </div>
     );
   },

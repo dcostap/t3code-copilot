@@ -1409,7 +1409,6 @@ export function App() {
   const [topbarActiveTabCutout, setTopbarActiveTabCutout] = useState<TopbarActiveTabCutout | null>(null);
   const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
   const paneElementRefs = useRef<Record<string, HTMLElement | null>>({});
-  const initializedPaneIdsRef = useRef<Record<string, true>>({});
   const hasInitiallyFocusedPromptRef = useRef(false);
   const draftSyncTimeoutRef = useRef<number | null>(null);
   const composerDraftByPaneIdRef = useRef(composerDraftByPaneId);
@@ -1597,9 +1596,8 @@ export function App() {
       setComposerDraftByPaneId((existing) => arePaneDraftMapsEqual(existing, nextDrafts) ? existing : nextDrafts);
     }
 
-    for (const paneId of Object.keys(initializedPaneIdsRef.current)) {
+    for (const paneId of Object.keys(paneRefs.current)) {
       if (!livePaneIdSet.has(paneId)) {
-        delete initializedPaneIdsRef.current[paneId];
         delete paneRefs.current[paneId];
       }
     }
@@ -1826,13 +1824,6 @@ export function App() {
       return;
     }
     paneRefs.current[paneId] = handle;
-    if (!initializedPaneIdsRef.current[paneId]) {
-      initializedPaneIdsRef.current[paneId] = true;
-      const persistedDraft = composerDraftByPaneIdRef.current[paneId];
-      if (persistedDraft) {
-        handle.insertPromptText(persistedDraft);
-      }
-    }
   }, []);
 
   const flushComposerDraftState = useCallback(() => {
@@ -3258,6 +3249,33 @@ export function App() {
         event.preventDefault();
         activePaneHandle?.selectAllHistory();
         return;
+      }
+
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
+        event.preventDefault();
+        activePaneHandle?.insertPromptText(event.key);
+        return;
+      }
+
+      if (event.key === "Backspace") {
+        event.preventDefault();
+        activePaneHandle?.deletePromptBackward();
+        return;
+      }
+
+      if (event.key === "Delete") {
+        event.preventDefault();
+        activePaneHandle?.deletePromptForward();
+        return;
+      }
+
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          activePaneHandle?.insertPromptText("\n");
+        } else {
+          activePaneHandle?.submitPrompt();
+        }
       }
     };
 
