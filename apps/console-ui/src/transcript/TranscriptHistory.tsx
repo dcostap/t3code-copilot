@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   type RefObject,
 } from "react";
 
@@ -33,6 +34,8 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   scrollContainerRef,
 }: TranscriptHistoryProps) {
   const rows = useMemo(() => deriveTranscriptHistoryRows(thread), [thread]);
+  const historyRootRef = useRef<HTMLDivElement | null>(null);
+  const [historyWidthPx, setHistoryWidthPx] = useState<number | null>(null);
   const firstUnvirtualizedRowIndex = useMemo(
     () => getFirstUnvirtualizedRowIndex(rows, thread),
     [rows, thread],
@@ -47,16 +50,53 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     getItemKey: (index) => rows[index]?.id ?? index,
     estimateSize: (index) => {
       const row = rows[index];
-      return row ? estimateTranscriptHistoryRowHeight(row) : 80;
+      return row ? estimateTranscriptHistoryRowHeight(row, { widthPx: historyWidthPx }) : 80;
     },
     measureElement,
     useAnimationFrameWithResizeObserver: true,
     overscan: 8,
   });
 
+  useLayoutEffect(() => {
+    const historyRoot = historyRootRef.current;
+    if (!historyRoot) {
+      return;
+    }
+
+    const updateWidth = (nextWidth: number) => {
+      setHistoryWidthPx((previousWidth) => {
+        if (previousWidth !== null && Math.abs(previousWidth - nextWidth) < 0.5) {
+          return previousWidth;
+        }
+        return nextWidth;
+      });
+    };
+
+    updateWidth(historyRoot.getBoundingClientRect().width);
+
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      updateWidth(historyRoot.getBoundingClientRect().width);
+    });
+    observer.observe(historyRoot);
+    return () => {
+      observer.disconnect();
+    };
+  }, [thread?.id]);
+
   useEffect(() => {
     rowVirtualizer.measure();
   }, [firstUnvirtualizedRowIndex, rowVirtualizer, rows]);
+
+  useEffect(() => {
+    if (historyWidthPx === null) {
+      return;
+    }
+    rowVirtualizer.measure();
+  }, [historyWidthPx, rowVirtualizer]);
 
   useEffect(() => {
     rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (_item, _delta, instance) => {
@@ -164,7 +204,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   const staticRows = rows.slice(firstUnvirtualizedRowIndex);
 
   return (
-    <div className="transcript-historyList transcript-history__viewport">
+    <div ref={historyRootRef} className="transcript-historyList transcript-history__viewport">
       <div
         className="transcript-blockHistory__virtualCanvas"
         style={{ height: `${rowVirtualizer.getTotalSize()}px` }}

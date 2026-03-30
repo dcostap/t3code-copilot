@@ -270,34 +270,49 @@ export function getFirstUnvirtualizedRowIndex(
   return Math.min(firstActiveTurnRowIndex, firstTailRowIndex);
 }
 
-export function estimateTranscriptHistoryRowHeight(row: TranscriptHistoryRow) {
+export function estimateTranscriptHistoryRowHeight(
+  row: TranscriptHistoryRow,
+  options?: {
+    readonly widthPx?: number | null;
+  },
+) {
   switch (row.kind) {
     case "message": {
-      return 38 + estimateTextHeight(row.message.text) + ((row.message.attachments?.length ?? 0) * 22);
+      return 38 + estimateTextHeight(row.message.text, options?.widthPx) + ((row.message.attachments?.length ?? 0) * 22);
     }
 
     case "activity-group": {
       return 34 + row.activities.reduce((total, activity) => {
         const detail = getActivityDetail(activity);
-        return total + 20 + (detail ? estimateTextHeight(detail) : 0);
+        return total + 20 + (detail ? estimateTextHeight(detail, options?.widthPx) : 0);
       }, 0);
     }
 
     case "plan":
-      return 38 + estimateTextHeight(row.plan.planMarkdown);
+      return 38 + estimateTextHeight(row.plan.planMarkdown, options?.widthPx);
 
     case "working":
       return 38;
   }
 }
 
-function estimateTextHeight(text: string) {
+function estimateTextHeight(text: string, widthPx?: number | null) {
+  const charsPerLine = estimateCharactersPerLine(widthPx);
   const lines = text.split(/\r?\n/);
   let wrappedLineCount = 0;
   for (const line of lines) {
-    wrappedLineCount += Math.max(1, Math.ceil(Math.max(line.length, 1) / 72));
+    wrappedLineCount += Math.max(1, Math.ceil(Math.max(line.length, 1) / charsPerLine));
   }
   return wrappedLineCount * 20;
+}
+
+function estimateCharactersPerLine(widthPx?: number | null) {
+  if (!widthPx || !Number.isFinite(widthPx)) {
+    return 72;
+  }
+
+  const usableWidthPx = Math.max(widthPx - 44, 160);
+  return Math.min(Math.max(Math.floor(usableWidthPx / 8.6), 24), 120);
 }
 
 export function getActivityDetail(activity: OrchestrationThreadActivity) {

@@ -6,6 +6,7 @@ import { buildTestSnapshot } from "../testSupport/testSnapshot";
 import {
   ALWAYS_UNVIRTUALIZED_TAIL_ROWS,
   deriveTranscriptHistoryRows,
+  estimateTranscriptHistoryRowHeight,
   getFirstUnvirtualizedRowIndex,
 } from "./transcriptHistoryRows";
 import { formatTranscriptHistoryRow } from "./TranscriptHistory";
@@ -92,6 +93,24 @@ describe("formatTranscriptHistoryRow", () => {
         tone: "working",
       }],
     });
+  });
+});
+
+describe("estimateTranscriptHistoryRowHeight", () => {
+  it("grows message estimates when the transcript narrows", () => {
+    const thread = buildTestSnapshot().threads[0]!;
+    const row = deriveTranscriptHistoryRows(thread).find((candidate) => candidate.kind === "message");
+
+    expect(row?.kind).toBe("message");
+    if (!row || row.kind !== "message") {
+      return;
+    }
+
+    expect(
+      estimateTranscriptHistoryRowHeight(row, { widthPx: 280 }),
+    ).toBeGreaterThan(
+      estimateTranscriptHistoryRowHeight(row, { widthPx: 900 }),
+    );
   });
 });
 
