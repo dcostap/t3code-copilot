@@ -311,6 +311,11 @@ interface ConversationPaneTranscriptProps {
   readonly paneView: PaneView;
   readonly draftValue: string;
   readonly paneActive: boolean;
+  readonly getTurnDiff: (input: {
+    readonly threadId: ThreadId;
+    readonly fromTurnCount: number;
+    readonly toTurnCount: number;
+  }) => Promise<string>;
   readonly paletteOpen: boolean;
   readonly hasBlockingModal: boolean;
   readonly submitDisabled: boolean;
@@ -325,6 +330,7 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
   paneView,
   draftValue,
   paneActive,
+  getTurnDiff,
   paletteOpen,
   hasBlockingModal,
   submitDisabled,
@@ -358,6 +364,7 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
       composerAttachments={paneView.attachments}
       cwd={paneView.cwd}
       draftValue={draftValue}
+      getTurnDiff={getTurnDiff}
       projectRoot={paneView.project.workspaceRoot}
       paneActive={paneActive}
       interactionMode={paneView.interactionMode}
@@ -3905,6 +3912,7 @@ export function App() {
                               paneView={paneView}
                               draftValue={composerDraftByPaneIdRef.current[paneView.pane.id] ?? ""}
                               paneActive={paneView.isActive && paneInteractionActive}
+                              getTurnDiff={consoleData.getTurnDiff}
                               paletteOpen={paletteOpen}
                               hasBlockingModal={hasBlockingModal}
                             submitDisabled={

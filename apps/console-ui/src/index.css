@@ -546,9 +546,23 @@ body {
 }
 
 .transcript-historyRow--activityGroup,
+.transcript-historyRow--checkpoint,
 .transcript-historyRow--plan,
+.transcript-historyRow--tool,
 .transcript-historyRow--working {
   padding-top: 2px;
+}
+
+.transcript-historyRow__plainLabel {
+  color: #8f99a3;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transcript-historyRow__textBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .transcript-historyRow__text {
@@ -558,6 +572,50 @@ body {
   overflow-wrap: anywhere;
   color: #c5ccd3;
   font: inherit;
+}
+
+.transcript-historyRow__text--muted {
+  color: #93a0ac;
+}
+
+.transcript-historyRow__markdownTable {
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.transcript-historyRow__markdownTableSurface {
+  width: max-content;
+  min-width: min(100%, 28rem);
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.transcript-historyRow__markdownTableCell {
+  padding: 4px 10px;
+  border: 1px solid rgba(111, 123, 135, 0.55);
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transcript-historyRow__markdownTableCell--header {
+  color: #e5ebf1;
+  font-weight: 600;
+  background: rgba(22, 28, 34, 0.72);
+}
+
+.transcript-historyRow__markdownTableCell--left {
+  text-align: left;
+}
+
+.transcript-historyRow__markdownTableCell--center {
+  text-align: center;
+}
+
+.transcript-historyRow__markdownTableCell--right {
+  text-align: right;
 }
 
 .transcript-blockHistory__block {

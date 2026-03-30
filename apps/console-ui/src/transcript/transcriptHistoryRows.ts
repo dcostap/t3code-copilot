@@ -1,4 +1,5 @@
 import type {
+  OrchestrationCheckpointSummary,
   OrchestrationMessage,
   OrchestrationProposedPlan,
   OrchestrationThread,
@@ -24,6 +25,12 @@ type TimelineItem =
       readonly activity: OrchestrationThreadActivity;
     }
   | {
+      readonly kind: "checkpoint";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly checkpoint: OrchestrationCheckpointSummary;
+    }
+  | {
       readonly kind: "plan";
       readonly id: string;
       readonly createdAt: string;
@@ -39,6 +46,13 @@ export type TranscriptHistoryRow =
       readonly message: OrchestrationMessage;
     }
   | {
+      readonly kind: "tool";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly turnId: TurnId | null;
+      readonly activity: OrchestrationThreadActivity;
+    }
+  | {
       readonly kind: "activity-group";
       readonly id: string;
       readonly createdAt: string;
@@ -51,6 +65,13 @@ export type TranscriptHistoryRow =
       readonly createdAt: string;
       readonly turnId: TurnId | null;
       readonly plan: OrchestrationProposedPlan;
+    }
+  | {
+      readonly kind: "checkpoint";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly turnId: TurnId;
+      readonly checkpoint: OrchestrationCheckpointSummary;
     }
   | {
       readonly kind: "working";
@@ -117,6 +138,9 @@ function getTimelineItemPriority(item: TimelineItem) {
   if (item.kind === "plan") {
     return 2;
   }
+  if (item.kind === "checkpoint") {
+    return 3;
+  }
   return 1;
 }
 
@@ -147,6 +171,12 @@ export function deriveTranscriptHistoryRows(
       createdAt: activity.createdAt,
       activity,
     })),
+    ...thread.checkpoints.map((checkpoint) => ({
+      kind: "checkpoint" as const,
+      id: `checkpoint:${checkpoint.turnId}:${checkpoint.checkpointTurnCount}`,
+      createdAt: checkpoint.completedAt,
+      checkpoint,
+    })),
     ...thread.proposedPlans.map((plan) => ({
       kind: "plan" as const,
       id: `plan:${plan.id}`,
@@ -175,6 +205,17 @@ export function deriveTranscriptHistoryRows(
 
   for (const item of timelineItems) {
     if (item.kind === "activity") {
+      if (item.activity.tone === "tool") {
+        flushActivityGroup();
+        rows.push({
+          kind: "tool",
+          id: item.id,
+          createdAt: item.createdAt,
+          turnId: item.activity.turnId,
+          activity: item.activity,
+        });
+        continue;
+      }
       activityGroup.push(item.activity);
       continue;
     }
@@ -188,6 +229,17 @@ export function deriveTranscriptHistoryRows(
         createdAt: item.createdAt,
         turnId: item.message.turnId,
         message: item.message,
+      });
+      continue;
+    }
+
+    if (item.kind === "checkpoint") {
+      rows.push({
+        kind: "checkpoint",
+        id: item.id,
+        createdAt: item.createdAt,
+        turnId: item.checkpoint.turnId,
+        checkpoint: item.checkpoint,
       });
       continue;
     }
@@ -274,11 +326,35 @@ export function estimateTranscriptHistoryRowHeight(
   row: TranscriptHistoryRow,
   options?: {
     readonly widthPx?: number | null;
+    readonly expandedToolRowIds?: ReadonlySet<string>;
+    readonly collapsedCheckpointRowIds?: ReadonlySet<string>;
+    readonly checkpointDiffByRowId?: ReadonlyMap<string, {
+      readonly status: "loading" | "ready" | "error";
+      readonly diff?: string;
+    }>;
   },
 ) {
   switch (row.kind) {
     case "message": {
       return 38 + estimateTextHeight(row.message.text, options?.widthPx) + ((row.message.attachments?.length ?? 0) * 22);
+    }
+
+    case "tool": {
+      const tool = getToolActivityDisplay(row.activity);
+      let height = 42;
+      if (!options?.expandedToolRowIds?.has(row.id)) {
+        return height;
+      }
+      if (tool.detail) {
+        height += estimateTextHeight(tool.detail, options?.widthPx);
+      }
+      if (tool.command) {
+        height += estimateTextHeight(tool.command, options?.widthPx);
+      }
+      if (tool.output) {
+        height += estimateTextHeight(tool.output, options?.widthPx);
+      }
+      return height + 12;
     }
 
     case "activity-group": {
@@ -290,6 +366,20 @@ export function estimateTranscriptHistoryRowHeight(
 
     case "plan":
       return 38 + estimateTextHeight(row.plan.planMarkdown, options?.widthPx);
+
+    case "checkpoint": {
+      let height = 48 + (row.checkpoint.files.length * 18);
+      if (options?.collapsedCheckpointRowIds?.has(row.id)) {
+        return height;
+      }
+      const diffState = options?.checkpointDiffByRowId?.get(row.id);
+      if (diffState?.status === "ready" && diffState.diff) {
+        height += Math.max(80, estimateTextHeight(diffState.diff, options?.widthPx));
+      } else {
+        height += 24;
+      }
+      return height;
+    }
 
     case "working":
       return 38;
@@ -323,4 +413,49 @@ export function getActivityDetail(activity: OrchestrationThreadActivity) {
     ?? asString(payload?.explanation)
     ?? null
   );
+}
+
+export function getToolActivityDisplay(activity: OrchestrationThreadActivity) {
+  const payload = asRecord(activity.payload);
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  const input = asRecord(item?.input);
+  const result = asRecord(item?.result);
+  const command = Array.isArray(input?.command)
+    ? input.command.filter((part): part is string => typeof part === "string").join(" ")
+    : null;
+  const output = asString(result?.content);
+  const title = asString(payload?.title) ?? activity.summary;
+  const detail = asString(payload?.detail) ?? asString(payload?.message) ?? asString(payload?.explanation);
+  const itemType = asString(payload?.itemType);
+
+  return {
+    title,
+    detail,
+    command,
+    output,
+    itemType,
+    status: getToolActivityStatus(activity),
+  };
+}
+
+export function getToolActivityStatus(activity: OrchestrationThreadActivity): "running" | "done" | "error" | "declined" {
+  const payload = asRecord(activity.payload);
+  const status = asString(payload?.status);
+  if (status === "inProgress") {
+    return "running";
+  }
+  if (status === "completed") {
+    return "done";
+  }
+  if (status === "declined") {
+    return "declined";
+  }
+  if (activity.tone === "error") {
+    return "error";
+  }
+  if (activity.kind.endsWith(".started")) {
+    return "running";
+  }
+  return "done";
 }

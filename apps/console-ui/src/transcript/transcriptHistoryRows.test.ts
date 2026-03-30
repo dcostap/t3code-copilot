@@ -18,11 +18,14 @@ describe("deriveTranscriptHistoryRows", () => {
     expect(deriveTranscriptHistoryRows(thread).map((row) => row.kind)).toEqual([
       "message",
       "activity-group",
+      "tool",
+      "tool",
+      "checkpoint",
       "message",
       "message",
       "activity-group",
       "plan",
-      "activity-group",
+      "tool",
       "message",
       "message",
       "activity-group",
@@ -52,7 +55,7 @@ describe("getFirstUnvirtualizedRowIndex", () => {
     const thread = buildRunningThreadFixture();
     const rows = deriveTranscriptHistoryRows(thread);
 
-    expect(getFirstUnvirtualizedRowIndex(rows, thread)).toBe(3);
+    expect(getFirstUnvirtualizedRowIndex(rows, thread)).toBe(6);
   });
 });
 

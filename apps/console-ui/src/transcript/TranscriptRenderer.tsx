@@ -9,7 +9,7 @@ import {
   useState,
   type DragEvent as ReactDragEvent,
 } from "react";
-import type { OrchestrationThread } from "@t3tools/contracts";
+import type { OrchestrationThread, ThreadId } from "@t3tools/contracts";
 
 import type { ComposerImageAttachment } from "../composerAttachments";
 import { TranscriptHistory } from "./TranscriptHistory";
@@ -18,6 +18,11 @@ interface TranscriptRendererProps {
   readonly composerAttachments?: ReadonlyArray<ComposerImageAttachment>;
   readonly cwd?: string | null;
   readonly draftValue?: string;
+  readonly getTurnDiff?: (input: {
+    readonly threadId: ThreadId;
+    readonly fromTurnCount: number;
+    readonly toTurnCount: number;
+  }) => Promise<string>;
   readonly thread?: OrchestrationThread | null;
   readonly projectRoot?: string | null;
   readonly paneActive?: boolean;
@@ -433,6 +438,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     {
       composerAttachments = [],
       draftValue = "",
+      getTurnDiff,
+      projectRoot,
       thread = null,
       initialScrollOffsetFromBottom,
       paneActive = false,
@@ -583,6 +590,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           aria-label="Conversation history"
         >
           <TranscriptHistory
+            getTurnDiff={getTurnDiff}
+            projectRoot={projectRoot}
             thread={thread}
             initialScrollOffsetFromBottom={initialScrollOffsetFromBottom}
             onScrollOffsetFromBottomChange={onScrollOffsetFromBottomChange}
