@@ -581,22 +581,21 @@ body {
 }
 
 .transcript-historyRow__reasoningSurface {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
   min-width: 0;
-  padding: 2px 0 2px 12px;
-  border-left: 2px solid rgba(219, 195, 148, 0.28);
 }
 
 .transcript-historyRow__reasoningSummary {
-  color: #dbc394;
+  color: #97a1ab;
+  font-style: italic;
+  line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .transcript-historyRow__reasoningText {
-  color: #aeb7c0;
+  color: #97a1ab;
+  font-style: italic;
+  line-height: 1.55;
 }
 
 .transcript-historyRow__markdownTable {
@@ -758,9 +757,7 @@ body {
 }
 
 .transcript-blockHistory__commandWidgetSummary {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
+  display: block;
   min-width: 0;
   width: 100%;
   color: #8a939d;
@@ -769,18 +766,35 @@ body {
   text-overflow: ellipsis;
 }
 
-.transcript-historyToolSummary__status,
-.transcript-historyToolSummary__meta {
-  flex: 0 0 auto;
-  color: #7f8a94;
-  text-transform: lowercase;
+.transcript-blockHistory__commandWidgetSurfaceExpanded .transcript-blockHistory__commandWidgetSummary {
+  white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
 }
 
 .transcript-historyToolSummary__subject {
   min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.transcript-blockHistory__token.tok-commandWidgetGlyph,
+.transcript-blockHistory__token.tok-commandWidgetPrefix,
+.transcript-historyToolSummary__subject,
+.transcript-blockHistory__token.tok-commandWidgetMeta {
+  display: inline;
+}
+
+.transcript-blockHistory__token.tok-commandWidgetGlyph {
+  margin-right: 6px;
+  font-weight: 700;
+}
+
+.transcript-blockHistory__token.tok-commandWidgetPrefix {
+  margin-right: 8px;
+}
+
+.transcript-blockHistory__token.tok-commandWidgetMeta {
+  margin-left: 8px;
 }
 
 .transcript-historyToolBody__section + .transcript-historyToolBody__section {

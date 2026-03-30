@@ -66,6 +66,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   const lastKnownOffsetFromBottomRef = useRef(0);
   const previousThreadIdRef = useRef<string | null>(null);
   const previousThreadUpdatedAtRef = useRef<string | null>(null);
+  const pendingMeasureFrameRef = useRef<number | null>(null);
 
   const rowVirtualizer = useVirtualizer({
     count: firstUnvirtualizedRowIndex,
@@ -117,9 +118,20 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     };
   }, [thread?.id]);
 
+  const scheduleMeasure = useCallback(() => {
+    if (pendingMeasureFrameRef.current !== null) {
+      return;
+    }
+
+    pendingMeasureFrameRef.current = window.requestAnimationFrame(() => {
+      pendingMeasureFrameRef.current = null;
+      rowVirtualizer.measure();
+    });
+  }, [rowVirtualizer]);
+
   useEffect(() => {
-    rowVirtualizer.measure();
-  }, [checkpointDiffByRowId, collapsedCheckpointRowIds, expandedToolRowIds, firstUnvirtualizedRowIndex, rowVirtualizer, rows]);
+    scheduleMeasure();
+  }, [checkpointDiffByRowId, collapsedCheckpointRowIds, expandedToolRowIds, firstUnvirtualizedRowIndex, rows, scheduleMeasure]);
 
   useEffect(() => {
     setExpandedToolRowIds(new Set());
@@ -131,8 +143,17 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     if (historyWidthPx === null) {
       return;
     }
-    rowVirtualizer.measure();
-  }, [historyWidthPx, rowVirtualizer]);
+    scheduleMeasure();
+  }, [historyWidthPx, scheduleMeasure]);
+
+  useEffect(() => {
+    return () => {
+      const frame = pendingMeasureFrameRef.current;
+      if (frame !== null) {
+        window.cancelAnimationFrame(frame);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (_item, _delta, instance) => {
@@ -297,13 +318,10 @@ export const TranscriptHistory = memo(function TranscriptHistory({
           return (
             <div
               key={virtualItem.key}
+              data-index={virtualItem.index}
               className="transcript-blockHistory__virtualBlock"
               data-has-leading-gap={virtualItem.index > 0 ? "true" : undefined}
-              ref={(element) => {
-                if (element) {
-                  rowVirtualizer.measureElement(element);
-                }
-              }}
+              ref={rowVirtualizer.measureElement}
               style={{
                 transform: `translateY(${virtualItem.start}px)`,
               }}
@@ -446,7 +464,7 @@ export function formatTranscriptHistoryRow(row: TranscriptHistoryRow): string {
 
     case "tool": {
       return [
-        `tool: ${getToolSummaryLabel(row.tool)} ${getToolDisplaySubject(row.tool)}`.trim(),
+        `tool: ${getToolPrefix(row.tool)} ${getToolDisplaySubject(row.tool)}`.trim(),
         ...getExpandedToolBodySections(row.tool).map((section) => section.text),
         ...(row.tool.inlineUnifiedDiff ? [row.tool.inlineUnifiedDiff] : []),
       ].join("\n");
@@ -526,15 +544,15 @@ function TranscriptReasoningRow({
   return (
     <div className="transcript-historyRow transcript-historyRow--reasoning">
       <div className="transcript-historyRow__reasoningSurface">
-        {reasoning.variant === "summary" ? (
-          <div className="transcript-historyRow__reasoningSummary">{reasoning.text}</div>
-        ) : (
-          <TranscriptTextBlock
-            text={reasoning.text}
-            projectRoot={projectRoot}
-            lineClassName="transcript-historyRow__reasoningText"
-          />
-        )}
+        {reasoning.variant === "summary"
+          ? <div className="transcript-historyRow__reasoningSummary">{reasoning.text}</div>
+          : (
+              <TranscriptTextBlock
+                text={reasoning.text}
+                projectRoot={projectRoot}
+                lineClassName="transcript-historyRow__reasoningText"
+              />
+            )}
       </div>
     </div>
   );
@@ -602,6 +620,7 @@ function TranscriptToolRow({
   const bodySections = getExpandedToolBodySections(tool);
   const expandable = bodySections.length > 0 || Boolean(tool.inlineUnifiedDiff);
   const statusClassName = getWorkItemStatusClassName(tool.status);
+  const summarySubject = getVisibleToolSummarySubject(tool);
 
   return (
     <div className="transcript-historyRow transcript-historyRow--tool">
@@ -623,10 +642,11 @@ function TranscriptToolRow({
         )}
         <div className="transcript-blockHistory__commandWidgetContent">
           <div className="transcript-blockHistory__commandWidgetSummary">
-            <span className="transcript-historyToolSummary__status">{getToolSummaryLabel(tool)}</span>
-            <span className="transcript-historyToolSummary__subject">{getToolDisplaySubject(tool)}</span>
+            <span className="transcript-blockHistory__token tok-commandWidgetGlyph">{getToolGlyph(tool)}</span>
+            <span className="transcript-blockHistory__token tok-commandWidgetPrefix">{getToolPrefix(tool)}</span>
+            {summarySubject ? <span className="transcript-historyToolSummary__subject">{summarySubject}</span> : null}
             {tool.timingLabel ? (
-              <span className="transcript-historyToolSummary__meta">{tool.timingLabel}</span>
+              <span className="transcript-blockHistory__token tok-commandWidgetMeta">{tool.timingLabel}</span>
             ) : null}
           </div>
           {isExpanded && (
@@ -886,22 +906,71 @@ function shouldRenderRoleSeparator(
   return leftRole !== rightRole;
 }
 
-function getToolSummaryLabel(
-  tool: Extract<TranscriptHistoryRow, { readonly kind: "tool" }>["tool"],
-) {
+function getToolGlyph(tool: Extract<TranscriptHistoryRow, { readonly kind: "tool" }>["tool"]) {
   if (tool.status === "running") {
-    return tool.itemKind === "file-change" ? "editing" : "running";
+    return "↻";
   }
   if (tool.status === "error") {
-    return "failed";
+    return "✕";
   }
   if (tool.status === "declined") {
-    return "declined";
+    return "−";
   }
+  return "✓";
+}
+
+function humanizeExecutionLabel(label: string) {
+  const normalized = label.trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  if (normalized.length === 0) {
+    return "Tool";
+  }
+  if (!/[A-Z]/.test(normalized)) {
+    return normalized.replace(/\b\w/g, (segment) => segment.toUpperCase());
+  }
+  return normalized;
+}
+
+function getToolPrefix(tool: Extract<TranscriptHistoryRow, { readonly kind: "tool" }>["tool"]) {
+  if (tool.itemKind === "command") {
+    if (tool.status === "running") {
+      return "Running";
+    }
+    if (tool.status === "error") {
+      return "Failed";
+    }
+    if (tool.status === "declined") {
+      return "Declined";
+    }
+    return "Ran";
+  }
+
   if (tool.itemKind === "file-change") {
-    return "edited";
+    if (tool.status === "running") {
+      return "Editing";
+    }
+    if (tool.status === "error") {
+      return "Failed";
+    }
+    if (tool.status === "declined") {
+      return "Declined";
+    }
+    return "Edited";
   }
-  return "done";
+
+  return humanizeExecutionLabel(tool.title);
+}
+
+function getVisibleToolSummarySubject(
+  tool: Extract<TranscriptHistoryRow, { readonly kind: "tool" }>["tool"],
+) {
+  const subject = getToolDisplaySubject(tool);
+  if (
+    tool.itemKind === "tool"
+    && subject.trim().localeCompare(tool.title.trim(), undefined, { sensitivity: "accent" }) === 0
+  ) {
+    return null;
+  }
+  return subject;
 }
 
 function getExpandedToolBodySections(

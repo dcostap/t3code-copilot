@@ -1177,14 +1177,18 @@ export function estimateTranscriptHistoryRowHeight(
 
     case "reasoning":
       return row.reasoning.variant === "summary"
-        ? 28 + estimateTextHeight(row.reasoning.text, options?.widthPx)
-        : 34 + estimateTextHeight(row.reasoning.text, options?.widthPx);
+        ? 32 + estimateTextHeight(row.reasoning.text, options?.widthPx)
+        : 40 + estimateTextHeight(row.reasoning.text, options?.widthPx);
 
     case "tool": {
       let height = 42;
       if (!options?.expandedToolRowIds?.has(row.id)) {
         return height;
       }
+      height = 22 + estimateTextHeight(
+        [row.tool.title, getToolDisplaySubject(row.tool), row.tool.timingLabel ?? ""].filter(Boolean).join("  "),
+        options?.widthPx,
+      );
       if (row.tool.detail) {
         height += estimateTextHeight(row.tool.detail, options?.widthPx);
       }
