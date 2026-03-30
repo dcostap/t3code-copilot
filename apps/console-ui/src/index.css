@@ -481,7 +481,8 @@ body {
   outline: none;
 }
 
-.transcript-blockHistory {
+.transcript-blockHistory,
+.transcript-historyList {
   position: relative;
   display: block;
   flex: 1 1 auto;
@@ -539,6 +540,8 @@ body {
 }
 
 .transcript-historyRow {
+  display: flex;
+  flex-direction: column;
   gap: 6px;
 }
 
@@ -567,56 +570,42 @@ body {
   color: #dec48e;
 }
 
-.transcript-historyRow__messageLine--assistant {
+.transcript-historyRow__line {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transcript-historyRow__line--assistant {
   color: #d8e1ea;
 }
 
-.transcript-historyRow__messageLine--system {
+.transcript-historyRow__line--system {
   color: #d7c297;
 }
 
-.transcript-historyRow__attachmentLine,
-.transcript-historyRow__activityDetail,
-.transcript-historyRow__planLine {
+.transcript-historyRow__line--muted {
   color: #93a0ac;
 }
 
-.transcript-historyRow__activityItem {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.transcript-historyRow__activitySummary--tool {
+.transcript-historyRow__line--tool {
   color: #9bc9ff;
 }
 
-.transcript-historyRow__activitySummary--approval {
+.transcript-historyRow__line--approval {
   color: #dfc081;
 }
 
-.transcript-historyRow__activitySummary--error {
+.transcript-historyRow__line--error {
   color: #e49a9a;
 }
 
-.transcript-historyRow__activityDetail {
-  padding-left: 2ch;
-}
-
-.transcript-historyRow__workingLine {
+.transcript-historyRow__line--working {
   color: #9bc9ff;
-  animation: transcript-history-pulse 1.2s ease-in-out infinite;
 }
 
-@keyframes transcript-history-pulse {
-  0%,
-  100% {
-    opacity: 0.72;
-  }
-
-  50% {
-    opacity: 1;
-  }
+.transcript-historyRow__line--indented {
+  padding-left: 2ch;
 }
 
 .transcript-blockHistory__block {

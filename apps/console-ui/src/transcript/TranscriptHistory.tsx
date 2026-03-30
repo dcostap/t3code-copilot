@@ -164,7 +164,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   const staticRows = rows.slice(firstUnvirtualizedRowIndex);
 
   return (
-    <div className="transcript-blockHistory transcript-history__viewport">
+    <div className="transcript-historyList transcript-history__viewport">
       <div
         className="transcript-blockHistory__virtualCanvas"
         style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
@@ -208,37 +208,41 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   );
 });
 
-function TranscriptHistoryRowView({ row }: { readonly row: TranscriptHistoryRow }) {
-  switch (row.kind) {
-    case "message":
-      return <TranscriptMessageRow message={row.message} />;
+type TranscriptHistoryLineTone =
+  | "default"
+  | "muted"
+  | "assistant"
+  | "system"
+  | "tool"
+  | "approval"
+  | "error"
+  | "working";
 
-    case "activity-group":
-      return <TranscriptActivityGroupRow activities={row.activities} />;
-
-    case "plan":
-      return <TranscriptPlanRow markdown={row.plan.planMarkdown} />;
-
-    case "working":
-      return <TranscriptWorkingRow label={row.label} />;
-  }
+interface TranscriptHistoryDisplayLine {
+  readonly key: string;
+  readonly text: string;
+  readonly tone: TranscriptHistoryLineTone;
+  readonly indented?: boolean;
 }
 
-function TranscriptMessageRow({ message }: { readonly message: OrchestrationMessage }) {
+interface TranscriptHistoryDisplayRow {
+  readonly label: string;
+  readonly labelTone?: OrchestrationMessage["role"];
+  readonly lines: ReadonlyArray<TranscriptHistoryDisplayLine>;
+}
+
+function TranscriptHistoryRowView({ row }: { readonly row: TranscriptHistoryRow }) {
+  const display = formatTranscriptHistoryRow(row);
+
   return (
-    <div className="transcript-blockHistory__block transcript-historyRow transcript-historyRow--message">
-      <HistoryLabel tone={message.role}>{getMessageRoleLabel(message.role)}</HistoryLabel>
-      {message.attachments?.map((attachment) => (
-        <HistoryLine
-          key={attachment.id}
-          className="transcript-historyRow__attachmentLine"
-          text={formatAttachmentLine(attachment)}
-        />
-      ))}
-      {getKeyedLines(message.id, message.text).map((line) => (
+    <div className={`transcript-historyRow transcript-historyRow--${row.kind}`}>
+      {display.labelTone
+        ? <HistoryLabel tone={display.labelTone}>{display.label}</HistoryLabel>
+        : <HistoryLabel>{display.label}</HistoryLabel>}
+      {display.lines.map((line) => (
         <HistoryLine
           key={line.key}
-          className={`transcript-historyRow__messageLine transcript-historyRow__messageLine--${message.role}`}
+          className={`transcript-historyRow__line--${line.tone}${line.indented ? " transcript-historyRow__line--indented" : ""}`}
           text={line.text}
         />
       ))}
@@ -246,56 +250,69 @@ function TranscriptMessageRow({ message }: { readonly message: OrchestrationMess
   );
 }
 
-function TranscriptActivityGroupRow({
-  activities,
-}: {
-  readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
-}) {
-  return (
-    <div className="transcript-blockHistory__block transcript-historyRow transcript-historyRow--activityGroup">
-      <HistoryLabel>activity</HistoryLabel>
-      {activities.map((activity) => {
-        const detail = getActivityDetail(activity);
-        return (
-          <div key={activity.id} className="transcript-historyRow__activityItem">
-            <HistoryLine
-              className={`transcript-historyRow__activitySummary transcript-historyRow__activitySummary--${activity.tone}`}
-              text={activity.summary}
-            />
-            {detail ? (
-              <HistoryLine
-                className="transcript-historyRow__activityDetail"
-                text={detail}
-              />
-            ) : null}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
+export function formatTranscriptHistoryRow(row: TranscriptHistoryRow): TranscriptHistoryDisplayRow {
+  switch (row.kind) {
+    case "message":
+      return {
+        label: getMessageRoleLabel(row.message.role),
+        labelTone: row.message.role,
+        lines: [
+          ...(row.message.attachments?.map((attachment) => ({
+            key: attachment.id,
+            text: formatAttachmentLine(attachment),
+            tone: "muted" as const,
+          })) ?? []),
+          ...getKeyedLines(row.message.id, row.message.text).map((line) => ({
+            key: line.key,
+            text: line.text,
+            tone: getMessageLineTone(row.message.role),
+          })),
+        ],
+      };
 
-function TranscriptPlanRow({ markdown }: { readonly markdown: string }) {
-  return (
-    <div className="transcript-blockHistory__block transcript-historyRow transcript-historyRow--plan">
-      <HistoryLabel>plan</HistoryLabel>
-      {getKeyedLines("plan", markdown).map((line) => (
-        <HistoryLine key={line.key} className="transcript-historyRow__planLine" text={line.text} />
-      ))}
-    </div>
-  );
-}
+    case "activity-group":
+      return {
+        label: "activity",
+        lines: row.activities.flatMap((activity) => {
+          const detail = getActivityDetail(activity);
+          return [
+            {
+              key: `summary:${activity.id}`,
+              text: `[${activity.tone}] ${activity.summary}`,
+              tone: getActivityLineTone(activity.tone),
+            },
+            ...(detail
+              ? [{
+                  key: `detail:${activity.id}`,
+                  text: detail,
+                  tone: "muted" as const,
+                  indented: true,
+                }]
+              : []),
+          ];
+        }),
+      };
 
-function TranscriptWorkingRow({ label }: { readonly label: string | null }) {
-  return (
-    <div className="transcript-blockHistory__block transcript-historyRow transcript-historyRow--working">
-      <HistoryLabel>working</HistoryLabel>
-      <HistoryLine
-        className="transcript-historyRow__workingLine"
-        text={label ? `${label}...` : "Waiting for the next transcript update..."}
-      />
-    </div>
-  );
+    case "plan":
+      return {
+        label: "plan",
+        lines: getKeyedLines(row.plan.id, row.plan.planMarkdown).map((line) => ({
+          key: line.key,
+          text: line.text,
+          tone: "muted" as const,
+        })),
+      };
+
+    case "working":
+      return {
+        label: "working",
+        lines: [{
+          key: row.id,
+          text: row.label ? `${row.label}...` : "Waiting for the next transcript update...",
+          tone: "working",
+        }],
+      };
+  }
 }
 
 function HistoryLabel({
@@ -306,14 +323,37 @@ function HistoryLabel({
   readonly tone?: OrchestrationMessage["role"];
 }) {
   return (
-    <div className="transcript-blockHistory__lineFrame">
-      <div
-        className={`transcript-blockHistory__line transcript-historyRow__label${tone ? ` transcript-historyRow__label--${tone}` : ""}`}
-      >
-        {children}
-      </div>
+    <div
+      className={`transcript-historyRow__label${tone ? ` transcript-historyRow__label--${tone}` : ""}`}
+    >
+      {children}
     </div>
   );
+}
+
+function getMessageLineTone(role: OrchestrationMessage["role"]): TranscriptHistoryLineTone {
+  if (role === "assistant") {
+    return "assistant";
+  }
+  if (role === "system") {
+    return "system";
+  }
+  return "default";
+}
+
+function getActivityLineTone(
+  tone: OrchestrationThreadActivity["tone"],
+): TranscriptHistoryLineTone {
+  if (tone === "tool") {
+    return "tool";
+  }
+  if (tone === "approval") {
+    return "approval";
+  }
+  if (tone === "error") {
+    return "error";
+  }
+  return "default";
 }
 
 function HistoryLine({
@@ -324,10 +364,8 @@ function HistoryLine({
   readonly text: string;
 }) {
   return (
-    <div className="transcript-blockHistory__lineFrame">
-      <div className={`transcript-blockHistory__line ${className ?? ""}`.trim()}>
-        {text.length > 0 ? text : " "}
-      </div>
+    <div className={`transcript-historyRow__line${className ? ` ${className}` : ""}`}>
+      {text.length > 0 ? text : " "}
     </div>
   );
 }
