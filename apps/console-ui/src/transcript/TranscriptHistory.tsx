@@ -1400,7 +1400,7 @@ function TranscriptDiffBody({
   } | undefined;
 }) {
   if (!diffState || diffState.status === "loading") {
-    return <div className="transcript-blockHistory__inlineDiffStateMessage">Loading diffÔÇª</div>;
+    return <div className="transcript-blockHistory__inlineDiffStateMessage">Loading diff...</div>;
   }
   if (diffState.status === "error") {
     return (
@@ -1567,15 +1567,15 @@ function shouldRenderRoleSeparator(
 
 function getToolGlyph(tool: Extract<TranscriptHistoryRow, { readonly kind: "tool" }>["tool"]) {
   if (tool.status === "running") {
-    return "Ôå╗";
+    return "*";
   }
   if (tool.status === "error") {
-    return "Ô£ò";
+    return "!";
   }
   if (tool.status === "declined") {
-    return "ÔêÆ";
+    return "-";
   }
-  return "Ô£ô";
+  return "+";
 }
 
 function humanizeExecutionLabel(label: string) {
