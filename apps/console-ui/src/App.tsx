@@ -342,9 +342,21 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
   handleSubmit,
 }: ConversationPaneTranscriptProps) {
   const deferredThread = useDeferredValue(paneView.thread);
-  const loadingLabel = paneView.pane.kind === "thread" && paneView.thread !== deferredThread
-    ? "loading conversation"
-    : null;
+  const threadSwitchPending = paneView.pane.kind === "thread" && paneView.thread !== deferredThread;
+  const [threadSwitchLoaderVisible, setThreadSwitchLoaderVisible] = useState(false);
+  useEffect(() => {
+    if (!threadSwitchPending) {
+      setThreadSwitchLoaderVisible(false);
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      setThreadSwitchLoaderVisible(true);
+    }, 120);
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [threadSwitchPending, paneView.thread?.id]);
+  const loadingLabel = threadSwitchLoaderVisible ? "loading conversation" : null;
   const handleTranscriptRef = useCallback((handle: TranscriptRendererHandle | null) => {
     registerPaneHandle(paneView.pane.id, handle);
   }, [paneView.pane.id, registerPaneHandle]);
@@ -373,6 +385,7 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
       projectRoot={paneView.project.workspaceRoot}
       paneActive={paneActive}
       interactionMode={paneView.interactionMode}
+      loading={threadSwitchPending}
       loadingLabel={loadingLabel}
       promptFocusDisabled={paletteOpen || hasBlockingModal}
       promptInputDisabled={hasBlockingModal}

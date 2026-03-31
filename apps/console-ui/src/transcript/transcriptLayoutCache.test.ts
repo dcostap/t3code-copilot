@@ -5,8 +5,10 @@ import type { OrchestrationThread } from "@t3tools/contracts";
 import { buildTestSnapshot } from "../testSupport/testSnapshot";
 import { deriveTranscriptHistoryRows } from "./transcriptHistoryRows";
 import {
+  collectPreparedTranscriptLayoutStateRowIds,
   createPreparedTranscriptLayoutKey,
   derivePreparedTranscriptBoundary,
+  getChangedPreparedTranscriptLayoutStateRowIds,
 } from "./transcriptLayoutCache";
 
 describe("derivePreparedTranscriptBoundary", () => {
@@ -95,6 +97,28 @@ describe("createPreparedTranscriptLayoutKey", () => {
       rows,
       widthPx: Number.NaN,
     })).toThrow("Prepared transcript layout requires a finite positive width.");
+  });
+});
+
+describe("getChangedPreparedTranscriptLayoutStateRowIds", () => {
+  it("invalidates rows whose interactive layout category membership changed", () => {
+    const previous = collectPreparedTranscriptLayoutStateRowIds({
+      expandedToolRowIds: new Set(["tool-1"]),
+      checkpointDiffByRowId: new Map([
+        ["checkpoint-1", { status: "ready", diff: "@@ diff @@" }],
+      ]),
+    });
+    const next = collectPreparedTranscriptLayoutStateRowIds({
+      collapsedCheckpointRowIds: new Set(["checkpoint-1"]),
+      checkpointDiffByRowId: new Map([
+        ["checkpoint-1", { status: "ready", diff: "@@ diff @@" }],
+        ["checkpoint-2", { status: "ready", diff: "@@ next @@" }],
+      ]),
+    });
+
+    expect(
+      Array.from(getChangedPreparedTranscriptLayoutStateRowIds(previous, next)).toSorted(),
+    ).toEqual(["checkpoint-1", "checkpoint-2", "tool-1"]);
   });
 });
 

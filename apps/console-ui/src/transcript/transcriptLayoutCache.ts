@@ -14,6 +14,12 @@ import {
   type PreparedTranscriptLayoutStateInput,
 } from "./transcriptLayoutTypes";
 
+export interface PreparedTranscriptLayoutStateRowIds {
+  readonly expandedToolRowIds: ReadonlyArray<string>;
+  readonly collapsedCheckpointRowIds: ReadonlyArray<string>;
+  readonly readyCheckpointDiffRowIds: ReadonlyArray<string>;
+}
+
 interface CreatePreparedTranscriptLayoutKeyInput {
   readonly rows: ReadonlyArray<TranscriptHistoryRow>;
   readonly thread: OrchestrationThread | null;
@@ -53,18 +59,37 @@ export function normalizePreparedTranscriptWidthPx(widthPx: number) {
 export function createPreparedTranscriptLayoutStateSignature(
   input: PreparedTranscriptLayoutStateInput | undefined,
 ) {
-  const expandedToolRowIds = Array.from(input?.expandedToolRowIds ?? []).toSorted();
-  const collapsedCheckpointRowIds = Array.from(input?.collapsedCheckpointRowIds ?? []).toSorted();
-  const readyCheckpointDiffRowIds = Array.from(input?.checkpointDiffByRowId?.entries() ?? [])
-    .filter(([, state]) => state.status === "ready" && typeof state.diff === "string" && state.diff.length > 0)
-    .map(([rowId]) => rowId)
-    .toSorted();
+  const stateRowIds = collectPreparedTranscriptLayoutStateRowIds(input);
 
   return hashTranscriptLayoutToken([
-    `expanded:${expandedToolRowIds.join(",")}`,
-    `collapsed:${collapsedCheckpointRowIds.join(",")}`,
-    `checkpointDiff:${readyCheckpointDiffRowIds.join(",")}`,
+    `expanded:${stateRowIds.expandedToolRowIds.join(",")}`,
+    `collapsed:${stateRowIds.collapsedCheckpointRowIds.join(",")}`,
+    `checkpointDiff:${stateRowIds.readyCheckpointDiffRowIds.join(",")}`,
   ].join("|"));
+}
+
+export function collectPreparedTranscriptLayoutStateRowIds(
+  input: PreparedTranscriptLayoutStateInput | undefined,
+): PreparedTranscriptLayoutStateRowIds {
+  return {
+    expandedToolRowIds: Array.from(input?.expandedToolRowIds ?? []).toSorted(),
+    collapsedCheckpointRowIds: Array.from(input?.collapsedCheckpointRowIds ?? []).toSorted(),
+    readyCheckpointDiffRowIds: Array.from(input?.checkpointDiffByRowId?.entries() ?? [])
+      .filter(([, state]) => state.status === "ready" && typeof state.diff === "string" && state.diff.length > 0)
+      .map(([rowId]) => rowId)
+      .toSorted(),
+  };
+}
+
+export function getChangedPreparedTranscriptLayoutStateRowIds(
+  previous: PreparedTranscriptLayoutStateRowIds | undefined,
+  next: PreparedTranscriptLayoutStateRowIds,
+): ReadonlySet<string> {
+  const changedRowIds = new Set<string>();
+  addSymmetricDifference(previous?.expandedToolRowIds, next.expandedToolRowIds, changedRowIds);
+  addSymmetricDifference(previous?.collapsedCheckpointRowIds, next.collapsedCheckpointRowIds, changedRowIds);
+  addSymmetricDifference(previous?.readyCheckpointDiffRowIds, next.readyCheckpointDiffRowIds, changedRowIds);
+  return changedRowIds;
 }
 
 export function createPreparedTranscriptLayoutKey(
@@ -201,6 +226,25 @@ function hashTranscriptLayoutToken(value: string) {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function addSymmetricDifference(
+  previous: ReadonlyArray<string> | undefined,
+  next: ReadonlyArray<string>,
+  target: Set<string>,
+) {
+  const previousSet = new Set(previous ?? []);
+  const nextSet = new Set(next);
+  for (const rowId of previousSet) {
+    if (!nextSet.has(rowId)) {
+      target.add(rowId);
+    }
+  }
+  for (const rowId of nextSet) {
+    if (!previousSet.has(rowId)) {
+      target.add(rowId);
+    }
+  }
 }
 
 function roundToQuantum(value: number, quantum: number) {

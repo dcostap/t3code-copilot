@@ -362,9 +362,7 @@ body {
   z-index: 3;
   display: grid;
   place-items: center;
-  background:
-    linear-gradient(180deg, rgba(12, 15, 19, 0.96), rgba(12, 15, 19, 0.92)),
-    rgba(12, 15, 19, 0.94);
+  pointer-events: none;
 }
 
 .transcript-search {
@@ -445,8 +443,8 @@ body {
 }
 
 .transcript-history--loading {
-  visibility: hidden;
   pointer-events: none;
+  user-select: none;
 }
 
 .transcript-history--cmScroller {

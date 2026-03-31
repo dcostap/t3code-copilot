@@ -29,6 +29,7 @@ interface TranscriptRendererProps {
   readonly paneActive?: boolean;
   readonly interactionMode?: "default" | "plan";
   readonly initialScrollOffsetFromBottom?: number | null;
+  readonly loading?: boolean;
   readonly loadingLabel?: string | null;
   readonly promptFocusDisabled?: boolean;
   readonly promptInputDisabled?: boolean;
@@ -450,6 +451,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       initialScrollOffsetFromBottom,
       paneActive = false,
       interactionMode = "default",
+      loading = false,
       loadingLabel = null,
       promptFocusDisabled = false,
       promptInputDisabled = false,
@@ -470,9 +472,8 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const onRemoveImageRef = useRef(onRemoveImage);
     const onSubmitRef = useRef(onSubmit);
     const [dragOver, setDragOver] = useState(false);
-    const [historyLoadingLabel, setHistoryLoadingLabel] = useState<string | null>(null);
-    const effectiveLoadingLabel = loadingLabel ?? historyLoadingLabel;
-    const isLoading = effectiveLoadingLabel !== null;
+    const effectiveLoadingLabel = loadingLabel;
+    const isLoading = loading;
 
     useEffect(() => {
       onAddImageFilesRef.current = onAddImageFiles;
@@ -602,7 +603,6 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
         >
           <TranscriptHistory
             getTurnDiff={getTurnDiff}
-            onLoadingStateChange={setHistoryLoadingLabel}
             projectRoot={projectRoot}
             thread={thread}
             initialScrollOffsetFromBottom={initialScrollOffsetFromBottom}
