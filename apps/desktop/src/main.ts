@@ -60,6 +60,7 @@ syncShellEnvironment();
 const PICK_FOLDER_CHANNEL = "desktop:pick-folder";
 const CONFIRM_CHANNEL = "desktop:confirm";
 const SET_THEME_CHANNEL = "desktop:set-theme";
+const WRITE_TEXT_FILE_CHANNEL = "desktop:write-text-file";
 const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
 const OPEN_EXTERNAL_CHANNEL = "desktop:open-external";
 const MENU_ACTION_CHANNEL = "desktop:menu-action";
@@ -221,6 +222,25 @@ function getSafeTheme(rawTheme: unknown): DesktopTheme | null {
   }
 
   return null;
+}
+
+function getSafeTextFilePath(rawPath: unknown): string | null {
+  if (typeof rawPath !== "string") {
+    return null;
+  }
+
+  const trimmedPath = rawPath.trim();
+  if (trimmedPath.length === 0 || !Path.isAbsolute(trimmedPath)) {
+    return null;
+  }
+
+  const resolvedPath = Path.resolve(trimmedPath);
+  const extension = Path.extname(resolvedPath).toLowerCase();
+  if (extension !== ".txt" && extension !== ".log") {
+    return null;
+  }
+
+  return resolvedPath;
 }
 
 function writeDesktopStreamChunk(
@@ -1232,6 +1252,22 @@ function registerIpcHandlers(): void {
     }
 
     nativeTheme.themeSource = theme;
+  });
+
+  ipcMain.removeHandler(WRITE_TEXT_FILE_CHANNEL);
+  ipcMain.handle(WRITE_TEXT_FILE_CHANNEL, async (_event, rawPath: unknown, rawContents: unknown) => {
+    const filePath = getSafeTextFilePath(rawPath);
+    if (!filePath || typeof rawContents !== "string") {
+      return false;
+    }
+
+    try {
+      await FS.promises.mkdir(Path.dirname(filePath), { recursive: true });
+      await FS.promises.writeFile(filePath, rawContents, "utf8");
+      return true;
+    } catch {
+      return false;
+    }
   });
 
   ipcMain.removeHandler(CONTEXT_MENU_CHANNEL);

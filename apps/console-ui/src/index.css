@@ -356,6 +356,17 @@ body {
   height: 100%;
 }
 
+.transcript-surface__loadingScreen {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  background:
+    linear-gradient(180deg, rgba(12, 15, 19, 0.96), rgba(12, 15, 19, 0.92)),
+    rgba(12, 15, 19, 0.94);
+}
+
 .transcript-search {
   position: absolute;
   top: 12px;
@@ -433,6 +444,11 @@ body {
   overflow-anchor: none;
 }
 
+.transcript-history--loading {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .transcript-history--cmScroller {
   overflow-y: hidden;
 }
@@ -483,12 +499,18 @@ body {
 
 .transcript-blockHistory,
 .transcript-historyList {
+  --transcript-history-padding-block-start: 18px;
+  --transcript-history-padding-inline: 22px;
+  --transcript-history-padding-block-end: 24px;
   position: relative;
   display: block;
   flex: 1 1 auto;
   width: 100%;
   min-width: 0;
-  padding: 18px 22px 24px;
+  padding:
+    var(--transcript-history-padding-block-start)
+    var(--transcript-history-padding-inline)
+    var(--transcript-history-padding-block-end);
   color: #c5ccd3;
   font-family: "Cascadia Code", "Cascadia Mono", "Iosevka Term", "JetBrains Mono", Consolas, monospace;
   font-size: 15px;
@@ -540,8 +562,8 @@ body {
 }
 
 .transcript-blockHistory__measurementLane {
-  position: absolute;
-  inset: 0;
+  width: 100%;
+  min-width: 0;
   height: 0;
   overflow: hidden;
   visibility: hidden;
@@ -551,6 +573,7 @@ body {
 .transcript-blockHistory__measurementProbe {
   width: 100%;
   min-width: 0;
+  box-sizing: border-box;
 }
 
 .transcript-blockHistory__measurementProbe[data-has-leading-gap="true"] {
@@ -1258,6 +1281,11 @@ body {
   padding: 1.8em 0;
   background: transparent;
   overflow-anchor: none;
+}
+
+.transcript-prompt--loading {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .transcript-prompt::before {

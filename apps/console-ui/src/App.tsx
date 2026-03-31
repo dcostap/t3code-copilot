@@ -13,6 +13,7 @@ import {
   memo,
   startTransition,
   useCallback,
+  useDeferredValue,
   useEffect,
   useId,
   useMemo,
@@ -340,6 +341,10 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
   handleRemoveImageForPane,
   handleSubmit,
 }: ConversationPaneTranscriptProps) {
+  const deferredThread = useDeferredValue(paneView.thread);
+  const loadingLabel = paneView.pane.kind === "thread" && paneView.thread !== deferredThread
+    ? "loading conversation"
+    : null;
   const handleTranscriptRef = useCallback((handle: TranscriptRendererHandle | null) => {
     registerPaneHandle(paneView.pane.id, handle);
   }, [paneView.pane.id, registerPaneHandle]);
@@ -368,9 +373,10 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
       projectRoot={paneView.project.workspaceRoot}
       paneActive={paneActive}
       interactionMode={paneView.interactionMode}
+      loadingLabel={loadingLabel}
       promptFocusDisabled={paletteOpen || hasBlockingModal}
       promptInputDisabled={hasBlockingModal}
-      thread={paneView.thread}
+      thread={deferredThread}
       onAddImageFiles={handleAddImages}
       onDraftChange={handleDraftChange}
       onRemoveImage={handleRemoveImage}
@@ -2190,25 +2196,23 @@ export function App() {
       attachmentsByPaneId: composerAttachmentsByPaneId,
       pendingDraftPaneIds,
     });
-    startTransition(() => {
-      if (reusableDraftPane) {
-        const didMount = workspace.mountThreadInPane({
-          projectId: thread.projectId,
-          paneId: reusableDraftPane.paneId,
-          threadId,
-        });
-        if (didMount) {
-          return;
-        }
-      }
-      const result = workspace.openThread(threadId);
-      if (!result) {
+    if (reusableDraftPane) {
+      const didMount = workspace.mountThreadInPane({
+        projectId: thread.projectId,
+        paneId: reusableDraftPane.paneId,
+        threadId,
+      });
+      if (didMount) {
         return;
       }
-      if (result.highlightPane) {
-        highlightPane(result.paneId);
-      }
-    });
+    }
+    const result = workspace.openThread(threadId);
+    if (!result) {
+      return;
+    }
+    if (result.highlightPane) {
+      highlightPane(result.paneId);
+    }
   }, [
     composerAttachmentsByPaneId,
     consoleData.threads,

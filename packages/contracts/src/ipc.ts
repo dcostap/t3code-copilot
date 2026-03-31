@@ -124,6 +124,7 @@ export interface DesktopBridge {
   pickFolder: () => Promise<string | null>;
   confirm: (message: string) => Promise<boolean>;
   setTheme: (theme: DesktopTheme) => Promise<void>;
+  writeTextFile: (path: string, contents: string) => Promise<boolean>;
   showContextMenu: <T extends string>(
     items: readonly ContextMenuItem<T>[],
     position?: { x: number; y: number },

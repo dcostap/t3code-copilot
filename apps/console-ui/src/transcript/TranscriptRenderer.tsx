@@ -11,6 +11,7 @@ import {
 } from "react";
 import type { OrchestrationThread, ThreadId } from "@t3tools/contracts";
 
+import { AnimatedLoadingText } from "../AnimatedLoadingText";
 import type { ComposerImageAttachment } from "../composerAttachments";
 import { TranscriptHistory } from "./TranscriptHistory";
 
@@ -28,6 +29,7 @@ interface TranscriptRendererProps {
   readonly paneActive?: boolean;
   readonly interactionMode?: "default" | "plan";
   readonly initialScrollOffsetFromBottom?: number | null;
+  readonly loadingLabel?: string | null;
   readonly promptFocusDisabled?: boolean;
   readonly promptInputDisabled?: boolean;
   readonly submitDisabled?: boolean;
@@ -66,6 +68,7 @@ interface TranscriptPromptProps {
   readonly composerAttachments: ReadonlyArray<ComposerImageAttachment>;
   readonly draftValue: string;
   readonly interactionMode: "default" | "plan";
+  readonly loading: boolean;
   readonly paneActive: boolean;
   readonly promptFocusDisabled: boolean;
   readonly promptInputDisabled: boolean;
@@ -106,6 +109,7 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
       composerAttachments,
       draftValue,
       interactionMode,
+      loading,
       paneActive,
       promptFocusDisabled,
       promptInputDisabled,
@@ -381,7 +385,9 @@ const TranscriptPrompt = memo(forwardRef<TranscriptPromptHandle, TranscriptPromp
     }), [deletePromptText, focusPrompt, insertPromptText, submitPrompt]);
 
     return (
-      <div className={`transcript-prompt${interactionMode === "plan" ? " transcript-prompt--compact" : ""}`}>
+      <div
+        className={`transcript-prompt${interactionMode === "plan" ? " transcript-prompt--compact" : ""}${loading ? " transcript-prompt--loading" : ""}`}
+      >
         <div className="transcript-prompt__body">
           {composerAttachments.length > 0 ? (
             <div className="transcript-prompt__attachments">
@@ -444,6 +450,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       initialScrollOffsetFromBottom,
       paneActive = false,
       interactionMode = "default",
+      loadingLabel = null,
       promptFocusDisabled = false,
       promptInputDisabled = false,
       submitDisabled = false,
@@ -463,6 +470,9 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
     const onRemoveImageRef = useRef(onRemoveImage);
     const onSubmitRef = useRef(onSubmit);
     const [dragOver, setDragOver] = useState(false);
+    const [historyLoadingLabel, setHistoryLoadingLabel] = useState<string | null>(null);
+    const effectiveLoadingLabel = loadingLabel ?? historyLoadingLabel;
+    const isLoading = effectiveLoadingLabel !== null;
 
     useEffect(() => {
       onAddImageFilesRef.current = onAddImageFiles;
@@ -585,12 +595,14 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       >
         <div
           ref={historyRef}
-          className="transcript-history"
+          className={`transcript-history${isLoading ? " transcript-history--loading" : ""}`}
           tabIndex={-1}
           aria-label="Conversation history"
+          aria-busy={isLoading}
         >
           <TranscriptHistory
             getTurnDiff={getTurnDiff}
+            onLoadingStateChange={setHistoryLoadingLabel}
             projectRoot={projectRoot}
             thread={thread}
             initialScrollOffsetFromBottom={initialScrollOffsetFromBottom}
@@ -603,15 +615,21 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
           composerAttachments={composerAttachments}
           draftValue={draftValue}
           interactionMode={interactionMode}
+          loading={isLoading}
           paneActive={paneActive}
-          promptFocusDisabled={promptFocusDisabled}
-          promptInputDisabled={promptInputDisabled}
-          submitDisabled={submitDisabled}
+          promptFocusDisabled={promptFocusDisabled || isLoading}
+          promptInputDisabled={promptInputDisabled || isLoading}
+          submitDisabled={submitDisabled || isLoading}
           onAddImageFiles={handlePromptAddImageFiles}
           onDraftChange={handlePromptDraftChange}
           onRemoveImage={handlePromptRemoveImage}
           onSubmit={handlePromptSubmit}
         />
+        {effectiveLoadingLabel ? (
+          <div className="transcript-surface__loadingScreen" aria-live="polite" aria-busy="true">
+            <AnimatedLoadingText text={effectiveLoadingLabel} className="loading-screen__text" />
+          </div>
+        ) : null}
       </div>
     );
   },

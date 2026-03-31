@@ -2,6 +2,10 @@
 
 import type { DesktopBridge } from "@t3tools/contracts";
 
+interface ImportMetaEnv {
+  readonly VITE_PREPARED_TRANSCRIPT_HISTORY?: string;
+}
+
 declare global {
   interface BlockHistoryScrollDiagnosticEntry {
     index: number;

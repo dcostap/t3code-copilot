@@ -1,5 +1,5 @@
 import type { ChatAttachment, OrchestrationThread } from "@t3tools/contracts";
-import { measureElement, useVirtualizer } from "@tanstack/react-virtual";
+import { measureElement, useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import {
   Fragment,
   memo,
@@ -13,19 +13,36 @@ import {
 } from "react";
 
 import {
-  deriveTranscriptHistoryLayoutRow,
-  deriveTranscriptHistoryRowEstimatedHeight,
-  type TranscriptHistoryLayoutRow,
-  type TranscriptHistoryLayoutSegment,
-} from "./transcriptHistoryLayout";
-import {
   deriveTranscriptHistoryRows,
+  estimateTranscriptHistoryRowHeight,
   getActivityDetail,
-  getFirstUnvirtualizedRowIndex,
   getToolDisplaySubject,
-  TRANSCRIPT_HISTORY_ROW_GAP_PX,
   type TranscriptHistoryRow,
 } from "./transcriptHistoryRows";
+import {
+  collectPreparedTranscriptLayoutStateRowIds,
+  createPreparedTranscriptLayoutKey,
+  derivePreparedTranscriptBoundary,
+  getChangedPreparedTranscriptLayoutStateRowIds,
+} from "./transcriptLayoutCache";
+import {
+  buildPreparedTranscriptLayout,
+  getNextPreparedMeasurementBatch,
+} from "./transcriptLayoutPreparation";
+import {
+  createBottomTranscriptScrollAnchor,
+  createRowTranscriptScrollAnchor,
+  restoreTranscriptScrollOffset,
+  type TranscriptScrollAnchor,
+} from "./transcriptScrollAnchor";
+import {
+  installTranscriptMeasurementDiagnosticsHelpers,
+  recordTranscriptMeasurementDiagnostic,
+} from "./transcriptMeasurementDiagnostics";
+import {
+  installTranscriptPreparedHistoryDiagnosticsHelpers,
+  recordTranscriptPreparedHistoryDiagnostic,
+} from "./transcriptPreparedHistoryDiagnostics";
 import {
   parseTranscriptMessageBlocks,
   tokenizeTranscriptLinks,
@@ -33,18 +50,7 @@ import {
 } from "./transcriptMessageFormatting";
 
 const AUTO_FOLLOW_BOTTOM_THRESHOLD_PX = 120;
-
-// Height of the role-change separator div in message rows.
-// `.transcript-historyRow__messageSeparator { height: 1px; margin: 2px 0 4px; }` → 7px total.
-// Deterministic rows skip measureElement, so this must be included in the estimate.
-const MESSAGE_SEPARATOR_HEIGHT_PX = 7;
-
-// CSS chrome (padding/borders beyond text content) per row kind for deterministic rows.
-// message rows: no padding-top → 0px.
-// non-message, non-widget rows (reasoning, activity-group, plan, working):
-//   `.transcript-historyRow--<kind> { padding-top: 2px }` → 2px.
-const DETERMINISTIC_MESSAGE_CHROME_PX = 0;
-const DETERMINISTIC_BASIC_CHROME_PX = 2;
+const PREPARED_TRANSCRIPT_HISTORY_ENABLED = true;
 
 interface TranscriptHistoryProps {
   readonly getTurnDiff: ((input: {
@@ -69,6 +75,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
 }: TranscriptHistoryProps) {
   const rows = useMemo(() => deriveTranscriptHistoryRows(thread), [thread]);
   const historyRootRef = useRef<HTMLDivElement | null>(null);
+  const virtualCanvasRef = useRef<HTMLDivElement | null>(null);
   const [historyWidthPx, setHistoryWidthPx] = useState<number | null>(null);
   const [expandedToolRowIds, setExpandedToolRowIds] = useState<ReadonlySet<string>>(() => new Set());
   const [collapsedCheckpointRowIds, setCollapsedCheckpointRowIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -78,30 +85,332 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     readonly errorMessage?: string;
   }>>(() => new Map());
   const firstUnvirtualizedRowIndex = useMemo(
-    () => getFirstUnvirtualizedRowIndex(rows, thread),
+    () => derivePreparedTranscriptBoundary(rows, thread).firstLiveRowIndex,
+    [rows, thread],
+  );
+  const preparedBoundary = useMemo(
+    () => derivePreparedTranscriptBoundary(rows, thread),
     [rows, thread],
   );
   const lastKnownOffsetFromBottomRef = useRef(0);
   const previousThreadIdRef = useRef<string | null>(null);
   const previousThreadUpdatedAtRef = useRef<string | null>(null);
-  const pendingMeasureFrameRef = useRef<number | null>(null);
+  const previousPreparedLayoutKeyRef = useRef<string | null>(null);
+  const preparedHistoryDiagnosticPhaseSignatureRef = useRef<string | null>(null);
+  const pendingPreparedHistoryAnchorRef = useRef<TranscriptScrollAnchor | null>(null);
+  const pendingPreparedHistoryBottomOffsetRef = useRef<number | null>(null);
+  const previousPreparedStateRowIdsRef = useRef<ReturnType<typeof collectPreparedTranscriptLayoutStateRowIds> | null>(null);
   const premeasureRefs = useRef(new Map<string, HTMLDivElement>());
+  const preparedLayoutRef = useRef<ReturnType<typeof buildPreparedTranscriptLayout> | null>(null);
+  const premeasuredRowHeightByIdRef = useRef<ReadonlyMap<string, number>>(new Map());
   const [premeasuredRowHeightById, setPremeasuredRowHeightById] = useState<ReadonlyMap<string, number>>(() => new Map());
-  const deterministicLayoutRowsById = useMemo(() => {
-    const next = new Map<string, TranscriptHistoryLayoutRow>();
-    for (const row of rows) {
-      if (!canUseDeterministicVirtualRow(row)) {
-        continue;
-      }
-      next.set(row.id, deriveTranscriptHistoryLayoutRow(row, {
-        widthPx: historyWidthPx,
+  const [preparedHistoryPhase, setPreparedHistoryPhase] = useState<"idle" | "preparing" | "recalculating" | "ready">("idle");
+  const [preparedMeasurementWidthPx, setPreparedMeasurementWidthPx] = useState<number | null>(null);
+  const measurementDiagnosticSignatureByKeyRef = useRef(new Map<string, string>());
+  const measurementOptions = useMemo(() => ({
+    widthPx: historyWidthPx,
+    expandedToolRowIds,
+    collapsedCheckpointRowIds,
+    checkpointDiffByRowId,
+  }), [checkpointDiffByRowId, collapsedCheckpointRowIds, expandedToolRowIds, historyWidthPx]);
+  const getEstimatedRowHeight = useCallback((row: TranscriptHistoryRow, index: number) =>
+    estimateTranscriptHistoryRowHeight(row, measurementOptions, index), [measurementOptions]);
+  const preparedStateRowIds = useMemo(() => collectPreparedTranscriptLayoutStateRowIds({
+    expandedToolRowIds,
+    collapsedCheckpointRowIds,
+    checkpointDiffByRowId,
+  }), [checkpointDiffByRowId, collapsedCheckpointRowIds, expandedToolRowIds]);
+  const preparedLayoutCacheKey = useMemo(() => {
+    if (
+      !PREPARED_TRANSCRIPT_HISTORY_ENABLED
+      || preparedMeasurementWidthPx === null
+      || preparedBoundary.sealedRowCount === 0
+      || preparedMeasurementWidthPx !== historyWidthPx
+    ) {
+      return null;
+    }
+
+    return createPreparedTranscriptLayoutKey({
+      rows,
+      thread,
+      widthPx: preparedMeasurementWidthPx,
+      state: {
         expandedToolRowIds,
         collapsedCheckpointRowIds,
         checkpointDiffByRowId,
-      }));
+      },
+    }).key;
+  }, [
+    checkpointDiffByRowId,
+    collapsedCheckpointRowIds,
+    expandedToolRowIds,
+    historyWidthPx,
+    preparedMeasurementWidthPx,
+    preparedBoundary.sealedRowCount,
+    rows,
+    thread,
+  ]);
+  const preparedLayout = useMemo(() => {
+    if (
+      !PREPARED_TRANSCRIPT_HISTORY_ENABLED
+      || preparedMeasurementWidthPx === null
+      || preparedBoundary.sealedRowCount === 0
+      || preparedMeasurementWidthPx !== historyWidthPx
+    ) {
+      return null;
     }
-    return next;
-  }, [checkpointDiffByRowId, collapsedCheckpointRowIds, expandedToolRowIds, historyWidthPx, rows]);
+
+    const nextBatch = getNextPreparedMeasurementBatch({
+      rows,
+      boundary: preparedBoundary,
+      rowHeightById: premeasuredRowHeightById,
+    });
+    if (nextBatch.length > 0) {
+      return null;
+    }
+
+    return buildPreparedTranscriptLayout({
+      rows,
+      thread,
+      widthPx: preparedMeasurementWidthPx,
+      rowHeightById: premeasuredRowHeightById,
+      state: {
+        expandedToolRowIds,
+        collapsedCheckpointRowIds,
+        checkpointDiffByRowId,
+      },
+    });
+  }, [
+    checkpointDiffByRowId,
+    collapsedCheckpointRowIds,
+    expandedToolRowIds,
+    historyWidthPx,
+    preparedMeasurementWidthPx,
+    premeasuredRowHeightById,
+    preparedBoundary,
+    rows,
+    thread,
+  ]);
+  useEffect(() => {
+    preparedLayoutRef.current = preparedLayout;
+  }, [preparedLayout]);
+  useEffect(() => {
+    premeasuredRowHeightByIdRef.current = premeasuredRowHeightById;
+  }, [premeasuredRowHeightById]);
+  const capturePreparedHistoryAnchor = useCallback(() => {
+    const historyRoot = historyRootRef.current;
+    const scrollContainer = scrollContainerRef.current;
+    if (!historyRoot || !scrollContainer) {
+      return;
+    }
+
+    pendingPreparedHistoryBottomOffsetRef.current = lastKnownOffsetFromBottomRef.current;
+
+    if (lastKnownOffsetFromBottomRef.current <= AUTO_FOLLOW_BOTTOM_THRESHOLD_PX) {
+      pendingPreparedHistoryAnchorRef.current = createBottomTranscriptScrollAnchor(
+        lastKnownOffsetFromBottomRef.current,
+      );
+      recordTranscriptPreparedHistoryDiagnostic({
+        kind: "anchor-capture",
+        threadId: thread?.id ?? null,
+        widthPx: historyWidthPx,
+        anchorKind: "bottom",
+        offsetPx: lastKnownOffsetFromBottomRef.current,
+      });
+      return;
+    }
+
+    const scrollContainerRect = scrollContainer.getBoundingClientRect();
+    const rowElements = Array.from(historyRoot.querySelectorAll<HTMLDivElement>("[data-transcript-row-id]"));
+    const anchorElement = rowElements.find((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.bottom > scrollContainerRect.top && rect.top < scrollContainerRect.bottom;
+    });
+    const rowId = anchorElement?.dataset.transcriptRowId;
+    if (!anchorElement || !rowId) {
+      return;
+    }
+
+    const anchorRect = anchorElement.getBoundingClientRect();
+    pendingPreparedHistoryAnchorRef.current = createRowTranscriptScrollAnchor({
+      rowId,
+      offsetWithinRowPx: Math.max(scrollContainerRect.top - anchorRect.top, 0),
+      rowHeightPx: anchorRect.height,
+    });
+    recordTranscriptPreparedHistoryDiagnostic({
+      kind: "anchor-capture",
+      threadId: thread?.id ?? null,
+      widthPx: historyWidthPx,
+      anchorKind: "row",
+      rowId,
+      offsetPx: Math.max(scrollContainerRect.top - anchorRect.top, 0),
+    });
+  }, [historyWidthPx, scrollContainerRef, thread?.id]);
+  const restorePreparedHistoryAnchor = useCallback((anchor: TranscriptScrollAnchor) => {
+    const historyRoot = historyRootRef.current;
+    const scrollContainer = scrollContainerRef.current;
+    if (!historyRoot || !scrollContainer) {
+      return;
+    }
+
+    if (anchor.kind === "bottom") {
+      scrollContainer.scrollTop = Math.max(
+        scrollContainer.scrollHeight - scrollContainer.clientHeight - anchor.offsetFromBottomPx,
+        0,
+      );
+      recordTranscriptPreparedHistoryDiagnostic({
+        kind: "anchor-restore",
+        threadId: thread?.id ?? null,
+        widthPx: historyWidthPx,
+        outcome: "bottom",
+      });
+      pendingPreparedHistoryBottomOffsetRef.current = null;
+      return;
+    }
+
+    const preparedLayoutForRestore = preparedLayoutRef.current;
+    const virtualCanvas = virtualCanvasRef.current;
+    const virtualCanvasOffsetTop = virtualCanvas?.offsetTop ?? 0;
+    const preparedScrollOffset = preparedLayoutForRestore
+      ? restoreTranscriptScrollOffset({
+          anchor,
+          rowStartById: preparedLayoutForRestore.rowStartById,
+          rowHeightById: preparedLayoutForRestore.rowHeightById,
+          totalHeightPx: Math.max(scrollContainer.scrollHeight - virtualCanvasOffsetTop, 0),
+          viewportHeightPx: scrollContainer.clientHeight,
+        })
+      : null;
+    if (preparedScrollOffset !== null) {
+      scrollContainer.scrollTop = Math.min(
+        Math.max(virtualCanvasOffsetTop + preparedScrollOffset, 0),
+        Math.max(scrollContainer.scrollHeight - scrollContainer.clientHeight, 0),
+      );
+      recordTranscriptPreparedHistoryDiagnostic({
+        kind: "anchor-restore",
+        threadId: thread?.id ?? null,
+        widthPx: historyWidthPx,
+        outcome: "row-geometry",
+        rowId: anchor.rowId,
+      });
+      pendingPreparedHistoryBottomOffsetRef.current = null;
+      return;
+    }
+
+    const rowElement = Array.from(historyRoot.querySelectorAll<HTMLDivElement>("[data-transcript-row-id]"))
+      .find((element) => element.dataset.transcriptRowId === anchor.rowId);
+    if (!rowElement) {
+      const bottomOffset = pendingPreparedHistoryBottomOffsetRef.current;
+      if (bottomOffset !== null) {
+        scrollContainer.scrollTop = Math.max(
+          scrollContainer.scrollHeight - scrollContainer.clientHeight - bottomOffset,
+          0,
+        );
+        recordTranscriptPreparedHistoryDiagnostic({
+          kind: "anchor-restore",
+          threadId: thread?.id ?? null,
+          widthPx: historyWidthPx,
+          outcome: "fallback-bottom",
+          rowId: anchor.rowId,
+        });
+      } else {
+        recordTranscriptPreparedHistoryDiagnostic({
+          kind: "anchor-restore",
+          threadId: thread?.id ?? null,
+          widthPx: historyWidthPx,
+          outcome: "miss",
+          rowId: anchor.rowId,
+        });
+      }
+      pendingPreparedHistoryBottomOffsetRef.current = null;
+      return;
+    }
+
+    const scrollContainerRect = scrollContainer.getBoundingClientRect();
+    const rowRect = rowElement.getBoundingClientRect();
+    const desiredRowTop = scrollContainerRect.top - anchor.offsetWithinRowPx;
+    scrollContainer.scrollTop += rowRect.top - desiredRowTop;
+    recordTranscriptPreparedHistoryDiagnostic({
+      kind: "anchor-restore",
+      threadId: thread?.id ?? null,
+      widthPx: historyWidthPx,
+      outcome: "row-dom",
+      rowId: anchor.rowId,
+    });
+    pendingPreparedHistoryBottomOffsetRef.current = null;
+  }, [historyWidthPx, scrollContainerRef, thread?.id]);
+  const maybeRecordMeasurementDiagnostic = useCallback((
+    input: Parameters<typeof recordTranscriptMeasurementDiagnostic>[0],
+  ) => {
+    const signatureKey = `${input.comparisonKind}:${input.rowId}:${input.widthPx ?? "unknown"}`;
+    const signatureValue = `${input.expectedHeight}:${input.actualHeight}`;
+    const previousSignature = measurementDiagnosticSignatureByKeyRef.current.get(signatureKey);
+    if (previousSignature === signatureValue) {
+      return;
+    }
+    measurementDiagnosticSignatureByKeyRef.current.set(signatureKey, signatureValue);
+    recordTranscriptMeasurementDiagnostic(input);
+  }, []);
+  const measureTranscriptRowElement = useCallback((
+    element: HTMLDivElement,
+    entry: ResizeObserverEntry | undefined,
+    instance: Virtualizer<HTMLDivElement, HTMLDivElement>,
+  ) => {
+    const index = Number.parseInt(element.dataset.index ?? "", 10);
+    if (!Number.isFinite(index)) {
+      return Math.ceil(measureElement(element, entry, instance));
+    }
+
+    const row = rows[index];
+    if (!row) {
+      return Math.ceil(measureElement(element, entry, instance));
+    }
+
+    const preparedHeight = index < firstUnvirtualizedRowIndex
+      ? preparedLayout?.rowHeightById.get(row.id)
+      : undefined;
+    if (typeof preparedHeight === "number") {
+      return preparedHeight;
+    }
+
+    const measuredHeight = Math.ceil(measureElement(element, entry, instance));
+    if (!Number.isFinite(measuredHeight) || measuredHeight <= 0) {
+      return measuredHeight;
+    }
+
+    maybeRecordMeasurementDiagnostic({
+      comparisonKind: "estimate-to-visible",
+      threadId: thread?.id ?? null,
+      rowId: row.id,
+      rowKind: row.kind,
+      widthPx: historyWidthPx,
+      expectedHeight: getEstimatedRowHeight(row, index),
+      actualHeight: measuredHeight,
+    });
+
+    const premeasuredHeight = premeasuredRowHeightById.get(row.id);
+    if (typeof premeasuredHeight === "number") {
+      maybeRecordMeasurementDiagnostic({
+        comparisonKind: "premeasure-to-visible",
+        threadId: thread?.id ?? null,
+        rowId: row.id,
+        rowKind: row.kind,
+        widthPx: historyWidthPx,
+        expectedHeight: premeasuredHeight,
+        actualHeight: measuredHeight,
+      });
+    }
+
+    return measuredHeight;
+  }, [
+    firstUnvirtualizedRowIndex,
+    getEstimatedRowHeight,
+    historyWidthPx,
+    maybeRecordMeasurementDiagnostic,
+    preparedLayout,
+    premeasuredRowHeightById,
+    rows,
+    thread?.id,
+  ]);
 
   const rowVirtualizer = useVirtualizer({
     count: firstUnvirtualizedRowIndex,
@@ -109,34 +418,15 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     getItemKey: (index) => rows[index]?.id ?? index,
     estimateSize: (index) => {
       const row = rows[index];
-      if (!row) {
-        return 80;
-      }
-      const deterministicLayoutRow = deterministicLayoutRowsById.get(row.id);
-      if (deterministicLayoutRow) {
-        // Deterministic rows skip measureElement and the premeasure lane, so the estimate
-        // must include all CSS chrome. Non-message rows have padding-top: 2px; message rows
-        // with adjacent role-changes also render a 7px separator that must be counted.
-        const chrome = row.kind === "message"
-          ? DETERMINISTIC_MESSAGE_CHROME_PX
-          : DETERMINISTIC_BASIC_CHROME_PX;
-        const separatorPx = row.kind === "message" && shouldRenderRoleSeparator(rows[index - 1] ?? null, row)
-          ? MESSAGE_SEPARATOR_HEIGHT_PX
-          : 0;
-        return deterministicLayoutRow.heightPx + chrome + separatorPx + (index > 0 ? TRANSCRIPT_HISTORY_ROW_GAP_PX : 0);
-      }
-      // For non-deterministic rows (tool, checkpoint, table-containing messages): prefer
-      // actual DOM height from the premeasure lane, then fall back to the layout-model-based
-      // estimate which is far more accurate than the old heuristic.
-      return premeasuredRowHeightById.get(row.id)
-        ?? deriveTranscriptHistoryRowEstimatedHeight(row, {
-          widthPx: historyWidthPx,
-          expandedToolRowIds,
-          collapsedCheckpointRowIds,
-          checkpointDiffByRowId,
-        }, index);
+      return row
+        ? (preparedLayout?.rowHeightById.get(row.id)
+          ?? (PREPARED_TRANSCRIPT_HISTORY_ENABLED && preparedMeasurementWidthPx !== historyWidthPx
+            ? undefined
+            : premeasuredRowHeightById.get(row.id))
+          ?? getEstimatedRowHeight(row, index))
+        : 80;
     },
-    measureElement,
+    measureElement: measureTranscriptRowElement,
     useAnimationFrameWithResizeObserver: true,
     overscan: 8,
   });
@@ -171,50 +461,177 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     };
   }, [thread?.id]);
 
-  const scheduleMeasure = useCallback(() => {
-    if (pendingMeasureFrameRef.current !== null) {
+  const measureNow = useCallback(() => {
+    rowVirtualizer.measure();
+  }, [rowVirtualizer]);
+
+  useLayoutEffect(() => {
+    if (!PREPARED_TRANSCRIPT_HISTORY_ENABLED) {
+      setPreparedMeasurementWidthPx(historyWidthPx);
+      return;
+    }
+    if (historyWidthPx === null) {
+      setPreparedMeasurementWidthPx(null);
       return;
     }
 
-    pendingMeasureFrameRef.current = window.requestAnimationFrame(() => {
-      pendingMeasureFrameRef.current = null;
-      rowVirtualizer.measure();
-    });
-  }, [rowVirtualizer]);
+    setPreparedMeasurementWidthPx(historyWidthPx);
+  }, [historyWidthPx]);
 
-  useEffect(() => {
-    scheduleMeasure();
-  }, [checkpointDiffByRowId, collapsedCheckpointRowIds, expandedToolRowIds, firstUnvirtualizedRowIndex, premeasuredRowHeightById, rows, scheduleMeasure]);
+  useLayoutEffect(() => {
+    measureNow();
+  }, [checkpointDiffByRowId, collapsedCheckpointRowIds, expandedToolRowIds, measureNow]);
+
+  useLayoutEffect(() => {
+    measureNow();
+  }, [firstUnvirtualizedRowIndex, measureNow, premeasuredRowHeightById, rows]);
 
   useEffect(() => {
     setExpandedToolRowIds(new Set());
     setCollapsedCheckpointRowIds(new Set());
     setCheckpointDiffByRowId(new Map());
     setPremeasuredRowHeightById(new Map());
+    previousPreparedStateRowIdsRef.current = null;
   }, [thread?.id]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (historyWidthPx === null) {
       return;
     }
-    scheduleMeasure();
-  }, [historyWidthPx, scheduleMeasure]);
+    if (
+      PREPARED_TRANSCRIPT_HISTORY_ENABLED
+      && (preparedLayoutRef.current !== null || premeasuredRowHeightByIdRef.current.size > 0)
+    ) {
+      capturePreparedHistoryAnchor();
+    }
+    setPremeasuredRowHeightById((existing) => existing.size === 0 ? existing : new Map());
+    measureNow();
+  }, [capturePreparedHistoryAnchor, historyWidthPx, measureNow]);
+
+  useLayoutEffect(() => {
+    if (!PREPARED_TRANSCRIPT_HISTORY_ENABLED) {
+      return;
+    }
+    if (preparedLayoutRef.current !== null || premeasuredRowHeightByIdRef.current.size > 0) {
+      capturePreparedHistoryAnchor();
+    }
+    setPremeasuredRowHeightById((existing) => existing.size === 0 ? existing : new Map());
+    measureNow();
+  }, [capturePreparedHistoryAnchor, measureNow, preparedBoundary.firstLiveRowIndex, thread?.id]);
+
+  useLayoutEffect(() => {
+    if (!PREPARED_TRANSCRIPT_HISTORY_ENABLED) {
+      previousPreparedStateRowIdsRef.current = preparedStateRowIds;
+      return;
+    }
+    const previousPreparedStateRowIds = previousPreparedStateRowIdsRef.current ?? undefined;
+    previousPreparedStateRowIdsRef.current = preparedStateRowIds;
+    const changedPreparedStateRowIds = getChangedPreparedTranscriptLayoutStateRowIds(
+      previousPreparedStateRowIds,
+      preparedStateRowIds,
+    );
+    if (changedPreparedStateRowIds.size === 0) {
+      return;
+    }
+    setPremeasuredRowHeightById((existing) => {
+      if (existing.size === 0) {
+        return existing;
+      }
+      let changed = false;
+      const next = new Map(existing);
+      for (const rowId of changedPreparedStateRowIds) {
+        changed = next.delete(rowId) || changed;
+      }
+      return changed ? next : existing;
+    });
+    measureNow();
+  }, [measureNow, preparedStateRowIds]);
 
   useEffect(() => {
-    return () => {
-      const frame = pendingMeasureFrameRef.current;
-      if (frame !== null) {
-        window.cancelAnimationFrame(frame);
-      }
-    };
+    if (
+      !PREPARED_TRANSCRIPT_HISTORY_ENABLED
+      || historyWidthPx === null
+      || preparedBoundary.sealedRowCount === 0
+    ) {
+      setPreparedHistoryPhase("idle");
+      previousPreparedLayoutKeyRef.current = null;
+      return;
+    }
+
+    if (preparedMeasurementWidthPx !== historyWidthPx) {
+      setPreparedHistoryPhase("recalculating");
+      return;
+    }
+
+    if (preparedLayout !== null) {
+      setPreparedHistoryPhase("ready");
+      previousPreparedLayoutKeyRef.current = preparedLayout.key.key;
+      return;
+    }
+
+    const previousPreparedLayoutKey = previousPreparedLayoutKeyRef.current;
+    setPreparedHistoryPhase(
+      previousPreparedLayoutKey !== null && preparedLayoutCacheKey !== previousPreparedLayoutKey
+        ? "recalculating"
+        : "preparing",
+    );
+  }, [historyWidthPx, preparedBoundary.sealedRowCount, preparedLayout, preparedLayoutCacheKey, preparedMeasurementWidthPx]);
+  useEffect(() => {
+    if (!PREPARED_TRANSCRIPT_HISTORY_ENABLED) {
+      return;
+    }
+
+    const signature = [
+      preparedHistoryPhase,
+      historyWidthPx ?? "unknown",
+      preparedLayoutCacheKey ?? "none",
+      preparedBoundary.sealedRowCount,
+    ].join("|");
+    if (preparedHistoryDiagnosticPhaseSignatureRef.current === signature) {
+      return;
+    }
+    preparedHistoryDiagnosticPhaseSignatureRef.current = signature;
+    recordTranscriptPreparedHistoryDiagnostic({
+      kind: "phase",
+      threadId: thread?.id ?? null,
+      widthPx: historyWidthPx,
+      phase: preparedHistoryPhase,
+      preparedKey: preparedLayoutCacheKey,
+      sealedRowCount: preparedBoundary.sealedRowCount,
+    });
+  }, [historyWidthPx, preparedBoundary.sealedRowCount, preparedHistoryPhase, preparedLayoutCacheKey, thread?.id]);
+
+  useLayoutEffect(() => {
+    if (!PREPARED_TRANSCRIPT_HISTORY_ENABLED || preparedLayout === null) {
+      return;
+    }
+
+    const anchor = pendingPreparedHistoryAnchorRef.current;
+    if (!anchor) {
+      return;
+    }
+
+    restorePreparedHistoryAnchor(anchor);
+    pendingPreparedHistoryAnchorRef.current = null;
+  }, [preparedLayout, restorePreparedHistoryAnchor]);
+
+  useEffect(() => {
+    measurementDiagnosticSignatureByKeyRef.current.clear();
+  }, [historyWidthPx, thread?.id]);
+
+  useEffect(() => {
+    installTranscriptMeasurementDiagnosticsHelpers({
+      writeTextFile: window.desktopBridge?.writeTextFile,
+    });
+    installTranscriptPreparedHistoryDiagnosticsHelpers({
+      writeTextFile: window.desktopBridge?.writeTextFile,
+    });
   }, []);
 
   useEffect(() => {
-    rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (_item, _delta, instance) => {
-      const viewportHeight = instance.scrollRect?.height ?? 0;
+    rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
       const scrollOffset = instance.scrollOffset ?? 0;
-      const remainingDistance = instance.getTotalSize() - (scrollOffset + viewportHeight);
-      return remainingDistance > AUTO_FOLLOW_BOTTOM_THRESHOLD_PX;
+      return item.start < scrollOffset;
     };
     return () => {
       rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
@@ -338,30 +755,97 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     }
   }, [checkpointDiffByRowId, getTurnDiff, thread?.id]);
 
-  const measurementRows = useMemo(
-    () =>
-      rows
-        .slice(0, firstUnvirtualizedRowIndex)
-        .map((row, index) => ({ row, index }))
-        .filter(({ row }) => !deterministicLayoutRowsById.has(row.id)),
-    [deterministicLayoutRowsById, firstUnvirtualizedRowIndex, rows],
-  );
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const staticRows = rows.slice(firstUnvirtualizedRowIndex);
+  const fallbackPremeasureRows = useMemo(() => {
+    if (firstUnvirtualizedRowIndex <= 0 || virtualItems.length === 0) {
+      return [];
+    }
+
+    const visibleIndexes = new Set(virtualItems.map((virtualItem) => virtualItem.index));
+    const firstVisibleIndex = virtualItems[0]?.index ?? 0;
+    const lastVisibleIndex = virtualItems[virtualItems.length - 1]?.index ?? -1;
+    const candidates: Array<number> = [];
+
+    for (let delta = 1; candidates.length < 12; delta += 1) {
+      const nextAfter = lastVisibleIndex + delta;
+      if (nextAfter < firstUnvirtualizedRowIndex && !visibleIndexes.has(nextAfter)) {
+        candidates.push(nextAfter);
+      }
+
+      if (candidates.length >= 12) {
+        break;
+      }
+
+      const nextBefore = firstVisibleIndex - delta;
+      if (nextBefore >= 0 && !visibleIndexes.has(nextBefore)) {
+        candidates.push(nextBefore);
+      }
+
+      if (nextAfter >= firstUnvirtualizedRowIndex && nextBefore < 0) {
+        break;
+      }
+    }
+
+    return candidates
+      .toSorted((left, right) => left - right)
+      .map((index) => {
+        const row = rows[index];
+        return row
+          ? {
+              index,
+              row,
+            }
+          : null;
+      })
+      .filter((entry): entry is { readonly index: number; readonly row: TranscriptHistoryRow } => entry !== null);
+  }, [firstUnvirtualizedRowIndex, rows, virtualItems]);
+  const premeasureRows = useMemo(() => {
+    if (!PREPARED_TRANSCRIPT_HISTORY_ENABLED) {
+      return fallbackPremeasureRows;
+    }
+    if (preparedLayout !== null) {
+      return [];
+    }
+    if (historyWidthPx === null || preparedMeasurementWidthPx !== historyWidthPx) {
+      return fallbackPremeasureRows;
+    }
+
+    return getNextPreparedMeasurementBatch({
+      rows,
+      boundary: preparedBoundary,
+      rowHeightById: premeasuredRowHeightById,
+    });
+  }, [fallbackPremeasureRows, historyWidthPx, premeasuredRowHeightById, preparedBoundary, preparedLayout, preparedMeasurementWidthPx, rows]);
 
   useLayoutEffect(() => {
-    if (measurementRows.length === 0) {
+    if (premeasureRows.length === 0) {
       return;
     }
 
     const updates = new Map<string, number>();
-    for (const { row } of measurementRows) {
+    for (const { index, row } of premeasureRows) {
       const element = premeasureRefs.current.get(row.id);
       if (!element) {
         continue;
       }
       const nextHeight = Math.ceil(element.getBoundingClientRect().height);
       if (nextHeight > 0) {
+        maybeRecordMeasurementDiagnostic({
+          comparisonKind: "estimate-to-premeasure",
+          threadId: thread?.id ?? null,
+          rowId: row.id,
+          rowKind: row.kind,
+          widthPx: historyWidthPx,
+          expectedHeight: getEstimatedRowHeight(row, index),
+          actualHeight: nextHeight,
+        });
         updates.set(row.id, nextHeight);
       }
+    }
+
+    if (updates.size === 0) {
+      return;
     }
 
     setPremeasuredRowHeightById((existing) => {
@@ -376,13 +860,49 @@ export const TranscriptHistory = memo(function TranscriptHistory({
       }
       return changed ? next : existing;
     });
-  }, [
-    checkpointDiffByRowId,
-    collapsedCheckpointRowIds,
-    expandedToolRowIds,
-    historyWidthPx,
-    measurementRows,
-  ]);
+  }, [getEstimatedRowHeight, historyWidthPx, maybeRecordMeasurementDiagnostic, premeasureRows, thread?.id]);
+
+  useLayoutEffect(() => {
+    if (!preparedLayout) {
+      return;
+    }
+
+    const historyRoot = historyRootRef.current;
+    if (!historyRoot) {
+      return;
+    }
+
+    const visiblePreparedRows = Array.from(
+      historyRoot.querySelectorAll<HTMLDivElement>(".transcript-blockHistory__virtualBlockInner[data-transcript-row-id]"),
+    );
+    for (const element of visiblePreparedRows) {
+      const rowId = element.dataset.transcriptRowId;
+      if (!rowId) {
+        continue;
+      }
+
+      const index = Number.parseInt(element.dataset.index ?? "", 10);
+      if (!Number.isFinite(index) || index >= firstUnvirtualizedRowIndex) {
+        continue;
+      }
+
+      const row = rows[index];
+      const preparedHeight = preparedLayout.rowHeightById.get(rowId);
+      if (!row || typeof preparedHeight !== "number") {
+        continue;
+      }
+
+      maybeRecordMeasurementDiagnostic({
+        comparisonKind: "prepared-to-visible",
+        threadId: thread?.id ?? null,
+        rowId,
+        rowKind: row.kind,
+        widthPx: historyWidthPx,
+        expectedHeight: preparedHeight,
+        actualHeight: Math.ceil(element.getBoundingClientRect().height),
+      });
+    }
+  }, [firstUnvirtualizedRowIndex, historyWidthPx, maybeRecordMeasurementDiagnostic, preparedLayout, rows, thread?.id]);
 
   const setPremeasureRef = useCallback((rowId: string, node: HTMLDivElement | null) => {
     if (node) {
@@ -408,12 +928,10 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     );
   }
 
-  const virtualItems = rowVirtualizer.getVirtualItems();
-  const staticRows = rows.slice(firstUnvirtualizedRowIndex);
-
   return (
     <div ref={historyRootRef} className="transcript-historyList transcript-history__viewport">
       <div
+        ref={virtualCanvasRef}
         className="transcript-blockHistory__virtualCanvas"
         style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
       >
@@ -422,47 +940,44 @@ export const TranscriptHistory = memo(function TranscriptHistory({
           if (!row) {
             return null;
           }
-          const deterministicLayoutRow = deterministicLayoutRowsById.get(row.id);
 
           return (
             <div
               key={virtualItem.key}
-              data-index={deterministicLayoutRow ? undefined : virtualItem.index}
-              ref={deterministicLayoutRow ? undefined : rowVirtualizer.measureElement}
               className="transcript-blockHistory__virtualBlock"
-              data-has-leading-gap={virtualItem.index > 0 ? "true" : undefined}
               style={{
                 transform: `translateY(${virtualItem.start}px)`,
+                height: `${virtualItem.size}px`,
+                overflow: "hidden",
               }}
             >
-              {deterministicLayoutRow ? (
-                <TranscriptDeterministicRowView
-                  layoutRow={deterministicLayoutRow}
+                <div
+                  data-index={virtualItem.index}
+                  data-transcript-row-id={row.id}
+                  className="transcript-blockHistory__virtualBlockInner"
+                  data-has-leading-gap={virtualItem.index > 0 ? "true" : undefined}
+                  ref={rowVirtualizer.measureElement}
+                >
+                <TranscriptHistoryRowView
                   previousRow={virtualItem.index > 0 ? rows[virtualItem.index - 1] ?? null : null}
                   row={row}
+                  checkpointDiffState={checkpointDiffByRowId.get(row.id)}
+                  isCheckpointCollapsed={collapsedCheckpointRowIds.has(row.id)}
+                  isToolExpanded={expandedToolRowIds.has(row.id)}
+                  onEnsureCheckpointDiff={ensureCheckpointDiff}
+                  onToggleCheckpoint={toggleCheckpointRow}
+                  onToggleTool={toggleToolRow}
                   projectRoot={projectRoot}
                 />
-              ) : (
-                  <TranscriptHistoryRowView
-                    previousRow={virtualItem.index > 0 ? rows[virtualItem.index - 1] ?? null : null}
-                    row={row}
-                    checkpointDiffState={checkpointDiffByRowId.get(row.id)}
-                    isCheckpointCollapsed={collapsedCheckpointRowIds.has(row.id)}
-                    isToolExpanded={expandedToolRowIds.has(row.id)}
-                    onEnsureCheckpointDiff={ensureCheckpointDiff}
-                    onToggleCheckpoint={toggleCheckpointRow}
-                    onToggleTool={toggleToolRow}
-                    projectRoot={projectRoot}
-                  />
-                )}
+              </div>
             </div>
           );
         })}
       </div>
 
-      {measurementRows.length > 0 ? (
+      {premeasureRows.length > 0 ? (
         <div className="transcript-blockHistory__measurementLane" aria-hidden="true">
-          {measurementRows.map(({ row, index }) => (
+          {premeasureRows.map(({ index, row }) => (
             <div
               key={`measure:${row.id}`}
               ref={(node) => setPremeasureRef(row.id, node)}
@@ -479,7 +994,6 @@ export const TranscriptHistory = memo(function TranscriptHistory({
                 onToggleCheckpoint={toggleCheckpointRow}
                 onToggleTool={toggleToolRow}
                 projectRoot={projectRoot}
-                measurementOnly
               />
             </div>
           ))}
@@ -490,6 +1004,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
         <div
           key={row.id}
           className="transcript-blockHistory__staticBlock"
+          data-transcript-row-id={row.id}
           data-has-leading-gap={firstUnvirtualizedRowIndex + index > 0 ? "true" : undefined}
         >
           <TranscriptHistoryRowView
@@ -523,7 +1038,6 @@ interface TranscriptHistoryRowViewProps {
   readonly onToggleCheckpoint: (rowId: string) => void;
   readonly onToggleTool: (rowId: string) => void;
   readonly projectRoot: string | null | undefined;
-  readonly measurementOnly?: boolean;
 }
 
 function TranscriptHistoryRowView({
@@ -536,7 +1050,6 @@ function TranscriptHistoryRowView({
   onToggleCheckpoint,
   onToggleTool,
   projectRoot,
-  measurementOnly = false,
 }: TranscriptHistoryRowViewProps) {
   switch (row.kind) {
     case "message":
@@ -568,7 +1081,6 @@ function TranscriptHistoryRowView({
           isCollapsed={isCheckpointCollapsed}
           onEnsureDiff={onEnsureCheckpointDiff}
           onToggle={() => onToggleCheckpoint(row.id)}
-          measurementOnly={measurementOnly}
         />
       );
 
@@ -579,104 +1091,6 @@ function TranscriptHistoryRowView({
         </div>
       );
   }
-}
-
-function canUseDeterministicVirtualRow(row: TranscriptHistoryRow) {
-  if (row.kind === "tool" || row.kind === "checkpoint") {
-    return false;
-  }
-  if (row.kind !== "message") {
-    return true;
-  }
-  return !parseTranscriptMessageBlocks(row.message.text).some((block) => block.kind === "table");
-}
-
-function TranscriptDeterministicRowView({
-  layoutRow,
-  previousRow,
-  row,
-  projectRoot,
-}: {
-  readonly layoutRow: TranscriptHistoryLayoutRow;
-  readonly previousRow: TranscriptHistoryRow | null;
-  readonly row: TranscriptHistoryRow;
-  readonly projectRoot: string | null | undefined;
-}) {
-  const textClassName = (() => {
-    if (row.kind === "reasoning") {
-      return "transcript-historyRow__reasoningText";
-    }
-    return row.kind === "working"
-      ? "transcript-historyRow__text--muted"
-      : undefined;
-  })();
-
-  return (
-    <div className={`transcript-historyRow transcript-historyRow--${row.kind}`}>
-      {row.kind === "message" && shouldRenderRoleSeparator(previousRow, row)
-        ? <div className="transcript-historyRow__messageSeparator" aria-hidden="true" />
-        : null}
-      {layoutRow.segments.map((segment) => (
-        segment.kind === "table"
-          ? (
-              <TranscriptMarkdownTable
-                key={`layout-table:${layoutRow.id}:${segment.table.headers.join("|")}:${segment.table.rows.length}`}
-                table={segment.table}
-                projectRoot={projectRoot}
-              />
-            )
-          : (
-              <TranscriptDeterministicLinesSegment
-                key={`layout-lines:${layoutRow.id}:${segment.lines.join("\u241F")}`}
-                segment={segment}
-                projectRoot={projectRoot}
-                rowKind={row.kind}
-                {...(textClassName ? { lineClassName: textClassName } : {})}
-              />
-            )
-      ))}
-    </div>
-  );
-}
-
-function TranscriptDeterministicLinesSegment({
-  segment,
-  lineClassName,
-  projectRoot,
-  rowKind,
-}: {
-  readonly segment: Extract<TranscriptHistoryLayoutSegment, { readonly kind: "lines" }>;
-  readonly lineClassName?: string;
-  readonly projectRoot: string | null | undefined;
-  readonly rowKind: TranscriptHistoryRow["kind"];
-}) {
-  let offset = 0;
-  return (
-    <div
-      className="transcript-historyRow__textBlock"
-      style={{ gap: `${segment.gapPx}px` }}
-    >
-      {segment.lines.map((line) => {
-        const key = `${offset}:${line}`;
-        offset += line.length + 1;
-        return (
-          <div
-            key={key}
-            className={classNames([
-              "transcript-historyRow__text",
-              lineClassName,
-              rowKind === "message" && line.startsWith("attachment: ")
-                ? "transcript-historyRow__text--muted"
-                : null,
-            ])}
-            style={{ lineHeight: `${segment.lineHeightPx}px`, whiteSpace: "pre" }}
-          >
-            {line.length > 0 ? renderLinkTokens(line, projectRoot) : "\u00A0"}
-          </div>
-        );
-      })}
-    </div>
-  );
 }
 
 export function formatTranscriptHistoryRow(row: TranscriptHistoryRow): string {
@@ -926,7 +1340,6 @@ function TranscriptCheckpointRow({
   isCollapsed,
   onEnsureDiff,
   onToggle,
-  measurementOnly = false,
 }: {
   readonly row: Extract<TranscriptHistoryRow, { readonly kind: "checkpoint" }>;
   readonly diffState: {
@@ -937,16 +1350,15 @@ function TranscriptCheckpointRow({
   readonly isCollapsed: boolean;
   readonly onEnsureDiff: (row: Extract<TranscriptHistoryRow, { readonly kind: "checkpoint" }>) => Promise<void>;
   readonly onToggle: () => void;
-  readonly measurementOnly?: boolean;
 }) {
   const isExpanded = !isCollapsed;
 
   useEffect(() => {
-    if (measurementOnly || !isExpanded || diffState) {
+    if (!isExpanded || diffState) {
       return;
     }
     void onEnsureDiff(row);
-  }, [diffState, isExpanded, measurementOnly, onEnsureDiff, row]);
+  }, [diffState, isExpanded, onEnsureDiff, row]);
 
   return (
     <div className="transcript-historyRow transcript-historyRow--checkpoint">
@@ -988,7 +1400,7 @@ function TranscriptDiffBody({
   } | undefined;
 }) {
   if (!diffState || diffState.status === "loading") {
-    return <div className="transcript-blockHistory__inlineDiffStateMessage">Loading diff…</div>;
+    return <div className="transcript-blockHistory__inlineDiffStateMessage">Loading diffÔÇª</div>;
   }
   if (diffState.status === "error") {
     return (
@@ -1155,15 +1567,15 @@ function shouldRenderRoleSeparator(
 
 function getToolGlyph(tool: Extract<TranscriptHistoryRow, { readonly kind: "tool" }>["tool"]) {
   if (tool.status === "running") {
-    return "↻";
+    return "Ôå╗";
   }
   if (tool.status === "error") {
-    return "✕";
+    return "Ô£ò";
   }
   if (tool.status === "declined") {
-    return "−";
+    return "ÔêÆ";
   }
-  return "✓";
+  return "Ô£ô";
 }
 
 function humanizeExecutionLabel(label: string) {
