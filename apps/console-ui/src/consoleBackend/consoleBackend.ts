@@ -8,6 +8,14 @@ import type {
   OrchestrationReadModel,
   ServerConfig,
   ServerConfigUpdatedPayload,
+  TerminalClearInput,
+  TerminalCloseInput,
+  TerminalEvent,
+  TerminalOpenInput,
+  TerminalResizeInput,
+  TerminalRestartInput,
+  TerminalSessionSnapshot,
+  TerminalWriteInput,
   WsWelcomePayload,
 } from "@t3tools/contracts";
 
@@ -32,6 +40,10 @@ export type ConsoleBackendEvent =
   | {
       type: "orchestration.event";
       payload: OrchestrationEvent;
+    }
+  | {
+      type: "terminal.event";
+      payload: TerminalEvent;
     };
 
 export interface ConsoleBackend {
@@ -47,4 +59,10 @@ export interface ConsoleBackend {
   getFullThreadDiff(
     input: OrchestrationGetFullThreadDiffInput,
   ): Promise<OrchestrationGetFullThreadDiffResult>;
+  openTerminal(input: TerminalOpenInput): Promise<TerminalSessionSnapshot>;
+  writeTerminal(input: TerminalWriteInput): Promise<void>;
+  resizeTerminal(input: TerminalResizeInput): Promise<void>;
+  clearTerminal(input: TerminalClearInput): Promise<void>;
+  restartTerminal(input: TerminalRestartInput): Promise<TerminalSessionSnapshot>;
+  closeTerminal(input: TerminalCloseInput): Promise<void>;
 }

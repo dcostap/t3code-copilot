@@ -29,6 +29,21 @@ describe("parseTranscriptMessageBlocks", () => {
       { kind: "text", text: "after" },
     ]);
   });
+
+  it("reuses cached block parsing for identical message text", () => {
+    const text = [
+      "before",
+      "| Name | Value |",
+      "| :--- | ---: |",
+      "| Alpha | 1 |",
+      "after",
+    ].join("\n");
+
+    const first = parseTranscriptMessageBlocks(text);
+    const second = parseTranscriptMessageBlocks(text);
+
+    expect(second).toBe(first);
+  });
 });
 
 describe("tokenizeTranscriptLinks", () => {
@@ -46,5 +61,14 @@ describe("tokenizeTranscriptLinks", () => {
         linkKind: "url",
       },
     ]);
+  });
+
+  it("reuses cached link tokenization for identical text", () => {
+    const text = "See [docs](https://example.com) and https://github.com/example/repo";
+
+    const first = tokenizeTranscriptLinks(text);
+    const second = tokenizeTranscriptLinks(text);
+
+    expect(second).toBe(first);
   });
 });

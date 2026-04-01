@@ -1,5 +1,6 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
+  DEFAULT_TERMINAL_ID,
   type CodexReasoningEffort,
   type OrchestrationProject,
   type OrchestrationThread,
@@ -13,7 +14,6 @@ import {
   memo,
   startTransition,
   useCallback,
-  useDeferredValue,
   useEffect,
   useId,
   useMemo,
@@ -40,6 +40,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { AnimatedLoadingText } from "./AnimatedLoadingText";
 import { deriveRunningThreadIntentLabel } from "./agentIntent";
 import { CommandPalette } from "./CommandPalette";
+import { TerminalPane, type TerminalPaneHandle } from "./TerminalPane";
 import {
   filterCommandPaletteCommands,
   type CommandPaletteCommand,
@@ -89,6 +90,7 @@ import {
   type ConsoleProjectPane,
 } from "./consoleSessions";
 import { recordTranscriptSwitchDiagnostic } from "./transcriptSwitchDiagnostics";
+import type { ConsoleTerminalSessionState } from "./terminalSessions";
 
 const DRAFT_STORAGE_KEY = "t3code:console-pane-drafts:v1";
 const ARCHIVED_PROJECT_IDS_STORAGE_KEY = "t3code:archived-project-ids:v1";
@@ -128,6 +130,7 @@ const MANUAL_MODEL_COMMANDS_BY_PROVIDER: Record<ProviderKind, ReadonlyArray<Manu
   ],
 };
 const SPLIT_PANE_COMMAND_LABEL = "New thread in new split pane";
+const SPLIT_TERMINAL_PANE_COMMAND_LABEL = "Open terminal in new split pane";
 const NEW_THREAD_IN_CURRENT_PANE_COMMAND_LABEL = "New thread in current pane";
 const CLOSE_PANE_COMMAND_LABEL = "Close current pane";
 const CREATE_TAB_COMMAND_LABEL = "Add new tab";
@@ -293,6 +296,9 @@ interface PaneView {
   readonly isActive: boolean;
   readonly threadId: OrchestrationThread["id"] | null;
   readonly thread: OrchestrationThread | null;
+  readonly terminalSessionId: string | null;
+  readonly terminalSessionThreadId: string | null;
+  readonly terminalSession: ConsoleTerminalSessionState | null;
   readonly pendingThread: PendingConsoleThread | null;
   readonly setup: ConsolePaneSetup | null;
   readonly attachments: ReadonlyArray<ComposerImageAttachment>;
@@ -308,6 +314,27 @@ interface PaneView {
   readonly modelOptions: ProviderModelOptions | undefined;
 }
 
+interface AppPaneHandle {
+  focus(): void;
+  focusPrompt(options?: { readonly reveal?: boolean }): void;
+  hasFocusWithinPane(): boolean;
+  openSearch(): void;
+  isHistoryActive(): boolean;
+  hasHistorySelection(): boolean;
+  selectAllHistory(): boolean;
+  insertPromptText(text: string): void;
+  deletePromptBackward(): void;
+  deletePromptForward(): void;
+  submitPrompt(): void;
+}
+
+export function getTerminalSessionThreadId(
+  projectId: OrchestrationProject["id"],
+  terminalSessionId: string,
+) {
+  return `terminal-pane:${projectId}:${terminalSessionId}`;
+}
+
 interface ConversationPaneTranscriptProps {
   readonly paneView: PaneView;
   readonly draftValue: string;
@@ -320,8 +347,13 @@ interface ConversationPaneTranscriptProps {
   readonly paletteOpen: boolean;
   readonly hasBlockingModal: boolean;
   readonly submitDisabled: boolean;
-  readonly registerPaneHandle: (paneId: string, handle: TranscriptRendererHandle | null) => void;
+  readonly registerPaneHandle: (paneId: string, handle: AppPaneHandle | null) => void;
   readonly setComposerDraftForPane: (paneId: string, value: string) => void;
+  readonly getInitialScrollOffsetFromBottom: (threadId: OrchestrationThread["id"] | null | undefined) => number | null;
+  readonly rememberScrollOffsetFromBottom: (
+    threadId: OrchestrationThread["id"],
+    offsetFromBottom: number,
+  ) => void;
   readonly handleAddImageFilesForPane: (paneId: string, files: ReadonlyArray<File>) => void;
   readonly handleRemoveImageForPane: (paneId: string, attachmentId: string) => void;
   readonly handleSubmit: (paneView: PaneView, value: string) => Promise<void>;
@@ -337,25 +369,75 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
   submitDisabled,
   registerPaneHandle,
   setComposerDraftForPane,
+  getInitialScrollOffsetFromBottom,
+  rememberScrollOffsetFromBottom,
   handleAddImageFilesForPane,
   handleRemoveImageForPane,
   handleSubmit,
 }: ConversationPaneTranscriptProps) {
-  const deferredThread = useDeferredValue(paneView.thread);
-  const threadSwitchPending = paneView.pane.kind === "thread" && paneView.thread !== deferredThread;
+  const [renderedThread, setRenderedThread] = useState(paneView.thread);
   const [threadSwitchLoaderVisible, setThreadSwitchLoaderVisible] = useState(false);
+  const requestedThreadId = paneView.thread?.id ?? null;
+  const renderedThreadId = renderedThread?.id ?? null;
+  const showingThreadSwitchPlaceholder =
+    threadSwitchLoaderVisible && requestedThreadId !== renderedThreadId;
+  const displayedThread = showingThreadSwitchPlaceholder
+    ? null
+    : requestedThreadId === renderedThreadId
+      ? paneView.thread
+      : renderedThread;
+  const displayedThreadId = displayedThread?.id ?? null;
+
   useEffect(() => {
-    if (!threadSwitchPending) {
-      setThreadSwitchLoaderVisible(false);
+    if (requestedThreadId === renderedThreadId) {
+      if (!requestedThreadId) {
+        setThreadSwitchLoaderVisible(false);
+      }
       return;
     }
-    const timeout = window.setTimeout(() => {
-      setThreadSwitchLoaderVisible(true);
-    }, 120);
+
+    const nextThread = paneView.thread;
+    let cancelled = false;
+    let firstFrame = 0;
+    let secondFrame = 0;
+    setThreadSwitchLoaderVisible(true);
+    firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        if (cancelled) {
+          return;
+        }
+        startTransition(() => {
+          setRenderedThread(nextThread);
+        });
+      });
+    });
     return () => {
-      window.clearTimeout(timeout);
+      cancelled = true;
+      cancelAnimationFrame(firstFrame);
+      cancelAnimationFrame(secondFrame);
     };
-  }, [threadSwitchPending, paneView.thread?.id]);
+  }, [paneView.thread, renderedThreadId, requestedThreadId]);
+
+  const handleRenderedThreadReady = useCallback((threadId: ThreadId) => {
+    if (threadId !== requestedThreadId || threadId !== displayedThreadId) {
+      return;
+    }
+    setThreadSwitchLoaderVisible(false);
+  }, [displayedThreadId, requestedThreadId]);
+
+  const handleScrollOffsetFromBottomChange = useCallback((offsetFromBottom: number) => {
+    if (!displayedThreadId) {
+      return;
+    }
+    rememberScrollOffsetFromBottom(displayedThreadId, offsetFromBottom);
+  }, [displayedThreadId, rememberScrollOffsetFromBottom]);
+
+  useEffect(() => {
+    if (requestedThreadId === null && renderedThreadId === null && threadSwitchLoaderVisible) {
+      setThreadSwitchLoaderVisible(false);
+    }
+  }, [renderedThreadId, requestedThreadId, threadSwitchLoaderVisible]);
+
   const loadingLabel = threadSwitchLoaderVisible ? "loading conversation" : null;
   const handleTranscriptRef = useCallback((handle: TranscriptRendererHandle | null) => {
     registerPaneHandle(paneView.pane.id, handle);
@@ -385,16 +467,65 @@ const ConversationPaneTranscript = memo(function ConversationPaneTranscript({
       projectRoot={paneView.project.workspaceRoot}
       paneActive={paneActive}
       interactionMode={paneView.interactionMode}
-      loading={threadSwitchPending}
+      initialScrollOffsetFromBottom={getInitialScrollOffsetFromBottom(displayedThreadId)}
+      loading={threadSwitchLoaderVisible}
       loadingLabel={loadingLabel}
       promptFocusDisabled={paletteOpen || hasBlockingModal}
       promptInputDisabled={hasBlockingModal}
-      thread={deferredThread}
+      thread={displayedThread}
       onAddImageFiles={handleAddImages}
       onDraftChange={handleDraftChange}
       onRemoveImage={handleRemoveImage}
+      onScrollOffsetFromBottomChange={handleScrollOffsetFromBottomChange}
+      onThreadRenderReady={handleRenderedThreadReady}
       onSubmit={handleTranscriptSubmit}
       submitDisabled={submitDisabled}
+    />
+  );
+});
+
+interface TerminalPaneSurfaceProps {
+  readonly paneView: PaneView;
+  readonly paneActive: boolean;
+  readonly registerPaneHandle: (paneId: string, handle: AppPaneHandle | null) => void;
+  readonly openTerminal: ReturnType<typeof useConsoleData>["openTerminal"];
+  readonly writeTerminal: ReturnType<typeof useConsoleData>["writeTerminal"];
+  readonly resizeTerminal: ReturnType<typeof useConsoleData>["resizeTerminal"];
+  readonly subscribeToTerminalEvents: ReturnType<typeof useConsoleData>["subscribeToTerminalEvents"];
+}
+
+const TerminalPaneSurface = memo(function TerminalPaneSurface({
+  paneView,
+  paneActive,
+  registerPaneHandle,
+  openTerminal,
+  writeTerminal,
+  resizeTerminal,
+  subscribeToTerminalEvents,
+}: TerminalPaneSurfaceProps) {
+  const handleTerminalRef = useCallback((handle: TerminalPaneHandle | null) => {
+    registerPaneHandle(paneView.pane.id, handle);
+  }, [paneView.pane.id, registerPaneHandle]);
+
+  if (!paneView.terminalSessionThreadId) {
+    return (
+      <div className="terminal-pane__empty" role="status" aria-live="polite">
+        Terminal session unavailable.
+      </div>
+    );
+  }
+
+  return (
+    <TerminalPane
+      ref={handleTerminalRef}
+      sessionThreadId={paneView.terminalSessionThreadId}
+      cwd={paneView.cwd ?? paneView.project.workspaceRoot}
+      paneActive={paneActive}
+      terminalId={DEFAULT_TERMINAL_ID}
+      openTerminal={openTerminal}
+      writeTerminal={writeTerminal}
+      resizeTerminal={resizeTerminal}
+      subscribeToTerminalEvents={subscribeToTerminalEvents}
     />
   );
 });
@@ -1385,6 +1516,8 @@ export function App() {
   });
 
   const getPendingUserInputs = consoleData.getPendingUserInputs;
+  const getTerminalSession = consoleData.getTerminalSession;
+  const closeTerminal = consoleData.closeTerminal;
   const isThreadTurnRunning = consoleData.isThreadTurnRunning;
   const canSubmitPromptForThread = consoleData.canSubmitPromptForThread;
   const createThread = consoleData.createThread;
@@ -1436,8 +1569,9 @@ export function App() {
     () => readPersistedUnreadThreadIds<OrchestrationThread["id"]>(),
   );
   const [topbarActiveTabCutout, setTopbarActiveTabCutout] = useState<TopbarActiveTabCutout | null>(null);
-  const paneRefs = useRef<Record<string, TranscriptRendererHandle | null>>({});
+  const paneRefs = useRef<Record<string, AppPaneHandle | null>>({});
   const paneElementRefs = useRef<Record<string, HTMLElement | null>>({});
+  const scrollOffsetFromBottomByThreadIdRef = useRef<Record<string, number>>({});
   const hasInitiallyFocusedPromptRef = useRef(false);
   const draftSyncTimeoutRef = useRef<number | null>(null);
   const composerDraftByPaneIdRef = useRef(composerDraftByPaneId);
@@ -1501,6 +1635,30 @@ export function App() {
     focusAction();
     requestAnimationFrame(focusAction);
   }, [duplicateProjectConfirm]);
+
+  const getInitialScrollOffsetFromBottom = useCallback(
+    (threadId: OrchestrationThread["id"] | null | undefined) => {
+      if (!threadId) {
+        return null;
+      }
+      const offsetFromBottom = scrollOffsetFromBottomByThreadIdRef.current[threadId];
+      return typeof offsetFromBottom === "number" && Number.isFinite(offsetFromBottom) && offsetFromBottom >= 0
+        ? offsetFromBottom
+        : 0;
+    },
+    [],
+  );
+
+  const rememberScrollOffsetFromBottom = useCallback((
+    threadId: OrchestrationThread["id"],
+    offsetFromBottom: number,
+  ) => {
+    const clampedOffsetFromBottom = Math.max(offsetFromBottom, 0);
+    if (scrollOffsetFromBottomByThreadIdRef.current[threadId] === clampedOffsetFromBottom) {
+      return;
+    }
+    scrollOffsetFromBottomByThreadIdRef.current[threadId] = clampedOffsetFromBottom;
+  }, []);
 
   const orderedThreadsByProjectId = useMemo(() => {
     const map = new Map<string, OrchestrationThread[]>();
@@ -1605,6 +1763,31 @@ export function App() {
     }
     return ids;
   }, [workspace.projectViews]);
+  const liveTerminalPaneSessions = useMemo(() => {
+    const sessions: Array<{
+      readonly key: string;
+      readonly threadId: string;
+      readonly terminalId: string;
+    }> = [];
+    for (const projectView of workspace.projectViews) {
+      for (const pane of Object.values(projectView.layout.panesById)) {
+        if (pane.kind !== "terminal") {
+          continue;
+        }
+        const threadId = getTerminalSessionThreadId(projectView.project.id, pane.terminalSessionId);
+        sessions.push({
+          key: `${threadId}::${DEFAULT_TERMINAL_ID}`,
+          threadId,
+          terminalId: DEFAULT_TERMINAL_ID,
+        });
+      }
+    }
+    return sessions;
+  }, [workspace.projectViews]);
+  const previousLiveTerminalSessionKeysRef = useRef<ReadonlyMap<string, {
+    readonly threadId: string;
+    readonly terminalId: string;
+  }> | null>(null);
 
   useEffect(() => {
     const livePaneIdSet = new Set(livePaneIds);
@@ -1631,6 +1814,29 @@ export function App() {
       }
     }
   }, [liveDraftPaneIds, livePaneIds]);
+
+  useEffect(() => {
+    const nextByKey = new Map(
+      liveTerminalPaneSessions.map((session) => [session.key, {
+        threadId: session.threadId,
+        terminalId: session.terminalId,
+      }]),
+    );
+    const previousByKey = previousLiveTerminalSessionKeysRef.current;
+    previousLiveTerminalSessionKeysRef.current = nextByKey;
+    if (!previousByKey) {
+      return;
+    }
+
+    for (const [key, session] of previousByKey) {
+      if (nextByKey.has(key)) {
+        continue;
+      }
+      void closeTerminal(session).catch((error) => {
+        console.error("Failed to close terminal session", error);
+      });
+    }
+  }, [closeTerminal, liveTerminalPaneSessions]);
 
   useEffect(() => {
     if (draggedThreadId) {
@@ -1862,7 +2068,7 @@ export function App() {
     focusPanePrompt(workspace.activePaneId);
   }, [focusPanePrompt, paneInteractionActive, paletteOpen, workspace.activePaneId]);
 
-  const registerPaneHandle = useCallback((paneId: string, handle: TranscriptRendererHandle | null) => {
+  const registerPaneHandle = useCallback((paneId: string, handle: AppPaneHandle | null) => {
     if (!handle) {
       delete paneRefs.current[paneId];
       return;
@@ -1978,6 +2184,10 @@ export function App() {
         const thread = pane.kind === "thread"
           ? consoleData.threads.find((candidate) => candidate.id === pane.threadId) ?? null
           : null;
+        const terminalSessionId = pane.kind === "terminal" ? pane.terminalSessionId : null;
+        const terminalSessionThreadId = terminalSessionId
+          ? getTerminalSessionThreadId(activeProject.id, terminalSessionId)
+          : null;
         const pendingThreadEntry = pendingThreadByPaneId[pane.id] ?? null;
         const pendingThread = pendingThreadEntry?.pendingThread ?? null;
         const pendingUserInput = pane.kind === "thread" ? (getPendingUserInputs(pane.threadId)[0] ?? null) : null;
@@ -2005,6 +2215,11 @@ export function App() {
           isActive: activeTab.activePaneId === pane.id,
           threadId: pane.kind === "thread" ? pane.threadId : null,
           thread,
+          terminalSessionId,
+          terminalSessionThreadId,
+          terminalSession: terminalSessionThreadId
+            ? getTerminalSession(terminalSessionThreadId, DEFAULT_TERMINAL_ID)
+            : null,
           pendingThread,
           setup: pane.kind === "draft" ? pane.setup : null,
           attachments: composerAttachmentsByPaneId[pane.id] ?? [],
@@ -2015,7 +2230,13 @@ export function App() {
           draftAnswers: pendingUserInput ? (pendingUserInputAnswersByRequestId[pendingUserInput.requestId] ?? {}) : {},
           cwd: thread
             ? resolveThreadCwd(thread, projects)
-            : (pendingThread?.worktreePath ?? (pane.kind === "draft" ? pane.setup.worktreePath : null) ?? activeProject.workspaceRoot),
+            : (pendingThread?.worktreePath
+              ?? (pane.kind === "draft"
+                ? pane.setup.worktreePath
+                : pane.kind === "terminal"
+                  ? pane.cwd
+                  : null)
+              ?? activeProject.workspaceRoot),
           interactionMode: thread?.interactionMode ?? pendingThread?.interactionMode ?? (pane.kind === "draft" ? pane.setup.interactionMode : "default"),
           provider,
           model,
@@ -2033,6 +2254,7 @@ export function App() {
     pendingThreadByPaneId,
     pendingUserInputAnswersByRequestId,
     pendingUserInputQuestionIndexByRequestId,
+    getTerminalSession,
     projects,
     workspace.activeProject,
   ]);
@@ -2988,6 +3210,18 @@ export function App() {
                 paneId: targetPaneView.pane.id,
               });
             },
+          }, {
+            id: `pane:terminal-split:${targetPaneView.pane.id}`,
+            label: SPLIT_TERMINAL_PANE_COMMAND_LABEL,
+            keywords: ["split pane terminal", "open terminal", "new terminal pane", "powershell"],
+            priority: HIGH_PRIORITY_COMMAND,
+            run: () => {
+              workspace.createTerminalPane({
+                projectId: targetPaneView.project.id,
+                paneId: targetPaneView.pane.id,
+                cwd: targetPaneView.cwd ?? targetPaneView.project.workspaceRoot,
+              });
+            },
           }]
         : [];
     const newThreadInCurrentPaneCommands: ReadonlyArray<AppPaletteCommand> = [{
@@ -3367,6 +3601,11 @@ export function App() {
       })} · ${paneView.cwd ?? paneView.project.workspaceRoot}`;
     }
 
+    if (paneView.pane.kind === "terminal") {
+      const status = paneView.terminalSession?.snapshot?.status ?? "starting";
+      return `Terminal · ${status} · ${paneView.cwd ?? paneView.project.workspaceRoot}`;
+    }
+
     return `${paneView.project.title} · ${paneView.project.workspaceRoot}`;
   }, [copilotModelById, submitError]);
 
@@ -3416,6 +3655,32 @@ export function App() {
           <span className="status-line__segment">{paneView.thread.provider}</span>
           <span className="status-line__separator">·</span>
           <span className="status-line__segment">{modelLabel}</span>
+          <span className="status-line__separator">·</span>
+          <span
+            className="status-line__segment status-line__segment--detail"
+            title={paneView.cwd ?? paneView.project.workspaceRoot}
+          >
+            {paneView.cwd ?? paneView.project.workspaceRoot}
+          </span>
+        </>
+      );
+    }
+
+    if (paneView.pane.kind === "terminal") {
+      const terminalSnapshot = paneView.terminalSession?.snapshot ?? null;
+      const terminalStatus = terminalSnapshot?.status ?? "starting";
+      const pidLabel = terminalSnapshot?.pid ? `pid ${terminalSnapshot.pid}` : null;
+      return (
+        <>
+          <span className="status-line__segment status-line__segment--title">Terminal</span>
+          <span className="status-line__separator">·</span>
+          <span className="status-line__segment">{terminalStatus}</span>
+          {pidLabel ? (
+            <>
+              <span className="status-line__separator">·</span>
+              <span className="status-line__segment">{pidLabel}</span>
+            </>
+          ) : null}
           <span className="status-line__separator">·</span>
           <span
             className="status-line__segment status-line__segment--detail"
@@ -3925,6 +4190,17 @@ export function App() {
                           <div className="conversation-pane__dropOverlay" aria-hidden="true" />
                         ) : null}
                         <div className="transcript-shell">
+                          {paneView.pane.kind === "terminal" ? (
+                            <TerminalPaneSurface
+                              paneView={paneView}
+                              paneActive={paneView.isActive && paneInteractionActive}
+                              registerPaneHandle={registerPaneHandle}
+                              openTerminal={consoleData.openTerminal}
+                              writeTerminal={consoleData.writeTerminal}
+                              resizeTerminal={consoleData.resizeTerminal}
+                              subscribeToTerminalEvents={consoleData.subscribeToTerminalEvents}
+                            />
+                          ) : (
                             <ConversationPaneTranscript
                               paneView={paneView}
                               draftValue={composerDraftByPaneIdRef.current[paneView.pane.id] ?? ""}
@@ -3932,19 +4208,22 @@ export function App() {
                               getTurnDiff={consoleData.getTurnDiff}
                               paletteOpen={paletteOpen}
                               hasBlockingModal={hasBlockingModal}
-                            submitDisabled={
-                              pendingDraftPaneIds.has(paneView.pane.id)
-                              || paneView.pendingPromptSendStartedAt !== null
-                              || (paneView.threadId
-                                ? !canSubmitPromptForThread(paneView.threadId, paneView.pendingThread)
-                                : false)
-                            }
-                            registerPaneHandle={registerPaneHandle}
-                            setComposerDraftForPane={setComposerDraftForPane}
-                            handleAddImageFilesForPane={handleAddImageFilesForPane}
-                            handleRemoveImageForPane={handleRemoveImageForPane}
-                            handleSubmit={handleSubmit}
-                          />
+                              submitDisabled={
+                                pendingDraftPaneIds.has(paneView.pane.id)
+                                || paneView.pendingPromptSendStartedAt !== null
+                                || (paneView.threadId
+                                  ? !canSubmitPromptForThread(paneView.threadId, paneView.pendingThread)
+                                  : false)
+                              }
+                              registerPaneHandle={registerPaneHandle}
+                              setComposerDraftForPane={setComposerDraftForPane}
+                              getInitialScrollOffsetFromBottom={getInitialScrollOffsetFromBottom}
+                              rememberScrollOffsetFromBottom={rememberScrollOffsetFromBottom}
+                              handleAddImageFilesForPane={handleAddImageFilesForPane}
+                              handleRemoveImageForPane={handleRemoveImageForPane}
+                              handleSubmit={handleSubmit}
+                            />
+                          )}
                         </div>
                           <footer className="status-line" title={getPaneFooterText(paneView)}>
                             {renderPaneFooter(paneView)}

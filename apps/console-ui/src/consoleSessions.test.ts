@@ -243,6 +243,49 @@ describe("reconcileProjectLayoutsState", () => {
     expect(state.layoutsByProjectId[project.id]?.panesById["pane:1"]?.kind).toBe("draft");
   });
 
+  it("preserves terminal panes during reconciliation", () => {
+    const state = reconcileProjectLayoutsState({
+      state: {
+        ...createEmptyState(),
+        projectOrder: [project.id],
+        activeProjectId: project.id,
+        layoutsByProjectId: {
+          [project.id]: {
+            projectId: project.id,
+            activeTabId: "tab:1",
+            updatedAt: "2026-03-12T10:00:00.000Z",
+            tabs: [
+              {
+                id: "tab:1",
+                paneIds: ["pane:terminal"],
+                activePaneId: "pane:terminal",
+                createdAt: "2026-03-12T10:00:00.000Z",
+              },
+            ],
+            panesById: {
+              "pane:terminal": {
+                id: "pane:terminal",
+                kind: "terminal",
+                terminalSessionId: "terminal-session:1",
+                cwd: "C:\\Projects\\repo\\packages\\console-ui",
+              },
+            },
+          },
+        },
+      },
+      threads: [],
+      projects: [project],
+      preferredThreadId: null,
+    });
+
+    expect(state.layoutsByProjectId[project.id]?.panesById["pane:terminal"]).toEqual({
+      id: "pane:terminal",
+      kind: "terminal",
+      terminalSessionId: "terminal-session:1",
+      cwd: "C:\\Projects\\repo\\packages\\console-ui",
+    });
+  });
+
   it("preserves panes for pending threads until the thread snapshot arrives", () => {
     const pendingThreadId = "thread:pending" as OrchestrationThread["id"];
 

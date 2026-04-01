@@ -9,7 +9,7 @@ import type {
 } from "./transcriptLayoutTypes";
 import type { TranscriptHistoryRow } from "./transcriptHistoryRows";
 
-export const DEFAULT_PREPARED_TRANSCRIPT_CHUNK_ROW_COUNT = 24;
+export const DEFAULT_PREPARED_TRANSCRIPT_CHUNK_ROW_COUNT = 16;
 
 interface BuildPreparedTranscriptLayoutInput {
   readonly rows: ReadonlyArray<TranscriptHistoryRow>;

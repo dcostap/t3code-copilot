@@ -51,6 +51,11 @@ import {
 
 const AUTO_FOLLOW_BOTTOM_THRESHOLD_PX = 120;
 const PREPARED_TRANSCRIPT_HISTORY_ENABLED = true;
+const EMPTY_TOOL_BODY_SECTIONS: ReadonlyArray<{
+  readonly key: string;
+  readonly label: string | null;
+  readonly text: string;
+}> = [];
 
 interface TranscriptHistoryProps {
   readonly getTurnDiff: ((input: {
@@ -62,6 +67,7 @@ interface TranscriptHistoryProps {
   readonly thread: OrchestrationThread | null;
   readonly initialScrollOffsetFromBottom: number | null | undefined;
   readonly onScrollOffsetFromBottomChange: ((offsetFromBottom: number) => void) | undefined;
+  readonly onThreadRenderReady: ((threadId: OrchestrationThread["id"]) => void) | undefined;
   readonly scrollContainerRef: RefObject<HTMLDivElement | null>;
 }
 
@@ -71,6 +77,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   thread,
   initialScrollOffsetFromBottom,
   onScrollOffsetFromBottomChange,
+  onThreadRenderReady,
   scrollContainerRef,
 }: TranscriptHistoryProps) {
   const rows = useMemo(() => deriveTranscriptHistoryRows(thread), [thread]);
@@ -84,19 +91,17 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     readonly diff?: string;
     readonly errorMessage?: string;
   }>>(() => new Map());
-  const firstUnvirtualizedRowIndex = useMemo(
-    () => derivePreparedTranscriptBoundary(rows, thread).firstLiveRowIndex,
-    [rows, thread],
-  );
   const preparedBoundary = useMemo(
     () => derivePreparedTranscriptBoundary(rows, thread),
     [rows, thread],
   );
+  const firstUnvirtualizedRowIndex = preparedBoundary.firstLiveRowIndex;
   const lastKnownOffsetFromBottomRef = useRef(0);
   const previousThreadIdRef = useRef<string | null>(null);
   const previousThreadUpdatedAtRef = useRef<string | null>(null);
   const previousPreparedLayoutKeyRef = useRef<string | null>(null);
   const preparedHistoryDiagnosticPhaseSignatureRef = useRef<string | null>(null);
+  const readyThreadIdRef = useRef<string | null>(null);
   const pendingPreparedHistoryAnchorRef = useRef<TranscriptScrollAnchor | null>(null);
   const pendingPreparedHistoryBottomOffsetRef = useRef<number | null>(null);
   const previousPreparedStateRowIdsRef = useRef<ReturnType<typeof collectPreparedTranscriptLayoutStateRowIds> | null>(null);
@@ -430,6 +435,11 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     useAnimationFrameWithResizeObserver: true,
     overscan: 8,
   });
+  const rowVirtualizerRef = useRef(rowVirtualizer);
+
+  useEffect(() => {
+    rowVirtualizerRef.current = rowVirtualizer;
+  }, [rowVirtualizer]);
 
   useLayoutEffect(() => {
     const historyRoot = historyRootRef.current;
@@ -462,8 +472,8 @@ export const TranscriptHistory = memo(function TranscriptHistory({
   }, [thread?.id]);
 
   const measureNow = useCallback(() => {
-    rowVirtualizer.measure();
-  }, [rowVirtualizer]);
+    rowVirtualizerRef.current.measure();
+  }, []);
 
   useLayoutEffect(() => {
     if (!PREPARED_TRANSCRIPT_HISTORY_ENABLED) {
@@ -478,13 +488,14 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     setPreparedMeasurementWidthPx(historyWidthPx);
   }, [historyWidthPx]);
 
-  useLayoutEffect(() => {
-    measureNow();
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      measureNow();
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+    };
   }, [checkpointDiffByRowId, collapsedCheckpointRowIds, expandedToolRowIds, measureNow]);
-
-  useLayoutEffect(() => {
-    measureNow();
-  }, [firstUnvirtualizedRowIndex, measureNow, premeasuredRowHeightById, rows]);
 
   useEffect(() => {
     setExpandedToolRowIds(new Set());
@@ -519,7 +530,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     measureNow();
   }, [capturePreparedHistoryAnchor, measureNow, preparedBoundary.firstLiveRowIndex, thread?.id]);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!PREPARED_TRANSCRIPT_HISTORY_ENABLED) {
       previousPreparedStateRowIdsRef.current = preparedStateRowIds;
       return;
@@ -533,18 +544,23 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     if (changedPreparedStateRowIds.size === 0) {
       return;
     }
-    setPremeasuredRowHeightById((existing) => {
-      if (existing.size === 0) {
-        return existing;
-      }
-      let changed = false;
-      const next = new Map(existing);
-      for (const rowId of changedPreparedStateRowIds) {
-        changed = next.delete(rowId) || changed;
-      }
-      return changed ? next : existing;
+    const frame = requestAnimationFrame(() => {
+      setPremeasuredRowHeightById((existing) => {
+        if (existing.size === 0) {
+          return existing;
+        }
+        let changed = false;
+        const next = new Map(existing);
+        for (const rowId of changedPreparedStateRowIds) {
+          changed = next.delete(rowId) || changed;
+        }
+        return changed ? next : existing;
+      });
+      measureNow();
     });
-    measureNow();
+    return () => {
+      cancelAnimationFrame(frame);
+    };
   }, [measureNow, preparedStateRowIds]);
 
   useEffect(() => {
@@ -757,6 +773,28 @@ export const TranscriptHistory = memo(function TranscriptHistory({
 
   const virtualItems = rowVirtualizer.getVirtualItems();
   const staticRows = rows.slice(firstUnvirtualizedRowIndex);
+  const hasVisibleHistoryContent = rows.length === 0 || virtualItems.length > 0 || staticRows.length > 0;
+
+  useEffect(() => {
+    if (!thread?.id || historyWidthPx === null || !hasVisibleHistoryContent) {
+      return;
+    }
+    if (readyThreadIdRef.current === thread.id) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      if (readyThreadIdRef.current === thread.id) {
+        return;
+      }
+      readyThreadIdRef.current = thread.id;
+      onThreadRenderReady?.(thread.id);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+    };
+  }, [hasVisibleHistoryContent, historyWidthPx, onThreadRenderReady, thread]);
+
   const fallbackPremeasureRows = useMemo(() => {
     if (firstUnvirtualizedRowIndex <= 0 || virtualItems.length === 0) {
       return [];
@@ -818,7 +856,7 @@ export const TranscriptHistory = memo(function TranscriptHistory({
     });
   }, [fallbackPremeasureRows, historyWidthPx, premeasuredRowHeightById, preparedBoundary, preparedLayout, preparedMeasurementWidthPx, rows]);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (premeasureRows.length === 0) {
       return;
     }
@@ -1276,8 +1314,15 @@ function TranscriptToolRow({
   readonly isExpanded: boolean;
   readonly onToggle: () => void;
 }) {
-  const bodySections = getExpandedToolBodySections(tool);
-  const expandable = bodySections.length > 0 || Boolean(tool.inlineUnifiedDiff);
+  const bodySections = useMemo(
+    () => (isExpanded ? getExpandedToolBodySections(tool) : EMPTY_TOOL_BODY_SECTIONS),
+    [isExpanded, tool],
+  );
+  const expandable = Boolean(tool.detail?.trim())
+    || Boolean(tool.command?.trim())
+    || tool.changedFiles.length > 0
+    || Boolean(tool.output?.trim())
+    || Boolean(tool.inlineUnifiedDiff);
   const statusClassName = getWorkItemStatusClassName(tool.status);
   const summarySubject = getVisibleToolSummarySubject(tool);
 

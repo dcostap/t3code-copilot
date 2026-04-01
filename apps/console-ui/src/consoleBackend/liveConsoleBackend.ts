@@ -7,10 +7,18 @@ import {
   OrchestrationGetTurnDiffResult,
   ServerConfig,
   ServerConfigUpdatedPayload,
+  TerminalEvent,
+  TerminalSessionSnapshot,
   WS_CHANNELS,
   WS_METHODS,
   WsWelcomePayload,
   type ClientOrchestrationCommand,
+  type TerminalClearInput,
+  type TerminalCloseInput,
+  type TerminalOpenInput,
+  type TerminalResizeInput,
+  type TerminalRestartInput,
+  type TerminalWriteInput,
   type OrchestrationGetFullThreadDiffInput,
   type OrchestrationGetTurnDiffInput,
 } from "@t3tools/contracts";
@@ -56,6 +64,7 @@ export class LiveConsoleBackend implements ConsoleBackend {
   private unsubscribeWelcome: (() => void) | null = null;
   private unsubscribeConfigUpdated: (() => void) | null = null;
   private unsubscribeDomainEvent: (() => void) | null = null;
+  private unsubscribeTerminalEvent: (() => void) | null = null;
   private lastWelcome: WsWelcomePayload | null = null;
   private lastConfigUpdated: ServerConfigUpdatedPayload | null = null;
 
@@ -103,9 +112,20 @@ export class LiveConsoleBackend implements ConsoleBackend {
         this.emit({ type: "orchestration.event", payload });
       },
     );
+    this.unsubscribeTerminalEvent = transport.subscribe(WS_CHANNELS.terminalEvent, (raw) => {
+      const payload = decodeAndWarnOnFailure(
+        TerminalEvent,
+        raw,
+        "Dropped inbound terminal event payload",
+      );
+      if (!payload) return;
+      this.emit({ type: "terminal.event", payload });
+    });
   }
 
   disconnect() {
+    this.unsubscribeTerminalEvent?.();
+    this.unsubscribeTerminalEvent = null;
     this.unsubscribeDomainEvent?.();
     this.unsubscribeDomainEvent = null;
     this.unsubscribeConfigUpdated?.();
@@ -189,6 +209,46 @@ export class LiveConsoleBackend implements ConsoleBackend {
       result,
       "Failed to decode full thread diff response",
     );
+  }
+
+  async openTerminal(input: TerminalOpenInput) {
+    const transport = this.requireTransport();
+    const result = await transport.request(WS_METHODS.terminalOpen, input);
+    return decodeOrThrow(
+      TerminalSessionSnapshot,
+      result,
+      "Failed to decode terminal open response",
+    );
+  }
+
+  async writeTerminal(input: TerminalWriteInput) {
+    const transport = this.requireTransport();
+    await transport.request(WS_METHODS.terminalWrite, input);
+  }
+
+  async resizeTerminal(input: TerminalResizeInput) {
+    const transport = this.requireTransport();
+    await transport.request(WS_METHODS.terminalResize, input);
+  }
+
+  async clearTerminal(input: TerminalClearInput) {
+    const transport = this.requireTransport();
+    await transport.request(WS_METHODS.terminalClear, input);
+  }
+
+  async restartTerminal(input: TerminalRestartInput) {
+    const transport = this.requireTransport();
+    const result = await transport.request(WS_METHODS.terminalRestart, input);
+    return decodeOrThrow(
+      TerminalSessionSnapshot,
+      result,
+      "Failed to decode terminal restart response",
+    );
+  }
+
+  async closeTerminal(input: TerminalCloseInput) {
+    const transport = this.requireTransport();
+    await transport.request(WS_METHODS.terminalClose, input);
   }
 
   private requireTransport() {

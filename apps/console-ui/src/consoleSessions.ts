@@ -33,7 +33,14 @@ export interface ConsoleThreadPane {
   readonly threadId: OrchestrationThread["id"];
 }
 
-export type ConsoleProjectPane = ConsoleDraftPane | ConsoleThreadPane;
+export interface ConsoleTerminalPane {
+  readonly id: string;
+  readonly kind: "terminal";
+  readonly terminalSessionId: string;
+  readonly cwd: string | null;
+}
+
+export type ConsoleProjectPane = ConsoleDraftPane | ConsoleThreadPane | ConsoleTerminalPane;
 
 export interface ConsoleProjectTab {
   readonly id: string;
@@ -100,6 +107,11 @@ export interface ConsoleProjectLayoutsModel {
     projectId: OrchestrationProject["id"];
     paneId: string;
   }): { tabId: string; paneId: string } | null;
+  createTerminalPane(input: {
+    projectId: OrchestrationProject["id"];
+    paneId: string;
+    cwd?: string | null;
+  }): { tabId: string; paneId: string } | null;
   replacePaneWithFreshDraft(
     projectId: OrchestrationProject["id"],
     paneId: string,
@@ -139,6 +151,8 @@ interface PersistedConsoleProjectPane {
   readonly id?: unknown;
   readonly kind?: unknown;
   readonly threadId?: unknown;
+  readonly terminalSessionId?: unknown;
+  readonly cwd?: unknown;
   readonly setup?: PersistedConsolePaneSetup;
 }
 
@@ -345,6 +359,19 @@ function createThreadPane(threadId: OrchestrationThread["id"], id?: string): Con
   };
 }
 
+function createTerminalPane(input?: {
+  readonly id?: string;
+  readonly terminalSessionId?: string;
+  readonly cwd?: string | null;
+}): ConsoleTerminalPane {
+  return {
+    id: input?.id ?? makeId("pane"),
+    kind: "terminal",
+    terminalSessionId: input?.terminalSessionId ?? makeId("terminal-session"),
+    cwd: input?.cwd ?? null,
+  };
+}
+
 function createDraftTabRef(input?: {
   readonly tabId?: string;
   readonly paneId?: string;
@@ -457,6 +484,14 @@ function normalizePane(
       id: candidate.id,
       kind: "thread",
       threadId: candidate.threadId as OrchestrationThread["id"],
+    };
+  }
+  if (candidate.kind === "terminal" && typeof candidate.terminalSessionId === "string" && candidate.terminalSessionId.length > 0) {
+    return {
+      id: candidate.id,
+      kind: "terminal",
+      terminalSessionId: candidate.terminalSessionId,
+      cwd: typeof candidate.cwd === "string" && candidate.cwd.length > 0 ? candidate.cwd : null,
     };
   }
   return {
@@ -714,6 +749,11 @@ function ensureActiveLayoutState(
         nextPaneIds.push(pane.id);
         continue;
       }
+      if (pane.kind === "terminal") {
+        panesById[pane.id] = pane;
+        nextPaneIds.push(pane.id);
+        continue;
+      }
       const draftPane: ConsoleDraftPane = {
         ...pane,
         setup: normalizePaneSetup(
@@ -828,6 +868,11 @@ export function reconcileProjectLayoutsState(input: {
             continue;
           }
           seenThreadIds.add(pane.threadId);
+          panesById[pane.id] = pane;
+          nextPaneIds.push(pane.id);
+          continue;
+        }
+        if (pane.kind === "terminal") {
           panesById[pane.id] = pane;
           nextPaneIds.push(pane.id);
           continue;
@@ -1176,6 +1221,39 @@ export function useConsoleProjectLayouts(input: {
     return created;
   }, []);
 
+  const createTerminalPaneAction = useCallback((inputValue: {
+    projectId: OrchestrationProject["id"];
+    paneId: string;
+    cwd?: string | null;
+  }) => {
+    let created: { tabId: string; paneId: string } | null = null;
+    setState((existing) => updateLayoutState(existing, inputValue.projectId, (layout) => {
+      const located = locatePane(layout, inputValue.paneId);
+      if (!located || located.tab.paneIds.length >= 6) {
+        return layout;
+      }
+      const pane = createTerminalPane({
+        cwd: inputValue.cwd ?? null,
+      });
+      created = { tabId: located.tab.id, paneId: pane.id };
+      const tabs = layout.tabs.map((tab) =>
+        tab.id === located.tab.id
+          ? { ...tab, paneIds: [...tab.paneIds, pane.id], activePaneId: pane.id }
+          : tab
+      );
+      return withUpdatedLayout(layout, {
+        ...layout,
+        activeTabId: located.tab.id,
+        tabs,
+        panesById: {
+          ...layout.panesById,
+          [pane.id]: pane,
+        },
+      });
+    }));
+    return created;
+  }, []);
+
   const replacePaneWithFreshDraftAction = useCallback((
     projectId: OrchestrationProject["id"],
     paneId: string,
@@ -1472,6 +1550,7 @@ export function useConsoleProjectLayouts(input: {
     activatePane,
     createDraftTab,
     splitPane,
+    createTerminalPane: createTerminalPaneAction,
     replacePaneWithFreshDraft: replacePaneWithFreshDraftAction,
     closePane,
     closeTab,

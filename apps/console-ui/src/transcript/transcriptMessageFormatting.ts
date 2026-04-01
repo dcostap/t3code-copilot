@@ -30,8 +30,16 @@ export type TranscriptLinkToken =
 
 const MARKDOWN_LINK_PATTERN = /\[([^\]]+)\]\(([^)\s]+)\)/g;
 const BARE_URL_PATTERN = /https?:\/\/[^\s<>()]+/g;
+const MAX_TRANSCRIPT_FORMAT_CACHE_ENTRIES = 256;
+const transcriptMessageBlockCache = new Map<string, ReadonlyArray<TranscriptMessageBlock>>();
+const transcriptLinkTokenCache = new Map<string, ReadonlyArray<TranscriptLinkToken>>();
 
 export function parseTranscriptMessageBlocks(text: string): ReadonlyArray<TranscriptMessageBlock> {
+  const cached = readTranscriptFormatCache(transcriptMessageBlockCache, text);
+  if (cached) {
+    return cached;
+  }
+
   const lines = text.split(/\r?\n/);
   const blocks: Array<TranscriptMessageBlock> = [];
   let textBuffer: Array<string> = [];
@@ -72,10 +80,17 @@ export function parseTranscriptMessageBlocks(text: string): ReadonlyArray<Transc
   }
 
   flushTextBuffer();
-  return blocks.length > 0 ? blocks : [{ kind: "text", text }];
+  const result: ReadonlyArray<TranscriptMessageBlock> = blocks.length > 0 ? blocks : [{ kind: "text", text }];
+  writeTranscriptFormatCache(transcriptMessageBlockCache, text, result);
+  return result;
 }
 
 export function tokenizeTranscriptLinks(text: string): ReadonlyArray<TranscriptLinkToken> {
+  const cached = readTranscriptFormatCache(transcriptLinkTokenCache, text);
+  if (cached) {
+    return cached;
+  }
+
   const matches: Array<{ readonly from: number; readonly to: number; readonly text: string; readonly href: string; readonly linkKind: "url" | "file" }> = [];
 
   for (const match of text.matchAll(MARKDOWN_LINK_PATTERN)) {
@@ -139,7 +154,9 @@ export function tokenizeTranscriptLinks(text: string): ReadonlyArray<TranscriptL
       text: text.slice(cursor),
     });
   }
-  return tokens.length > 0 ? tokens : [{ kind: "text", text }];
+  const result: ReadonlyArray<TranscriptLinkToken> = tokens.length > 0 ? tokens : [{ kind: "text", text }];
+  writeTranscriptFormatCache(transcriptLinkTokenCache, text, result);
+  return result;
 }
 
 function classifyLink(href: string): "url" | "file" {
@@ -209,4 +226,27 @@ function splitMarkdownTableCells(line: string) {
     .replace(/\|$/, "")
     .split("|")
     .map((cell) => cell.trim());
+}
+
+function readTranscriptFormatCache<T>(cache: Map<string, ReadonlyArray<T>>, key: string): ReadonlyArray<T> | null {
+  const cached = cache.get(key) ?? null;
+  if (!cached) {
+    return null;
+  }
+
+  cache.delete(key);
+  cache.set(key, cached);
+  return cached;
+}
+
+function writeTranscriptFormatCache<T>(cache: Map<string, ReadonlyArray<T>>, key: string, value: ReadonlyArray<T>) {
+  cache.set(key, value);
+  if (cache.size <= MAX_TRANSCRIPT_FORMAT_CACHE_ENTRIES) {
+    return;
+  }
+
+  const oldestKey = cache.keys().next().value;
+  if (typeof oldestKey === "string") {
+    cache.delete(oldestKey);
+  }
 }

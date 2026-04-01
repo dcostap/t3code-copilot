@@ -63,6 +63,15 @@ describe("deriveTranscriptHistoryRows", () => {
     const rows = deriveTranscriptHistoryRows(thread);
     expect(rows.at(-1)?.kind).toBe("working");
   });
+
+  it("reuses cached derived rows for the same thread snapshot", () => {
+    const thread = buildTestSnapshot().threads[0]!;
+
+    const firstRows = deriveTranscriptHistoryRows(thread);
+    const secondRows = deriveTranscriptHistoryRows(thread);
+
+    expect(secondRows).toBe(firstRows);
+  });
 });
 
 describe("getFirstUnvirtualizedRowIndex", () => {

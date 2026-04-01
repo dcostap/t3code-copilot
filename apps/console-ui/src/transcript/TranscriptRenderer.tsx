@@ -38,6 +38,7 @@ interface TranscriptRendererProps {
   onDraftChange?(value: string): void;
   onRemoveImage?(attachmentId: string): void;
   onScrollOffsetFromBottomChange?(offsetFromBottom: number): void;
+  onThreadRenderReady?(threadId: ThreadId): void;
   onSubmit?(value: string): Promise<void> | void;
 }
 
@@ -460,6 +461,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       onDraftChange,
       onRemoveImage,
       onScrollOffsetFromBottomChange,
+      onThreadRenderReady,
       onSubmit,
     },
     ref,
@@ -480,8 +482,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
       onDraftChangeRef.current = onDraftChange;
       onRemoveImageRef.current = onRemoveImage;
       onSubmitRef.current = onSubmit;
-      onScrollOffsetFromBottomChange?.(0);
-    }, [onAddImageFiles, onDraftChange, onRemoveImage, onScrollOffsetFromBottomChange, onSubmit]);
+    }, [onAddImageFiles, onDraftChange, onRemoveImage, onSubmit]);
 
     const handlePromptAddImageFiles = useCallback((files: ReadonlyArray<File>) => {
       onAddImageFilesRef.current?.(files);
@@ -607,6 +608,7 @@ export const TranscriptRenderer = forwardRef<TranscriptRendererHandle, Transcrip
             thread={thread}
             initialScrollOffsetFromBottom={initialScrollOffsetFromBottom}
             onScrollOffsetFromBottomChange={onScrollOffsetFromBottomChange}
+            onThreadRenderReady={onThreadRenderReady}
             scrollContainerRef={historyRef}
           />
         </div>

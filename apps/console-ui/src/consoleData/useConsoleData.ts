@@ -10,8 +10,17 @@ import {
   type ProviderInteractionMode,
   type ProviderKind,
   type CodexReasoningEffort,
+  DEFAULT_TERMINAL_ID,
   type ServerConfig,
   type ThreadId,
+  type TerminalClearInput,
+  type TerminalCloseInput,
+  type TerminalEvent,
+  type TerminalOpenInput,
+  type TerminalResizeInput,
+  type TerminalRestartInput,
+  type TerminalSessionSnapshot,
+  type TerminalWriteInput,
   type UploadChatImageAttachment,
   type UserInputQuestion,
   type WsWelcomePayload,
@@ -23,6 +32,13 @@ import {
   type ConsoleBackend,
   type ConsoleBackendConnectionState,
 } from "../consoleBackend";
+import {
+  applyConsoleTerminalEvent,
+  getConsoleTerminalSessionKey,
+  removeConsoleTerminalSession,
+  upsertConsoleTerminalSessionSnapshot,
+  type ConsoleTerminalSessionState,
+} from "../terminalSessions";
 import {
   formatPendingUserInputAnswersAsPrompt,
   isStaleCopilotUserInputResponseDetail,
@@ -71,6 +87,17 @@ export interface ConsoleDataState {
   readonly isInterruptingTurn: boolean;
   readonly isStoppingSession: boolean;
   readonly error: string | null;
+  getTerminalSession(
+    threadId: string,
+    terminalId: string,
+  ): ConsoleTerminalSessionState | null;
+  subscribeToTerminalEvents(listener: (event: TerminalEvent) => void): () => void;
+  openTerminal(input: TerminalOpenInput): Promise<TerminalSessionSnapshot>;
+  writeTerminal(input: TerminalWriteInput): Promise<void>;
+  resizeTerminal(input: TerminalResizeInput): Promise<void>;
+  clearTerminal(input: TerminalClearInput): Promise<void>;
+  restartTerminal(input: TerminalRestartInput): Promise<TerminalSessionSnapshot>;
+  closeTerminal(input: TerminalCloseInput): Promise<void>;
   setActiveThreadId(threadId: string): void;
   createProject(input: {
     workspaceRoot: string;
@@ -496,6 +523,7 @@ export function useConsoleData(): ConsoleDataState {
   const interruptInFlightRef = useRef(false);
   const stopSessionInFlightRef = useRef(false);
   const optimisticThreadsCacheRef = useRef<Map<string, OptimisticThreadCacheEntry>>(new Map());
+  const terminalEventListenersRef = useRef(new Set<(event: TerminalEvent) => void>());
 
   const [snapshot, setSnapshot] = useState<OrchestrationReadModel | null>(null);
   const [optimisticThreadMetaById, setOptimisticThreadMetaById] = useState<
@@ -510,6 +538,9 @@ export function useConsoleData(): ConsoleDataState {
   const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<string[]>([]);
   const [isInterruptingTurn, setIsInterruptingTurn] = useState(false);
   const [isStoppingSession, setIsStoppingSession] = useState(false);
+  const [terminalSessionsByKey, setTerminalSessionsByKey] = useState<
+    Readonly<Record<string, ConsoleTerminalSessionState>>
+  >({});
   const [error, setError] = useState<string | null>(null);
 
   const setActiveThreadId = useCallback((threadId: string) => {
@@ -543,6 +574,7 @@ export function useConsoleData(): ConsoleDataState {
     setRespondingUserInputRequestIds([]);
     setIsInterruptingTurn(false);
     setIsStoppingSession(false);
+    setTerminalSessionsByKey({});
 
     const flushSnapshotSync = async (): Promise<void> => {
       const nextSnapshot = await backend.getSnapshot();
@@ -675,6 +707,14 @@ export function useConsoleData(): ConsoleDataState {
         setOrchestrationEvents(orchestrationEventsRef.current);
         setSnapshot((current) => reconcileReadModelWithEvents(current, [event.payload]));
         scheduleSnapshotSync();
+        return;
+      }
+
+      if (event.type === "terminal.event") {
+        setTerminalSessionsByKey((existing) => applyConsoleTerminalEvent(existing, event.payload));
+        for (const listener of terminalEventListenersRef.current) {
+          listener(event.payload);
+        }
         return;
       }
     });
@@ -978,6 +1018,55 @@ export function useConsoleData(): ConsoleDataState {
       throw new Error("Live backend is not connected.");
     }
   }, [connectionState]);
+
+  const getTerminalSession = useCallback((threadId: string, terminalId: string) => {
+    return terminalSessionsByKey[getConsoleTerminalSessionKey(threadId, terminalId)] ?? null;
+  }, [terminalSessionsByKey]);
+
+  const subscribeToTerminalEvents = useCallback((listener: (event: TerminalEvent) => void) => {
+    terminalEventListenersRef.current.add(listener);
+    return () => {
+      terminalEventListenersRef.current.delete(listener);
+    };
+  }, []);
+
+  const openTerminal = useCallback(async (input: TerminalOpenInput) => {
+    assertLiveCommandReady();
+    const snapshot = await backend.openTerminal(input);
+    setTerminalSessionsByKey((existing) => upsertConsoleTerminalSessionSnapshot(existing, snapshot));
+    return snapshot;
+  }, [assertLiveCommandReady, backend]);
+
+  const writeTerminal = useCallback(async (input: TerminalWriteInput) => {
+    assertLiveCommandReady();
+    await backend.writeTerminal(input);
+  }, [assertLiveCommandReady, backend]);
+
+  const resizeTerminal = useCallback(async (input: TerminalResizeInput) => {
+    assertLiveCommandReady();
+    await backend.resizeTerminal(input);
+  }, [assertLiveCommandReady, backend]);
+
+  const clearTerminal = useCallback(async (input: TerminalClearInput) => {
+    assertLiveCommandReady();
+    await backend.clearTerminal(input);
+  }, [assertLiveCommandReady, backend]);
+
+  const restartTerminal = useCallback(async (input: TerminalRestartInput) => {
+    assertLiveCommandReady();
+    const snapshot = await backend.restartTerminal(input);
+    setTerminalSessionsByKey((existing) => upsertConsoleTerminalSessionSnapshot(existing, snapshot));
+    return snapshot;
+  }, [assertLiveCommandReady, backend]);
+
+  const closeTerminal = useCallback(async (input: TerminalCloseInput) => {
+    assertLiveCommandReady();
+    await backend.closeTerminal(input);
+    setTerminalSessionsByKey((existing) => removeConsoleTerminalSession(existing, {
+      threadId: input.threadId,
+      terminalId: input.terminalId ?? DEFAULT_TERMINAL_ID,
+    }));
+  }, [assertLiveCommandReady, backend]);
 
   const createProject = useCallback(
     async (input: {
@@ -1406,6 +1495,14 @@ export function useConsoleData(): ConsoleDataState {
     isInterruptingTurn,
     isStoppingSession,
     error,
+    getTerminalSession,
+    subscribeToTerminalEvents,
+    openTerminal,
+    writeTerminal,
+    resizeTerminal,
+    clearTerminal,
+    restartTerminal,
+    closeTerminal,
     setActiveThreadId,
     createProject,
     createThread,

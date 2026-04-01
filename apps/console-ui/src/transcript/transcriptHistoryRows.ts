@@ -12,6 +12,7 @@ import { parseTranscriptMessageBlocks, type TranscriptMarkdownTable } from "./tr
 
 export const ALWAYS_UNVIRTUALIZED_TAIL_ROWS = 8;
 export const TRANSCRIPT_HISTORY_ROW_GAP_PX = 4;
+const transcriptHistoryRowCache = new WeakMap<OrchestrationThread, ReadonlyArray<TranscriptHistoryRow>>();
 
 const TRANSCRIPT_TABLE_CELL_HORIZONTAL_PADDING_PX = 20;
 const TRANSCRIPT_TABLE_CELL_MIN_WIDTH_PX = 96;
@@ -935,6 +936,11 @@ export function deriveTranscriptHistoryRows(
     return [];
   }
 
+  const cached = transcriptHistoryRowCache.get(thread);
+  if (cached) {
+    return cached;
+  }
+
   const sortedActivities = [...thread.activities].toSorted(compareActivitiesByTimelineOrder);
   const hiddenToolWorkItemIds = deriveHiddenToolWorkItemIds(sortedActivities);
   const activityTimelineItems: Array<TimelineItem> = [];
@@ -1109,6 +1115,7 @@ export function deriveTranscriptHistoryRows(
     });
   }
 
+  transcriptHistoryRowCache.set(thread, rows);
   return rows;
 }
 

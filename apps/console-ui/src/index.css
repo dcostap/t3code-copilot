@@ -300,6 +300,24 @@ body {
   overflow: auto;
 }
 
+.terminal-pane {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  padding: 10px 12px 8px;
+}
+
+.terminal-pane .xterm {
+  flex: 1 1 auto;
+  width: 100%;
+}
+
+.terminal-pane .xterm-viewport {
+  border-radius: 10px;
+}
+
 .conversation-session--split .conversation-pane .transcript-shell {
   min-height: 0;
   overflow: hidden;
@@ -362,6 +380,10 @@ body {
   z-index: 3;
   display: grid;
   place-items: center;
+  padding: 20px;
+  background:
+    linear-gradient(180deg, rgba(10, 14, 19, 0.72), rgba(10, 14, 19, 0.56));
+  backdrop-filter: blur(2px);
   pointer-events: none;
 }
 
